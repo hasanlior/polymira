@@ -1,0 +1,82 @@
+import type { AppState, DirEntry, Game, PerfSnapshot, ScanReport, Screenshot, Settings, Toast } from './types'
+
+/** Renderer → main request/response channels. The single source of truth for the IPC surface. */
+export interface IpcContract {
+  'state:get': () => AppState
+  'settings:set': (patch: Partial<Settings>) => Settings
+  'library:addFolder': (folder: string, platformId: string) => ScanReport
+  'library:removeFolder': (folder: string) => number
+  'library:rescan': () => ScanReport
+  'library:addFile': (file: string, platformId: string) => Game
+  'library:remove': (id: string) => void
+  'library:favorite': (id: string, favorite: boolean) => void
+  'library:move': (id: string, platformId: string) => void
+  'library:setCover': (id: string, image: string) => void
+  'library:fetchCovers': () => number
+  'fs:list': (dir: string | null) => { path: string | null; parent: string | null; entries: DirEntry[] }
+  'dialog:folder': () => string | null
+  'dialog:file': (kind: 'exe' | 'image' | 'any') => string | null
+  'emu:detect': (extraRoot?: string) => number
+  'emu:setPath': (id: string, exe: string | null) => void
+  'game:launch': (id: string) => void
+  'session:pause': (paused: boolean) => boolean
+  'session:stop': () => void
+  'session:screenshot': () => Screenshot | null
+  'session:home': () => void
+  'session:returnToGame': () => void
+  'session:perf': () => PerfSnapshot
+  'overlay:close': () => void
+  'media:screenshots': (gameId?: string) => Screenshot[]
+  'media:deleteScreenshot': (file: string) => void
+  'app:quit': () => void
+}
+
+export type IpcChannel = keyof IpcContract
+
+export const IPC_CHANNELS: IpcChannel[] = [
+  'state:get',
+  'settings:set',
+  'library:addFolder',
+  'library:removeFolder',
+  'library:rescan',
+  'library:addFile',
+  'library:remove',
+  'library:favorite',
+  'library:move',
+  'library:setCover',
+  'library:fetchCovers',
+  'fs:list',
+  'dialog:folder',
+  'dialog:file',
+  'emu:detect',
+  'emu:setPath',
+  'game:launch',
+  'session:pause',
+  'session:stop',
+  'session:screenshot',
+  'session:home',
+  'session:returnToGame',
+  'session:perf',
+  'overlay:close',
+  'media:screenshots',
+  'media:deleteScreenshot',
+  'app:quit'
+]
+
+/** Main → renderer push events. */
+export interface IpcEvents {
+  state: AppState
+  toast: Toast
+  'overlay:opened': null
+}
+
+export type IpcEvent = keyof IpcEvents
+export const IPC_EVENTS: IpcEvent[] = ['state', 'toast', 'overlay:opened']
+
+/** Custom protocol used to serve covers and screenshots to the renderer. */
+export const MEDIA_SCHEME = 'app-media'
+
+export interface Bridge {
+  invoke<C extends IpcChannel>(channel: C, ...args: Parameters<IpcContract[C]>): Promise<ReturnType<IpcContract[C]>>
+  on<E extends IpcEvent>(event: E, cb: (payload: IpcEvents[E]) => void): () => void
+}
