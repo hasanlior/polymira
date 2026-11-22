@@ -1,0 +1,32 @@
+[
+  {
+    "id": "community-aurora",
+    "kind": "theme",
+    "name": "Aurora",
+    "short": "AU",
+    "hue": 160,
+    "author": "POLYMIRA community",
+    "description": "Kuzey ışıkları yeşili.",
+    "theme": { "id": "community-aurora", "name": "Aurora", "hue": 158 }
+  },
+  {
+    "id": "compact-menu",
+    "kind": "mod",
+    "name": "Kompakt menü",
+    "short": "KM",
+    "hue": 30,
+    "author": "POLYMIRA community",
+    "description": "XMB satırlarını sıklaştırır, daha çok oyun görünür.",
+    "mod": { "css": "mods/compact-menu/style.css", "version": "1.0.0" }
+  },
+  {
+    "id": "no-glow",
+    "kind": "mod",
+    "name": "Parlamasız yazı",
+    "short": "NG",
+    "hue": 220,
+    "author": "POLYMIRA community",
+    "description": "Seçili yazıların parlama efektini kapatır.",
+    "mod": { "css": "mods/no-glow/style.css", "version": "1.0.0" }
+  }
+]

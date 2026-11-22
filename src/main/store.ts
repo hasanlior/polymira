@@ -24,6 +24,7 @@ export const DEFAULT_SETTINGS: Settings = {
   raKey: '',
   autoPadConfig: true,
   padConfigured: {},
+  autoUpdate: true,
   watchedFolders: [],
   emulatorPaths: {},
   platformEmulator: {},

@@ -1,0 +1,10 @@
+/* Compact menu: smaller item text and icons in the XMB. */
+.x-item .x-title {
+  font-size: calc(2 * var(--u));
+}
+.x-item .x-sub {
+  font-size: calc(1.4 * var(--u));
+}
+.x-icon {
+  transform: scale(0.9);
+}

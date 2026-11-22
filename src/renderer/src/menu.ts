@@ -870,6 +870,29 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     children: [
       { id: 'about:name', title: BRAND.name, subtitle: BRAND.tagline, icon: 'info', value: `v${ctx.state.version}` },
       { id: 'about:games', title: 'Kütüphanedeki oyunlar', icon: 'game', value: String(ctx.state.games.length) },
+      (() => {
+        const u = ctx.state.update
+        const value =
+          u.status === 'ready' ? `v${u.version} hazır` : u.status === 'downloading' ? `%${Math.round((u.progress ?? 0) * 100)}` : u.status === 'checking' ? 'Denetleniyor…' : u.status === 'none' ? 'Güncel' : u.status === 'error' ? 'Hata' : u.status === 'disabled' ? 'Kapalı' : ''
+        return u.status === 'ready'
+          ? {
+              id: 'about:update',
+              title: `Güncellemeyi kur (v${u.version})`,
+              icon: 'up' as IconName,
+              value,
+              subtitle: u.notes ?? 'Kurulumdan sonra uygulama yeniden açılır.',
+              onActivate: () => ctx.confirm(`${BRAND.name} v${u.version} kurulsun mu? Uygulama kapanıp yeniden açılır.`, () => ctx.run(() => window.bridge.invoke('update:install')))
+            }
+          : {
+              id: 'about:update',
+              title: 'Güncellemeleri denetle',
+              icon: 'refresh' as IconName,
+              value,
+              subtitle: u.message ?? 'Yeni sürümler GitHub Releases üzerinden indirilir ve doğrulanır.',
+              onActivate: () => ctx.run(() => window.bridge.invoke('update:check'))
+            }
+      })(),
+      toggle('about:autoupdate', 'Açılışta güncellemeleri denetle', 'refresh', ctx.state.settings.autoUpdate, (v) => ctx.setSettings({ autoUpdate: v })),
       {
         id: 'about:legal',
         title: 'Yasal',
@@ -880,7 +903,7 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
   }
   const quit: XItem = {
     id: 'set:quit',
-    title: `${BRAND.name}'tan çık`,
+    title: `${BRAND.name} uygulamasından çık`,
     icon: 'power',
     onActivate: () => ctx.confirm('Uygulamadan çıkılsın mı?', () => void window.bridge.invoke('app:quit'))
   }

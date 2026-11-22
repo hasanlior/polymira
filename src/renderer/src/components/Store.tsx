@@ -194,8 +194,29 @@ export function Store({
         details: [`Klasör: mods/${m.id}`],
         status: m.enabled ? 'Açık' : 'Kapalı',
         installed: m.enabled,
-        actions: [{ label: m.enabled ? 'Kapat' : 'Aç', icon: (m.enabled ? 'power' : 'check') as IconName, run: () => ctx.run(() => window.bridge.invoke('mods:toggle', m.id, !m.enabled)) }]
+        actions: [
+          { label: m.enabled ? 'Kapat' : 'Aç', icon: (m.enabled ? 'power' : 'check') as IconName, run: () => ctx.run(() => window.bridge.invoke('mods:toggle', m.id, !m.enabled)) },
+          ...(catalog.some((i) => i.kind === 'mod' && i.id === m.id)
+            ? [{ label: 'Kaldır', icon: 'trash' as IconName, danger: true, run: () => ctx.run(() => window.bridge.invoke('store:uninstall', m.id), `${m.name} kaldırıldı.`) }]
+            : [])
+        ]
       })),
+      // Community mods from the store catalog that are not installed yet.
+      ...catalog
+        .filter((i) => i.kind === 'mod' && !state.mods.some((m) => m.id === i.id))
+        .map((i) => ({
+          key: `cmod:${i.id}`,
+          name: i.name,
+          short: i.short,
+          hue: i.hue,
+          glyph: 'brush' as IconName,
+          author: i.author,
+          description: i.description,
+          details: ['Topluluk modu · görünümü değiştirir, kod çalıştırmaz', i.mod?.version ? `Sürüm ${i.mod.version}` : ''].filter(Boolean),
+          status: 'Ücretsiz',
+          installed: false,
+          actions: [{ label: 'İndir ve aç', icon: 'up' as IconName, run: () => ctx.run(() => window.bridge.invoke('store:install', i.id), `${i.name} kuruldu.`) }]
+        })),
       {
         key: 'tool:mods',
         name: 'Mod klasörü',

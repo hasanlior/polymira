@@ -2,6 +2,7 @@ import { net, shell } from 'electron'
 import fs from 'fs'
 import path from 'path'
 import { BUILTIN_CATALOG, type StoreItem, type ThemeDef } from '@shared/catalog'
+import { BRAND } from '@shared/brand'
 import type { Game, ModInfo } from '@shared/types'
 import type { LaunchPlan } from './emulators'
 import { paths, store } from './store'
@@ -12,12 +13,18 @@ let remote: StoreItem[] = []
 
 function validItem(x: unknown): x is StoreItem {
   const i = x as StoreItem
-  return Boolean(i && typeof i.id === 'string' && (i.kind === 'app' || i.kind === 'theme') && typeof i.name === 'string')
+  return Boolean(i && typeof i.id === 'string' && (i.kind === 'app' || i.kind === 'theme' || (i.kind === 'mod' && typeof i.mod?.css === 'string' && (/^https:\/\//.test(i.mod.css) || !i.mod.css.includes(':')))) && typeof i.name === 'string' && /^[a-z0-9_-]+$/i.test(i.id))
 }
 
 /** Built-in items plus the optional remote catalog (remote entries never replace built-in ids). */
+/** The user's catalog URL, or the community catalog in the project's GitHub repository. */
+export function catalogUrl(): string {
+  if (store.settings.storeCatalogUrl) return store.settings.storeCatalogUrl
+  return BRAND.repo ? `https://raw.githubusercontent.com/${BRAND.repo}/main/community/catalog.json` : ''
+}
+
 export async function catalog(refresh = false): Promise<StoreItem[]> {
-  const url = store.settings.storeCatalogUrl
+  const url = catalogUrl()
   if (url && (refresh || remote.length === 0)) {
     try {
       const res = await net.fetch(url)
@@ -143,6 +150,25 @@ export function modsCss(): string {
       }
     })
     .join('\n')
+}
+
+/** Downloads a community mod into mods/<id>/ (style.css + mod.json). */
+export async function installMod(item: StoreItem): Promise<void> {
+  if (!item.mod) throw new Error('Geçersiz mod.')
+  // Relative paths are resolved against the catalog file (mods stored next to catalog.json).
+  const res = await net.fetch(new URL(item.mod.css, catalogUrl() || 'https://invalid/').toString())
+  if (!res.ok) throw new Error(`Mod indirilemedi (HTTP ${res.status}).`)
+  const css = await res.text()
+  if (css.length > 512 * 1024) throw new Error('Mod dosyası çok büyük.')
+  const dir = path.join(modsDir(), item.id)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'style.css'), css)
+  fs.writeFileSync(path.join(dir, 'mod.json'), JSON.stringify({ name: item.name, description: item.description, author: item.author, version: item.mod.version, source: 'store' }, null, 2))
+}
+
+export function removeMod(id: string): void {
+  if (!/^[a-z0-9_-]+$/i.test(id)) return
+  fs.rmSync(path.join(modsDir(), id), { recursive: true, force: true })
 }
 
 export function openFolder(which: 'mods' | 'themes'): void {

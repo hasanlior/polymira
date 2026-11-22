@@ -16,7 +16,8 @@ import { applyDiscovery, runDiscovery } from './discover'
 import { riotClientPath } from './launchers'
 import { attachSoundtracks } from './music'
 import { DownloadManager, EMULATOR_SOURCES } from './downloads'
-import { appLaunchPlan, appPath, catalog, findItem, installedThemes, listMods, modsCss, openFolder } from './apps'
+import { appLaunchPlan, appPath, catalog, findItem, installMod, installedThemes, listMods, modsCss, openFolder, removeMod } from './apps'
+import { checkForUpdate, installUpdate, updateState } from './updater'
 import { addCandidates } from './library'
 import { appIconFile, appIconRevs, fetchAppIcon } from './appIcons'
 import { drmStatus, initDrm } from './drm'
@@ -139,6 +140,7 @@ function snapshot(): AppState {
     appIcons: appIconRevs(),
     notices,
     saves: savesSnapshot(),
+    update: updateState(),
     drm: drmStatus(),
     mods: listMods(),
     downloads: downloads.jobs,
@@ -701,6 +703,9 @@ const handlers: Handlers = {
     if (!item) throw new Error('Mağazada bulunamadı.')
     if (item.kind === 'app') {
       addCandidates([{ platformId: 'apps', title: item.name, path: appPath(item.id), kind: 'uri', meta: { source: 'manual', storeId: item.id } }])
+    } else if (item.kind === 'mod') {
+      await installMod(item)
+      if (!store.settings.enabledMods.includes(item.id)) store.updateSettings({ enabledMods: [...store.settings.enabledMods, item.id] })
     } else if (!store.settings.installedThemes.includes(id)) {
       store.updateSettings({ installedThemes: [...store.settings.installedThemes, id] })
     }
@@ -708,7 +713,10 @@ const handlers: Handlers = {
   },
   'store:uninstall': (id) => {
     const item = findItem(id)
-    if (item?.kind === 'theme') {
+    if (item?.kind === 'mod') {
+      removeMod(id)
+      store.updateSettings({ enabledMods: store.settings.enabledMods.filter((m) => m !== id) })
+    } else if (item?.kind === 'theme') {
       store.updateSettings({
         installedThemes: store.settings.installedThemes.filter((t) => t !== id),
         theme: store.settings.theme === id ? 'auto' : store.settings.theme
@@ -757,6 +765,11 @@ const handlers: Handlers = {
   },
   'saves:openFolder': (emuId) => openSaveFolder(emuId),
   'stats:get': () => playStats(),
+  'update:check': () => checkForUpdate(broadcast),
+  'update:install': () => {
+    if (installUpdate()) void gracefulQuit()
+    else throw new Error('Kurulmaya hazır bir güncelleme yok.')
+  },
   'game:info': async (id, force) => {
     const g = store.games.find((x) => x.id === id)
     if (!g) return null
@@ -966,6 +979,11 @@ app.whenReady().then(() => {
     void attachSoundtracks().then((n) => n && broadcast())
     void refreshAppIcons()
     refreshSaves()
+    if (store.settings.autoUpdate) {
+      void checkForUpdate(broadcast).then((u) => {
+        if (u.status === 'ready') notify({ kind: 'update', title: `${BRAND.name} ${u.version} hazır`, text: 'Ayarlar → Hakkında → Güncellemeyi kur' })
+      })
+    }
     broadcast()
     if (process.env.APP_RESTARTED) {
       delete process.env.APP_RESTARTED

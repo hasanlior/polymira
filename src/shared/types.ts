@@ -110,6 +110,8 @@ export interface Settings {
   autoPadConfig: boolean
   /** Emulators whose controller settings were written (id → exe path). */
   padConfigured: Record<string, string>
+  /** Check GitHub Releases for a new version on start. */
+  autoUpdate: boolean
   watchedFolders: WatchedFolder[]
   emulatorPaths: Record<string, string>
   /** Per-platform emulator choice; falls back to the platform's first option. */
@@ -234,6 +236,7 @@ export interface AppState {
   /** Recent notifications, newest first. */
   notices: Notice[]
   saves: SaveInfo[]
+  update: UpdateState
   drm: { widevine: boolean; vmp: boolean; inConsole: boolean; detail: string }
   mods: ModInfo[]
   downloads: DownloadJob[]
@@ -252,6 +255,14 @@ export interface GameEmuOptions {
   shader?: 'none' | 'crt' | 'lcd' | 'smooth'
   /** Extra command line arguments appended for this game. */
   extraArgs?: string
+}
+
+export interface UpdateState {
+  status: 'idle' | 'disabled' | 'checking' | 'none' | 'downloading' | 'ready' | 'error'
+  version?: string
+  notes?: string
+  progress?: number
+  message?: string
 }
 
 export interface Trophy {

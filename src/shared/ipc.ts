@@ -45,6 +45,8 @@ export interface IpcContract {
   'app:closed': (id: string, playedSec: number) => void
   'notices:clear': () => void
   'stats:get': () => import('./types').PlayStats
+  'update:check': () => import('./types').UpdateState
+  'update:install': () => void
   'game:info': (id: string, force?: boolean) => Game | null
   'trophies:games': () => import('./types').TrophyGame[]
   'trophies:list': (key: string) => import('./types').Trophy[]
@@ -103,6 +105,8 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'app:closed',
   'notices:clear',
   'stats:get',
+  'update:check',
+  'update:install',
   'game:info',
   'trophies:games',
   'trophies:list',

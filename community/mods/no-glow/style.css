@@ -1,0 +1,5 @@
+/* No glow: plain text for the selected item. */
+.x-item.sel .x-title,
+.x-cat.sel .x-cat-label {
+  text-shadow: none !important;
+}

@@ -28,9 +28,16 @@ export interface StoreApp {
   userAgent?: string
 }
 
+/** A community mod: a CSS file that restyles the console. */
+export interface StoreMod {
+  /** URL of the mod's style.css (https). */
+  css: string
+  version?: string
+}
+
 export interface StoreItem {
   id: string
-  kind: 'app' | 'theme'
+  kind: 'app' | 'theme' | 'mod'
   name: string
   description: string
   /** Short badge text and hue used as the item's icon. */
@@ -43,6 +50,7 @@ export interface StoreItem {
   section?: string
   app?: StoreApp
   theme?: ThemeDef
+  mod?: StoreMod
 }
 
 const TV_UA = 'Mozilla/5.0 (SMART-TV; Linux; Tizen 6.5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 TV Safari/537.36'
