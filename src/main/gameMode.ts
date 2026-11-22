@@ -14,6 +14,8 @@ import { store } from './store'
  */
 
 const HIGH_PERFORMANCE = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+/** Windows' Balanced and Power saver plans. */
+const LIMITED_PLANS = new Set(['381b4222-f694-41f0-9685-ff5bb260df2e', 'a1841308-3541-4fab-bc81-f71556f20b4a'])
 
 function run(cmd: string, args: string[]): Promise<{ ok: boolean; out: string }> {
   return new Promise((resolve) =>
@@ -50,7 +52,9 @@ export async function enterGameMode(pid: number): Promise<string[]> {
 
   if (s.gmPowerPlan) {
     const prev = await activeScheme()
-    if (prev && prev.toLowerCase() !== HIGH_PERFORMANCE) {
+    // Only upgrade from the power-limited plans. A custom or "Ultimate Performance" / vendor
+    // gaming plan is already at least as fast, so it is left alone.
+    if (prev && LIMITED_PLANS.has(prev.toLowerCase())) {
       updateRuntime({ previousPowerScheme: prev })
       const { ok } = await run('powercfg', ['/setactive', HIGH_PERFORMANCE])
       if (ok) applied.push('yüksek performans güç planı')

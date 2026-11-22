@@ -22,7 +22,7 @@ const WINDOW = 9 // rows rendered above/below the selection
 function ItemIcon({ item, big }: { item: XItem; big?: boolean }) {
   if (item.cover) {
     return (
-      <div className={`x-icon cover ${big ? 'big' : ''}`}>
+      <div className={`x-icon cover ${big ? 'big' : ''} ${item.coverIsIcon ? 'icon-only' : ''}`}>
         <img src={item.cover} alt="" draggable={false} />
       </div>
     )

@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { PLATFORMS, getPlatform } from '@shared/platforms'
 import type { DiscoverGroup, DiscoverResult } from '@shared/types'
-import { findEpicGames, findGogGames, findRiotGames, findSteamGames, findUbisoftGames, findXboxGames } from './launchers'
+import { findEpicGames, findGogGames, findRegistryGames, findRiotGames, findSteamGames, findUbisoftGames, findXboxGames } from './launchers'
 import { scanFolder, type Candidate } from './scanner'
 import { detectEmulators } from './emulators'
 import { addCandidates, gameIdFor } from './library'
@@ -96,13 +96,28 @@ export async function runDiscovery(progress: (text: string) => void): Promise<Di
   progress('Riot Games ve Ubisoft Connect okunuyor…')
   const riot = fresh(await findRiotGames())
   const ubisoft = fresh(await findUbisoftGames())
+  progress('Bilgisayardaki diğer oyunlar aranıyor (EA, Battle.net, Rockstar, bağımsız kurulumlar)…')
+  // Skip installs the store readers already found, and games already in the library.
+  const knownDirs = new Set(
+    [...steam, ...epic, ...gog, ...xbox, ...riot, ...ubisoft, ...store.games.map((g) => ({ meta: g.meta, path: g.path, kind: g.kind }))]
+      .map((c) => c.meta.installDir ?? (c.kind === 'exe' ? path.dirname(c.path) : ''))
+      .filter(Boolean)
+      .map((d) => path.resolve(d!).toLowerCase())
+  )
+  const others = fresh(await findRegistryGames(knownDirs))
+  const ea = others.filter((c) => c.meta.source === 'ea')
+  const battlenet = others.filter((c) => c.meta.source === 'battlenet')
+  const rest = others.filter((c) => c.meta.source === 'other')
   for (const [key, label, list] of [
     ['steam', 'Steam oyunları', steam],
     ['epic', 'Epic Games oyunları', epic],
     ['gog', 'GOG oyunları', gog],
     ['xbox', 'Xbox uygulaması / Game Pass oyunları', xbox],
     ['riot', 'Riot Games oyunları', riot],
-    ['ubisoft', 'Ubisoft Connect oyunları', ubisoft]
+    ['ubisoft', 'Ubisoft Connect oyunları', ubisoft],
+    ['ea', 'EA oyunları', ea],
+    ['battlenet', 'Battle.net oyunları', battlenet],
+    ['other', 'Diğer kurulu oyunlar', rest]
   ] as const) {
     if (list.length) {
       byGroup.set(key, list)

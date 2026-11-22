@@ -1,3 +1,4 @@
+import type { StoreItem } from './catalog'
 import type { AppState, DirEntry, DiscoverResult, Game, PerfSnapshot, ScanReport, Screenshot, Settings, Toast } from './types'
 
 /** Renderer → main request/response channels. The single source of truth for the IPC surface. */
@@ -20,6 +21,8 @@ export interface IpcContract {
   'dialog:file': (kind: 'exe' | 'image' | 'any') => string | null
   'emu:detect': (extraRoot?: string) => number
   'emu:setPath': (id: string, exe: string | null) => void
+  'emu:download': (ids: string[]) => number
+  'emu:cancelDownload': (id: string) => void
   'game:launch': (id: string) => void
   'session:pause': (paused: boolean) => boolean
   'session:stop': () => void
@@ -32,6 +35,12 @@ export interface IpcContract {
   'media:deleteScreenshot': (file: string) => void
   'discover:run': () => DiscoverResult
   'discover:apply': (keys: string[]) => { games: number; emulators: number; folders: number }
+  'store:catalog': (refresh?: boolean) => StoreItem[]
+  'store:install': (id: string) => void
+  'store:uninstall': (id: string) => void
+  'mods:css': () => string
+  'mods:toggle': (id: string, enabled: boolean) => void
+  'folder:open': (which: 'mods' | 'themes') => void
   'app:quit': () => void
 }
 
@@ -56,6 +65,8 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'dialog:file',
   'emu:detect',
   'emu:setPath',
+  'emu:download',
+  'emu:cancelDownload',
   'game:launch',
   'session:pause',
   'session:stop',
@@ -68,6 +79,12 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'media:deleteScreenshot',
   'discover:run',
   'discover:apply',
+  'store:catalog',
+  'store:install',
+  'store:uninstall',
+  'mods:css',
+  'mods:toggle',
+  'folder:open',
   'app:quit'
 ]
 
@@ -78,10 +95,12 @@ export interface IpcEvents {
   'overlay:opened': null
   /** Progress text for long tasks (PC scan). */
   progress: string
+  /** Shutdown sequence: what is happening right now; `done` when the app is about to close. */
+  shutdown: { text: string; done?: boolean }
 }
 
 export type IpcEvent = keyof IpcEvents
-export const IPC_EVENTS: IpcEvent[] = ['state', 'toast', 'overlay:opened', 'progress']
+export const IPC_EVENTS: IpcEvent[] = ['state', 'toast', 'overlay:opened', 'progress', 'shutdown']
 
 /** Custom protocol used to serve covers and screenshots to the renderer. */
 export const MEDIA_SCHEME = 'app-media'

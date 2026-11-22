@@ -1,8 +1,9 @@
 import { BRAND } from '@shared/brand'
 import { EMULATORS, FAMILIES, PLATFORMS, getEmulator, getPlatform, resolveRunner, runnerKey, runnerLabel, type PlatformDef } from '@shared/platforms'
 import type { AppState, Game, OverlayHotkey, Settings, SupportLevel, WindowMode } from '@shared/types'
-import { coverUrl, formatPlayTime } from './api'
+import { coverUrl, downloadLine, formatPlayTime } from './api'
 import type { IconName } from './icons'
+import type { StoreItem } from '@shared/catalog'
 
 export interface XItem {
   id: string
@@ -11,6 +12,7 @@ export interface XItem {
   icon: IconName
   badge?: { text: string; hue: number }
   cover?: string
+  coverIsIcon?: boolean
   value?: string
   checked?: boolean
   game?: Game
@@ -52,6 +54,8 @@ export interface BrowseRequest {
 
 export interface MenuCtx {
   state: AppState
+  catalog: StoreItem[]
+  refreshCatalog: () => void
   pads: string[]
   back: () => void
   openDetail: (gameId: string) => void
@@ -78,7 +82,7 @@ export function platformGames(state: AppState, platformId: string): Game[] {
   return state.games.filter((g) => g.platformId === platformId).sort(byTitle)
 }
 
-const SOURCE_LABEL: Record<string, string> = { steam: 'Steam', epic: 'Epic Games', gog: 'GOG', xbox: 'Xbox uygulaması', riot: 'Riot Games', ubisoft: 'Ubisoft Connect' }
+const SOURCE_LABEL: Record<string, string> = { steam: 'Steam', epic: 'Epic Games', gog: 'GOG', xbox: 'Xbox uygulaması', riot: 'Riot Games', ubisoft: 'Ubisoft Connect', ea: 'EA', battlenet: 'Battle.net', other: 'PC' }
 
 export function gameSubtitle(g: Game): string {
   const p = getPlatform(g.platformId)
@@ -91,6 +95,34 @@ export function gameSubtitle(g: Game): string {
 
 export function gameItem(g: Game, ctx: MenuCtx, prefix = ''): XItem {
   const p = getPlatform(g.platformId)
+  if (g.platformId === 'apps') {
+    const item = ctx.catalog.find((i) => i.id === g.meta.storeId)
+    return {
+      id: `${prefix}app:${g.id}`,
+      title: g.title,
+      subtitle: item?.description,
+      icon: 'apps',
+      badge: { text: item?.short ?? 'APP', hue: item?.hue ?? 200 },
+      hue: item?.hue,
+      game: g,
+      onActivate: () => ctx.launch(g.id),
+      onOptions: () =>
+        ctx.openOptions(g.title, [
+          { label: 'Aç', icon: 'play', onSelect: () => ctx.launch(g.id) },
+          {
+            label: g.favorite ? 'Favorilerden çıkar' : 'Favorilere ekle',
+            icon: 'star',
+            onSelect: () => ctx.run(() => window.bridge.invoke('library:favorite', g.id, !g.favorite))
+          },
+          {
+            label: 'Kaldır',
+            icon: 'trash',
+            danger: true,
+            onSelect: () => ctx.run(() => window.bridge.invoke('store:uninstall', g.meta.storeId ?? ''), `${g.title} kaldırıldı.`)
+          }
+        ])
+    }
+  }
   return {
     id: `${prefix}game:${g.id}`,
     title: g.title,
@@ -98,6 +130,7 @@ export function gameItem(g: Game, ctx: MenuCtx, prefix = ''): XItem {
     icon: 'game',
     badge: p ? { text: p.short, hue: p.hue } : undefined,
     cover: g.hasCover ? coverUrl(g.id, g.coverRev) : undefined,
+    coverIsIcon: g.coverIsIcon,
     game: g,
     hue: p?.hue,
     onActivate: () => ctx.openDetail(g.id),
@@ -225,7 +258,7 @@ export function addFolderFlow(ctx: MenuCtx, platformId?: string): void {
       if (platformId) return scan(platformId)
       ctx.openOptions('Bu klasör hangi platforma ait?', [
         { label: 'Otomatik algıla', icon: 'search', onSelect: () => scan('auto') },
-        ...FAMILIES.map((f) => ({
+        ...FAMILIES.filter((f) => f.id !== 'apps').map((f) => ({
           label: f.name,
           icon: 'folder' as IconName,
           children: PLATFORMS.filter((p) => p.family === f.id && p.support !== 'unsupported').map((p) => ({
@@ -244,6 +277,30 @@ function addFileFlow(ctx: MenuCtx, p: PlatformDef): void {
     mode: p.kind === 'folder' || p.kind === 'titleId' ? 'folder' : 'file',
     extensions: p.extensions.length ? p.extensions : undefined,
     onPick: (file) => ctx.run(() => window.bridge.invoke('library:addFile', file, p.id), 'Oyun eklendi.')
+  })
+}
+
+/** One row per downloadable emulator, with live progress. */
+export function downloadItems(ctx: MenuCtx): XItem[] {
+  return ctx.state.downloadable.map((id) => {
+    const emu = getEmulator(id)
+    const job = ctx.state.downloads.find((j) => j.id === id)
+    const installed = ctx.state.emulators.find((e) => e.id === id)?.found
+    const busy = job && (job.status === 'queued' || job.status === 'downloading' || job.status === 'extracting')
+    const usedBy = PLATFORMS.filter((p) => p.runners.some((r) => r.emulatorId === id)).map((p) => p.short)
+    return {
+      id: `dl:${id}`,
+      title: emu?.name ?? id,
+      icon: busy ? 'up' : installed ? 'check' : 'chip',
+      value: busy ? (job!.status === 'downloading' ? `%${job!.total ? Math.floor((job!.received / job!.total) * 100) : 0}` : '…') : installed ? 'Kurulu' : 'İndir',
+      subtitle: job ? downloadLine(job) : usedBy.join(', '),
+      onActivate: () =>
+        busy
+          ? ctx.confirm(`${emu?.name} indirmesi iptal edilsin mi?`, () => void window.bridge.invoke('emu:cancelDownload', id))
+          : installed
+            ? ctx.confirm(`${emu?.name} zaten kurulu. Yeniden indirilsin mi?`, () => void window.bridge.invoke('emu:download', [id]))
+            : ctx.run(() => window.bridge.invoke('emu:download', [id]), `${emu?.name} indirme sırasına eklendi.`)
+    } satisfies XItem
   })
 }
 
@@ -370,6 +427,85 @@ export const THEMES: { value: string; label: string; hue: number | null }[] = [
   { value: 'night', label: 'Gece', hue: 0 }
 ]
 
+/** Built-in themes + themes added from the store or the themes folder. */
+export function allThemes(ctx: { state: AppState }): { value: string; label: string; hue: number | null; night?: boolean; css?: string }[] {
+  return [
+    ...THEMES,
+    ...ctx.state.themes.map((t) => ({ value: t.id, label: t.name, hue: t.hue, night: t.night, css: t.css }))
+  ]
+}
+
+function storeApps(ctx: MenuCtx): XItem[] {
+  const installed = new Set(platformGames(ctx.state, 'apps').map((g) => g.meta.storeId))
+  return ctx.catalog
+    .filter((i) => i.kind === 'app')
+    .map((i) => ({
+      id: `store:${i.id}`,
+      title: i.name,
+      subtitle: i.description + (i.author ? ` · ${i.author}` : ''),
+      icon: 'apps' as IconName,
+      badge: { text: i.short, hue: i.hue },
+      hue: i.hue,
+      value: installed.has(i.id) ? 'Yüklü' : 'Ekle',
+      onActivate: () =>
+        installed.has(i.id)
+          ? ctx.confirm(`${i.name} kaldırılsın mı?`, () => ctx.run(() => window.bridge.invoke('store:uninstall', i.id), 'Kaldırıldı.'))
+          : ctx.run(() => window.bridge.invoke('store:install', i.id), `${i.name} Uygulamalar'a eklendi.`)
+    }))
+}
+
+function storeCategory(ctx: MenuCtx): XItem[] {
+  const s = ctx.state.settings
+  const installedThemes = new Set(s.installedThemes)
+  const themes: XItem[] = ctx.catalog
+    .filter((i) => i.kind === 'theme')
+    .map((i) => ({
+      id: `store:${i.id}`,
+      title: i.name,
+      subtitle: i.description,
+      icon: 'palette' as IconName,
+      badge: { text: i.short, hue: i.hue },
+      hue: i.theme?.hue ?? i.hue,
+      value: s.theme === i.id ? 'Kullanılıyor' : installedThemes.has(i.id) ? 'Yüklü' : 'Ekle',
+      onActivate: () =>
+        ctx.run(async () => {
+          if (!installedThemes.has(i.id)) await window.bridge.invoke('store:install', i.id)
+          await window.bridge.invoke('settings:set', { theme: i.id })
+        }, `${i.name} teması uygulandı.`)
+    }))
+  return [
+    { id: 'store:apps', title: 'Uygulamalar', subtitle: 'YouTube, Netflix, Disney+, Prime Video, Spotify, Twitch, tarayıcı', icon: 'apps', children: storeApps(ctx) },
+    { id: 'store:themes', title: 'Temalar', subtitle: 'Arka plan ve renk temaları', icon: 'palette', children: themes },
+    {
+      id: 'store:mods',
+      title: 'Modlar ve Özelleştirme',
+      subtitle: 'Görünümü değiştiren CSS modları ve kendi tema dosyaların',
+      icon: 'brush',
+      children: [
+        ...ctx.state.mods.map((m) =>
+          toggle(`mod:${m.id}`, m.name, 'brush', m.enabled, (v) => ctx.run(() => window.bridge.invoke('mods:toggle', m.id, v)), m.description)
+        ),
+        {
+          id: 'mods:folder',
+          title: 'Mod klasörünü aç',
+          subtitle: 'Her mod bir klasör: mod.json ({ "name", "description" }) ve style.css',
+          icon: 'folder',
+          onActivate: () => void window.bridge.invoke('folder:open', 'mods')
+        },
+        {
+          id: 'themes:folder',
+          title: 'Tema klasörünü aç',
+          subtitle: 'Tema dosyası: { "name": "…", "hue": 210, "night": false, "css": "…" }',
+          icon: 'folder',
+          onActivate: () => void window.bridge.invoke('folder:open', 'themes')
+        },
+        { id: 'mods:reload', title: 'Modları ve temaları yeniden yükle', icon: 'refresh', onActivate: () => ctx.run(() => window.bridge.invoke('state:get'), 'Yenilendi.') }
+      ]
+    },
+    { id: 'store:refresh', title: 'Mağazayı yenile', icon: 'refresh', onActivate: () => ctx.refreshCatalog() }
+  ]
+}
+
 const HOTKEYS: { value: OverlayHotkey; label: string }[] = [
   { value: 'both', label: 'Guide tuşu veya Back + Start' },
   { value: 'guide', label: 'Yalnızca Guide (Xbox / PS) tuşu' },
@@ -389,7 +525,7 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
       choice('set:windowMode', 'Ekran modu', 'display', s.windowMode, WINDOW_MODES, (v) => set({ windowMode: v }), ctx),
       toggle('set:animations', 'Menü animasyonları', 'refresh', s.animations, (v) => set({ animations: v }), 'Kapatmak düşük donanımda akıcılığı artırır'),
       toggle('set:gameBg', 'Oyun arka planları', 'photo', s.gameBackgrounds, (v) => set({ gameBackgrounds: v }), 'Bir oyunun üstüne gelince görseli arka planda gösterilir'),
-      choice('set:theme', 'Arka plan teması', 'palette', s.theme, THEMES.map((t) => ({ value: t.value, label: t.label })), (v) => set({ theme: v }), ctx)
+      choice('set:theme', 'Arka plan teması', 'palette', s.theme, allThemes(ctx).map((t) => ({ value: t.value, label: t.label })), (v) => set({ theme: v }), ctx)
     ]
   }
   const sound: XItem = {
@@ -449,7 +585,7 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     children: [
       toggle('set:pause', 'Menü açılınca oyunu duraklat', 'pause', s.pauseOnOverlay, (v) => set({ pauseOnOverlay: v }), 'Oyun içi menü açıkken oyun işlemi askıya alınır'),
       toggle('set:gm:prio', 'Oyuna yüksek işlemci önceliği', 'chip', s.gmPriority, (v) => set({ gmPriority: v }), 'Oyun, arka plandaki programlardan önce işlemci zamanı alır'),
-      toggle('set:gm:power', 'Yüksek performans güç planı', 'power', s.gmPowerPlan, (v) => set({ gmPowerPlan: v }), 'Oyun sırasında açılır, oyun bitince önceki plana dönülür'),
+      toggle('set:gm:power', 'Yüksek performans güç planı', 'power', s.gmPowerPlan, (v) => set({ gmPowerPlan: v }), 'Dengeli planda oyun sırasında Yüksek performansa geçer, sonra geri döner'),
       {
         ...toggle(
           'set:gm:explorer',
@@ -489,6 +625,13 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
         subtitle: 'Program Files, Masaüstü, İndirilenler, C:\\Emulators gibi yaygın konumları tarar',
         icon: 'search',
         onActivate: () => ctx.run(() => window.bridge.invoke('emu:detect'), (n) => (n ? `${n} emülatör bulundu.` : 'Yeni emülatör bulunamadı.'))
+      },
+      {
+        id: 'set:emu:download',
+        title: 'Emülatör indir',
+        subtitle: 'Resmi sürümleri indirip kurar. İndirme arka planda sürer; bu sırada gezinebilir, oyun oynayabilirsin.',
+        icon: 'up',
+        children: downloadItems(ctx)
       },
       {
         id: 'set:emu:folder',
@@ -627,7 +770,9 @@ const CATEGORY_DEFS: { id: string; title: string; icon: IconName }[] = [
   { id: 'sega', title: 'Sega', icon: 'ring' },
   { id: 'other', title: 'Diğer Platformlar', icon: 'joystick' },
   { id: 'pc', title: 'PC Oyunları', icon: 'monitor' },
+  { id: 'apps', title: 'Uygulamalar', icon: 'apps' },
   { id: 'media', title: 'Medya', icon: 'photo' },
+  { id: 'store', title: 'Mağaza', icon: 'bag' },
   { id: 'settings', title: 'Ayarlar', icon: 'gear' }
 ]
 
@@ -650,6 +795,10 @@ function homeItems(ctx: MenuCtx): XItem[] {
       icon: 'exit',
       onActivate: () => ctx.confirm('Çalışan oyun kapatılsın mı? Kaydedilmemiş ilerleme kaybolur.', () => void window.bridge.invoke('session:stop'))
     })
+  }
+  const activeDownloads = ctx.state.downloads.filter((d) => d.status !== 'done')
+  if (activeDownloads.length) {
+    items.push({ id: 'home:downloads', title: 'İndirmeler', icon: 'up', value: String(activeDownloads.length), children: downloadItems(ctx) })
   }
   const recent = games.filter((g) => g.lastPlayedAt).sort((a, b) => b.lastPlayedAt! - a.lastPlayedAt!)
   items.push(...recent.slice(0, 4).map((g) => gameItem(g, ctx, 'home:')))
@@ -731,13 +880,21 @@ export function buildMenu(ctx: MenuCtx): XCategory[] {
       items = [
         { id: 'media:shots', title: 'Ekran Görüntüleri', subtitle: 'Oyun içi menüden aldığın görüntüler', icon: 'camera', onActivate: () => ctx.openScreenshots() }
       ]
+    } else if (def.id === 'apps') {
+      items = [
+        ...platformGames(ctx.state, 'apps').map((g) => gameItem(g, ctx)),
+        { id: 'apps:store', title: 'Mağazadan uygulama ekle', icon: 'bag', subtitle: 'YouTube, Netflix, Disney+, Spotify, Twitch…', children: storeApps(ctx) }
+      ]
+    } else if (def.id === 'store') {
+      items = storeCategory(ctx)
     } else if (def.id === 'pc') {
       const pc = getPlatform('pc')!
       items = platformItem(pc, ctx).children!
     } else {
       items = PLATFORMS.filter((p) => p.family === def.id).map((p) => platformItem(p, ctx))
     }
-    cats.push({ id: def.id, title: def.title, icon: def.icon, hue: fam?.hue ?? (def.id === 'home' ? 218 : def.id === 'media' ? 190 : 230), items })
+    const hue = fam?.hue ?? ({ home: 218, media: 190, store: 285, apps: 200 } as Record<string, number>)[def.id] ?? 230
+    cats.push({ id: def.id, title: def.title, icon: def.icon, hue, items })
   }
   return cats
 }

@@ -1,0 +1,114 @@
+/**
+ * Store catalog. Built-in entries live here; more can come from a remote catalog URL
+ * (Settings → storeCatalogUrl) that serves a JSON array of the same `StoreItem` shape,
+ * so new apps, themes and partner content can be published without an app update.
+ */
+
+export interface ThemeDef {
+  id: string
+  name: string
+  /** Background hue (0-360), or null to follow the focused category. */
+  hue: number | null
+  night?: boolean
+  /** Optional extra CSS (custom properties etc.) applied while the theme is active. */
+  css?: string
+}
+
+export interface StoreApp {
+  /** Page opened full screen. */
+  url: string
+  /** Needs DRM (Widevine/PlayReady): opened in Microsoft Edge, which supports it. */
+  drm?: boolean
+  /** Full-screen kiosk (no address bar). False for the general web browser. */
+  kiosk?: boolean
+  /** Custom user agent, e.g. a TV user agent for YouTube's TV interface. */
+  userAgent?: string
+}
+
+export interface StoreItem {
+  id: string
+  kind: 'app' | 'theme'
+  name: string
+  description: string
+  /** Short badge text and hue used as the item's icon. */
+  short: string
+  hue: number
+  author?: string
+  app?: StoreApp
+  theme?: ThemeDef
+}
+
+const TV_UA = 'Mozilla/5.0 (SMART-TV; Linux; Tizen 6.5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 TV Safari/537.36'
+
+export const BUILTIN_CATALOG: StoreItem[] = [
+  {
+    id: 'youtube',
+    kind: 'app',
+    name: 'YouTube',
+    short: 'YT',
+    hue: 0,
+    description: 'YouTube TV arayüzü: kumanda ve klavyeyle gezinmeye uygun.',
+    app: { url: 'https://www.youtube.com/tv', kiosk: true, userAgent: TV_UA }
+  },
+  {
+    id: 'netflix',
+    kind: 'app',
+    name: 'Netflix',
+    short: 'N',
+    hue: 357,
+    description: 'Netflix, tam ekran. Korumalı içerik için Microsoft Edge kullanılır.',
+    app: { url: 'https://www.netflix.com', kiosk: true, drm: true }
+  },
+  {
+    id: 'disneyplus',
+    kind: 'app',
+    name: 'Disney+',
+    short: 'D+',
+    hue: 220,
+    description: 'Disney+, tam ekran.',
+    app: { url: 'https://www.disneyplus.com', kiosk: true, drm: true }
+  },
+  {
+    id: 'primevideo',
+    kind: 'app',
+    name: 'Prime Video',
+    short: 'PV',
+    hue: 195,
+    description: 'Amazon Prime Video, tam ekran.',
+    app: { url: 'https://www.primevideo.com', kiosk: true, drm: true }
+  },
+  {
+    id: 'spotify',
+    kind: 'app',
+    name: 'Spotify',
+    short: 'SP',
+    hue: 140,
+    description: 'Spotify web oynatıcı.',
+    app: { url: 'https://open.spotify.com', kiosk: true, drm: true }
+  },
+  {
+    id: 'twitch',
+    kind: 'app',
+    name: 'Twitch',
+    short: 'TW',
+    hue: 265,
+    description: 'Canlı yayınlar.',
+    app: { url: 'https://www.twitch.tv', kiosk: true }
+  },
+  {
+    id: 'browser',
+    kind: 'app',
+    name: 'İnternet Tarayıcısı',
+    short: 'WEB',
+    hue: 205,
+    description: 'Tam ekran web tarayıcısı (Microsoft Edge). Çıkmak için oyun içi menüyü kullanın.',
+    app: { url: 'https://www.google.com', kiosk: false, drm: true }
+  },
+  // ── Themes ──
+  { id: 'theme-ocean', kind: 'theme', name: 'Okyanus', short: 'OK', hue: 190, description: 'Turkuaz dalgalar.', theme: { id: 'theme-ocean', name: 'Okyanus', hue: 188 } },
+  { id: 'theme-sunset', kind: 'theme', name: 'Gün Batımı', short: 'GB', hue: 20, description: 'Turuncu-pembe sıcak tonlar.', theme: { id: 'theme-sunset', name: 'Gün Batımı', hue: 18 } },
+  { id: 'theme-forest', kind: 'theme', name: 'Orman', short: 'OR', hue: 120, description: 'Derin yeşil.', theme: { id: 'theme-forest', name: 'Orman', hue: 125 } },
+  { id: 'theme-neon', kind: 'theme', name: 'Neon', short: 'NE', hue: 300, description: 'Mor-pembe neon.', theme: { id: 'theme-neon', name: 'Neon', hue: 305 } },
+  { id: 'theme-sakura', kind: 'theme', name: 'Sakura', short: 'SA', hue: 335, description: 'Yumuşak pembe.', theme: { id: 'theme-sakura', name: 'Sakura', hue: 335 } },
+  { id: 'theme-midnight', kind: 'theme', name: 'Gece Yarısı', short: 'GY', hue: 240, description: 'Neredeyse siyah, sade.', theme: { id: 'theme-midnight', name: 'Gece Yarısı', hue: 240, night: true } }
+]

@@ -1,4 +1,4 @@
-import { net } from 'electron'
+import { app, nativeImage, net } from 'electron'
 import fs from 'fs'
 import path from 'path'
 import { getPlatform } from '@shared/platforms'
@@ -63,6 +63,8 @@ function copyIfExists(src: string, dst: string): boolean {
 
 export interface ArtResult {
   cover: boolean
+  /** The cover is an icon fallback, not real box art. */
+  coverIsIcon?: boolean
   background: boolean
   /** Trailer stream URL ('' = looked up, none found; undefined = not looked up). */
   trailer?: string
@@ -230,7 +232,14 @@ export async function fetchArt(game: Game, online: boolean): Promise<ArtResult> 
     got.cover ||= r.cover
     got.background ||= r.background
   }
-  if (!online || (!need().cover && !need().background && !wantTrailer)) return got
+  if (!online || (!need().cover && !need().background && !wantTrailer)) {
+    if (game.platformId === 'pc' && (need().cover || need().background)) {
+      const local = await localPcArt(game, need())
+      merge(local)
+      if (local.coverIsIcon) got.coverIsIcon = true
+    }
+    return got
+  }
 
   if (game.platformId === 'pc') {
     if (game.meta.source === 'epic') {
@@ -254,11 +263,98 @@ export async function fetchArt(game: Game, online: boolean): Promise<ArtResult> 
         got.trailer = ''
       }
     }
+    const left = need()
+    if (left.cover || left.background) {
+      const local = await localPcArt(game, left)
+      merge(local)
+      if (local.coverIsIcon) got.coverIsIcon = true
+    }
     return got
   }
 
   const system = getPlatform(game.platformId)?.thumbnails
   if (system) merge(await libretroArt(system, game, need()))
+  return got
+}
+
+// ── Last resort for PC games: the game's own icon and screenshots ────
+
+const HELPER_EXE = /unins|setup|crash|report|redist|launcher_helper|easyanticheat|battleye|vc_redist|dxsetup|ue4prereq|cefprocess/i
+
+/** The most likely main executable in an install folder: the biggest non-helper .exe near the top. */
+function mainExe(dir: string, depth = 2): string | null {
+  let best: { p: string; size: number } | null = null
+  const walk = (d: string, level: number) => {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const p = path.join(d, e.name)
+      if (e.isFile() && /\.exe$/i.test(e.name) && !HELPER_EXE.test(e.name)) {
+        const size = fs.statSync(p).size
+        if (!best || size > best.size) best = { p, size }
+      } else if (e.isDirectory() && level < depth && !/^(redist|_commonredist|support|engine|directx)$/i.test(e.name)) {
+        walk(p, level + 1)
+      }
+    }
+  }
+  walk(dir, 0)
+  return (best as { p: string } | null)?.p ?? null
+}
+
+async function iconImage(game: Game): Promise<Electron.NativeImage | null> {
+  // Riot ships a product icon next to its metadata.
+  if (game.meta.source === 'riot' && game.meta.storeId) {
+    const ico = path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'Riot Games', 'Metadata', `${game.meta.storeId}.live`, `${game.meta.storeId}.live.ico`)
+    const img = nativeImage.createFromPath(ico)
+    if (!img.isEmpty()) return img
+  }
+  const exe = game.kind === 'exe' ? game.path : game.meta.installDir ? mainExe(game.meta.installDir) : null
+  if (!exe) return null
+  try {
+    const img = await app.getFileIcon(exe, { size: 'large' })
+    return img.isEmpty() ? null : img
+  } catch {
+    return null
+  }
+}
+
+/** Newest screenshot the player took, if the game keeps them in its install folder. */
+function ownScreenshot(game: Game): string | null {
+  const dir = game.meta.installDir ?? (game.kind === 'exe' ? path.dirname(game.path) : null)
+  if (!dir) return null
+  for (const sub of ['Screenshots', 'screenshots', 'ScreenShots']) {
+    try {
+      const files = fs
+        .readdirSync(path.join(dir, sub))
+        .filter((f) => /\.(png|jpe?g)$/i.test(f))
+        .map((f) => path.join(dir, sub, f))
+        .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
+      if (files[0]) return files[0]
+    } catch {
+      // no such folder
+    }
+  }
+  return null
+}
+
+async function localPcArt(game: Game, want: ArtResult): Promise<ArtResult> {
+  const got: ArtResult = { cover: false, background: false }
+  if (want.background) {
+    const shot = ownScreenshot(game)
+    if (shot) got.background = copyIfExists(shot, backgroundFile(game.id))
+  }
+  if (want.cover) {
+    const img = await iconImage(game)
+    if (img) {
+      fs.writeFileSync(coverFile(game.id), img.toPNG())
+      got.cover = true
+      got.coverIsIcon = true
+    }
+  }
   return got
 }
 

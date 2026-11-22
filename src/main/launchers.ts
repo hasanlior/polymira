@@ -491,3 +491,144 @@ export async function findUbisoftGames(): Promise<Candidate[]> {
   }
   return out
 }
+
+// ── Everything else: Windows "installed apps" + game engine fingerprints ──
+//
+// EA app, Battle.net, Rockstar, Bethesda.net, itch.io, standalone installers… all register in
+// the Windows Uninstall list. An entry is treated as a game when its publisher is a known game
+// publisher, or its install folder contains a game engine / game SDK fingerprint.
+
+const GAME_PUBLISHERS =
+  /electronic arts|\bea\b|blizzard|activision|rockstar|ubisoft|bethesda|cd projekt|2k\b|bandai|square enix|\bsega\b|capcom|konami|warner bros|paradox|focus (home|entertainment)|devolver|mojang|take-two|thq|deep silver|505 games|team17|annapurna|hoyoverse|mihoyo|kuro games|nexon|wargaming|gaijin|smilegate|ncsoft|krafton|pearl abyss|riot games/i
+
+const NOT_GAMES =
+  /launcher|\bclient\b|\bapp\b$|desktop|connect$|battle\.net|ea app|origin$|redistributable|runtime|\bsdk\b|driver|directx|visual c\+\+|anti-?cheat|easyanticheat|battleye|vanguard|overlay|updater|uninstall|support|tools?$|editor|steamvr|nvidia|amd |intel|microsoft|windows/i
+
+/** Files/folders that only game installs tend to have. */
+const ENGINE_MARKERS = [
+  'UnityPlayer.dll',
+  'GameAssembly.dll',
+  'steam_api64.dll',
+  'steam_api.dll',
+  'EOSSDK-Win64-Shipping.dll',
+  'bink2w64.dll',
+  'binkw64.dll',
+  'fmod.dll',
+  'fmodstudio.dll',
+  'PhysX3_x64.dll',
+  'GFSDK_Aftermath_Lib.x64.dll',
+  'nvngx_dlss.dll',
+  'sl.interposer.dll'
+]
+
+function looksLikeGameFolder(dir: string): boolean {
+  const has = (d: string) => {
+    let names: string[]
+    try {
+      names = fs.readdirSync(d)
+    } catch {
+      return false
+    }
+    const lower = new Set(names.map((n) => n.toLowerCase()))
+    if (ENGINE_MARKERS.some((m) => lower.has(m.toLowerCase()))) return true
+    // Unreal: <Game>/Binaries/Win64 + Engine folder
+    return lower.has('engine') && names.some((n) => fs.existsSync(path.join(d, n, 'Binaries', 'Win64')))
+  }
+  if (has(dir)) return true
+  try {
+    for (const sub of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (sub.isDirectory() && /^(bin|bin64|binaries|x64|win64|game|retail|_retail_)$/i.test(sub.name)) {
+        if (has(path.join(dir, sub.name))) return true
+      }
+    }
+  } catch {
+    // unreadable
+  }
+  return false
+}
+
+const HELPER = /unins|setup|crash|report|redist|launcher_helper|easyanticheat|battleye|vc_redist|dxsetup|prereq|cefprocess|helper|updater/i
+
+function bestExe(dir: string, hint?: string): string | null {
+  if (hint) {
+    const exe = hint.replace(/^"|"$/g, '').replace(/,\s*-?\d+$/, '')
+    if (/\.exe$/i.test(exe) && !HELPER.test(path.basename(exe)) && exe.toLowerCase().startsWith(dir.toLowerCase()) && fs.existsSync(exe)) return exe
+  }
+  let best: { p: string; size: number } | null = null
+  const walk = (d: string, level: number) => {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const p = path.join(d, e.name)
+      if (e.isFile() && /\.exe$/i.test(e.name) && !HELPER.test(e.name)) {
+        const size = fs.statSync(p).size
+        if (!best || size > best.size) best = { p, size }
+      } else if (e.isDirectory() && level < 2 && !/^(redist|_commonredist|support|directx|__installer|installer)$/i.test(e.name)) {
+        walk(p, level + 1)
+      }
+    }
+  }
+  walk(dir, 0)
+  return (best as { p: string } | null)?.p ?? null
+}
+
+function editDistance(a: string, b: string): number {
+  if (Math.abs(a.length - b.length) > 3) return 99
+  const dp = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    let prev = dp[0]
+    dp[0] = i
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = dp[j]
+      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1))
+      prev = tmp
+    }
+  }
+  return dp[b.length]
+}
+
+/** Installed games from the Windows Uninstall list. `knownDirs` are already-found installs to skip. */
+export async function findRegistryGames(knownDirs: Set<string>): Promise<Candidate[]> {
+  const roots = [
+    'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
+  ]
+  const out: Candidate[] = []
+  const seen = new Set<string>()
+  for (const root of roots) {
+    const text = await regQuery(root, true)
+    for (const block of text.split(/\r?\n(?=HKEY_)/)) {
+      const name = regValue(block, 'DisplayName')
+      const dirRaw = regValue(block, 'InstallLocation')
+      if (!name || !dirRaw || regValue(block, 'SystemComponent') === '0x1' || regValue(block, 'ParentKeyName')) continue
+      const dir = path.resolve(dirRaw.replace(/^"|"$/g, ''))
+      const key = dir.toLowerCase()
+      if (seen.has(key) || knownDirs.has(key) || dir.length <= 3) continue
+      if (NOT_GAMES.test(name) || !fs.existsSync(dir)) continue
+      const publisher = regValue(block, 'Publisher') ?? ''
+      if (!GAME_PUBLISHERS.test(publisher) && !looksLikeGameFolder(dir)) continue
+      const exe = bestExe(dir, regValue(block, 'DisplayIcon'))
+      if (!exe) continue
+      seen.add(key)
+      const source = /electronic arts|\bea\b/i.test(publisher) ? 'ea' : /blizzard|activision/i.test(publisher) ? 'battlenet' : 'other'
+      // Registry names sometimes carry typos ("Battlefieldt 1"); the folder name is usually clean.
+      const folder = path.basename(dir)
+      const n1 = name.toLowerCase().replace(/[^a-z0-9]/g, '')
+      const n2 = folder.toLowerCase().replace(/[^a-z0-9]/g, '')
+      const title = n1 !== n2 && editDistance(n1, n2) <= 2 ? folder : name
+      out.push({
+        platformId: 'pc',
+        title: stripEdition(title.replace(/[™®]/g, '').trim()),
+        path: exe,
+        kind: 'exe',
+        meta: { source, installDir: dir, publisher: publisher || undefined }
+      })
+    }
+  }
+  return out
+}

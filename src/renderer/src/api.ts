@@ -41,6 +41,33 @@ export function formatPlayTime(sec: number): string {
   return h > 0 ? `${h} sa ${m} dk` : `${m} dk`
 }
 
+export function formatBytes(n: number): string {
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`
+  return `${Math.max(0, Math.round(n / 1024))} KB`
+}
+
+export function formatEta(sec: number | null): string {
+  if (sec === null) return ''
+  if (sec < 60) return `${sec} sn kaldı`
+  const m = Math.round(sec / 60)
+  return m < 60 ? `${m} dk kaldı` : `${Math.floor(m / 60)} sa ${m % 60} dk kaldı`
+}
+
+/** One line describing a download: "%45 · 120 / 260 MB · 8.2 MB/s · 2 dk kaldı" */
+export function downloadLine(j: import('@shared/types').DownloadJob): string {
+  if (j.status === 'queued') return 'Sırada'
+  if (j.status === 'extracting') return j.detail ?? 'Kuruluyor…'
+  if (j.status === 'done') return j.version ? `Kuruldu (${j.version})` : 'Kuruldu'
+  if (j.status === 'error') return `Hata: ${j.error ?? ''}`
+  const pct = j.total ? Math.floor((j.received / j.total) * 100) : 0
+  const parts = [`%${pct}`, `${formatBytes(j.received)} / ${j.total ? formatBytes(j.total) : '?'}`]
+  if (j.speed) parts.push(`${formatBytes(j.speed)}/s`)
+  const eta = formatEta(j.etaSec)
+  if (eta) parts.push(eta)
+  return parts.join(' · ')
+}
+
 export function formatDate(ts?: number): string {
   if (!ts) return '—'
   return new Date(ts).toLocaleString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })

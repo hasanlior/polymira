@@ -128,7 +128,7 @@ export function setMusic(id: string, file: string | null): void {
 export function setCustomCover(id: string, imagePath: string): void {
   fs.copyFileSync(imagePath, coverFile(id))
   const g = store.games.find((x) => x.id === id)
-  store.updateGame(id, { hasCover: true, coverRev: (g?.coverRev ?? 0) + 1 })
+  store.updateGame(id, { hasCover: true, coverIsIcon: false, coverRev: (g?.coverRev ?? 0) + 1 })
 }
 
 /** Flags games whose file disappeared (e.g. an unplugged drive) instead of deleting them. */

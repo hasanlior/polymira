@@ -15,8 +15,11 @@ import { spawn } from 'child_process'
 import { applyDiscovery, runDiscovery } from './discover'
 import { riotClientPath } from './launchers'
 import { attachSoundtracks } from './music'
+import { DownloadManager, EMULATOR_SOURCES } from './downloads'
+import { appLaunchPlan, appPath, catalog, findItem, installedThemes, listMods, modsCss, openFolder } from './apps'
+import { addCandidates } from './library'
 import { enterGameMode, exitGameMode, startExplorer } from './gameMode'
-import { initRuntime, readRuntime, runtimeFile, updateRuntime } from './runtime'
+import { getRuntime, initRuntime, readRuntime, runtimeFile, updateRuntime } from './runtime'
 
 /** Keyboard fallback for opening the in-game menu (works while the emulator has focus). */
 const OVERLAY_SHORTCUT = 'Control+Shift+Home'
@@ -30,6 +33,8 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 let mainWindow: BrowserWindow | null = null
+let quitting = false
+let replacingWindow = false
 let overlayWindow: BrowserWindow | null = null
 let scanning = false
 const session = new SessionManager()
@@ -59,8 +64,20 @@ function toast(kind: Toast['kind'], text: string): void {
   send('toast', { kind, text })
 }
 
+const downloads = new DownloadManager((id, exe) => {
+  store.updateSettings({ emulatorPaths: { ...store.settings.emulatorPaths, [id]: exe } })
+  const name = downloads.jobs.find((j) => j.id === id)?.name ?? id
+  toast('success', `${name} indirildi ve kuruldu.`)
+  broadcast()
+})
+downloads.on('changed', () => broadcast())
+
 function snapshot(): AppState {
   return {
+    themes: installedThemes(),
+    mods: listMods(),
+    downloads: downloads.jobs,
+    downloadable: Object.keys(EMULATOR_SOURCES),
     games: store.games,
     settings: store.settings,
     emulators: emulatorStatus(store.settings),
@@ -80,13 +97,15 @@ function broadcast(): void {
 }
 
 const ART_RECHECK_MS = 7 * 24 * 3600 * 1000
+/** Bump when artwork sources improve, so games without art are looked up again. */
+const ART_VERSION = 2
 
 const art = new ArtQueue(
   (id, r) => {
     const g = store.games.find((x) => x.id === id)
     if (!g) return
-    const patch: Partial<typeof g> = { artCheckedAt: Date.now() }
-    if (r.cover) Object.assign(patch, { hasCover: true, coverRev: (g.coverRev ?? 0) + 1 })
+    const patch: Partial<typeof g> = { artCheckedAt: Date.now(), artVersion: ART_VERSION }
+    if (r.cover) Object.assign(patch, { hasCover: true, coverIsIcon: Boolean(r.coverIsIcon), coverRev: (g.coverRev ?? 0) + 1 })
     if (r.background) Object.assign(patch, { hasBackground: true, bgRev: (g.bgRev ?? 0) + 1 })
     if (r.trailer !== undefined) patch.trailerUrl = r.trailer
     if (r.steamAppId && r.steamAppId !== g.meta.steamAppId) patch.meta = { ...g.meta, steamAppId: r.steamAppId }
@@ -101,7 +120,7 @@ function queueCovers(force = false): number {
   const todo = store.games.filter(
     (g) =>
       (!g.hasCover || !g.hasBackground || (g.platformId === 'pc' && g.trailerUrl === undefined)) &&
-      (force || !g.artCheckedAt || Date.now() - g.artCheckedAt > ART_RECHECK_MS)
+      (force || g.artVersion !== ART_VERSION || !g.artCheckedAt || Date.now() - g.artCheckedAt > ART_RECHECK_MS)
   )
   art.push(todo)
   return todo.length
@@ -120,7 +139,9 @@ function windowOptions(mode: WindowMode): Electron.BrowserWindowConstructorOptio
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       sandbox: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Menu sounds, theme music and trailers start without a click, like on a console.
+      autoplayPolicy: 'no-user-gesture-required'
     }
   }
   if (mode === 'fullscreen') return { ...base, fullscreen: true, frame: false }
@@ -146,14 +167,27 @@ function createMainWindow(): void {
   mainWindow.on('closed', () => {
     if (mainWindow?.isDestroyed()) mainWindow = null
   })
-  // Logging off / shutting down Windows is not a crash.
-  mainWindow.on('session-end', () => updateRuntime({ cleanExit: true }))
+  // Logging off / shutting down Windows is not a crash, and must not be delayed.
+  mainWindow.on('session-end', () => {
+    quitting = true
+    updateRuntime({ cleanExit: true })
+  })
+  // Alt+F4 / window close: run the same fade-out shutdown as "Quit".
+  mainWindow.on('close', (e) => {
+    if (quitting || replacingWindow) return
+    e.preventDefault()
+    void gracefulQuit()
+  })
   mainWindow.webContents.on('render-process-gone', (_e, details) => {
     console.warn('[main] renderer gone:', details.reason, 'exit', details.exitCode)
     if (details.reason !== 'clean-exit') setTimeout(() => mainWindow?.webContents.reload(), 500)
   })
   load(mainWindow, 'index')
-  if (old && !old.isDestroyed()) old.destroy()
+  if (old && !old.isDestroyed()) {
+    replacingWindow = true
+    old.destroy()
+    replacingWindow = false
+  }
 }
 
 function applyWindowMode(prev: WindowMode, next: WindowMode): void {
@@ -445,6 +479,8 @@ const handlers: Handlers = {
     broadcast()
     return n
   },
+  'emu:download': (ids) => downloads.enqueue(ids),
+  'emu:cancelDownload': (id) => downloads.cancel(id),
   'emu:setPath': (id, exe) => {
     const next = { ...store.settings.emulatorPaths }
     if (exe) next[id] = exe
@@ -459,7 +495,7 @@ const handlers: Handlers = {
     if (session.info) throw new Error('Önce çalışan oyunu kapatın.')
     let plan
     try {
-      plan = planLaunch(game, store.settings)
+      plan = game.platformId === 'apps' ? appLaunchPlan(game) : planLaunch(game, store.settings)
     } catch (err) {
       const message = (err as Error).message
       if (err instanceof LaunchError) store.updateGame(id, { lastLaunch: { at: Date.now(), result: 'error', message } })
@@ -548,7 +584,40 @@ const handlers: Handlers = {
     broadcast()
     return r
   },
-  'app:quit': () => app.quit()
+  'store:catalog': (refresh) => catalog(refresh),
+  'store:install': async (id) => {
+    const item = findItem(id) ?? (await catalog(true)).find((i) => i.id === id)
+    if (!item) throw new Error('Mağazada bulunamadı.')
+    if (item.kind === 'app') {
+      addCandidates([{ platformId: 'apps', title: item.name, path: appPath(item.id), kind: 'uri', meta: { source: 'manual', storeId: item.id } }])
+    } else if (!store.settings.installedThemes.includes(id)) {
+      store.updateSettings({ installedThemes: [...store.settings.installedThemes, id] })
+    }
+    broadcast()
+  },
+  'store:uninstall': (id) => {
+    const item = findItem(id)
+    if (item?.kind === 'theme') {
+      store.updateSettings({
+        installedThemes: store.settings.installedThemes.filter((t) => t !== id),
+        theme: store.settings.theme === id ? 'auto' : store.settings.theme
+      })
+    } else {
+      const g = store.games.find((x) => x.path === appPath(id))
+      if (g) removeGame(g.id)
+    }
+    broadcast()
+  },
+  'mods:css': () => modsCss(),
+  'mods:toggle': (id, enabled) => {
+    const set = new Set(store.settings.enabledMods)
+    if (enabled) set.add(id)
+    else set.delete(id)
+    store.updateSettings({ enabledMods: [...set] })
+    broadcast()
+  },
+  'folder:open': (which) => openFolder(which),
+  'app:quit': () => void gracefulQuit()
 }
 
 function registerIpc(): void {
@@ -626,6 +695,13 @@ app.whenReady().then(() => {
   registerIpc()
   createMainWindow()
 
+  if (!store.games.some((g) => g.platformId === 'apps') && !store.settings.setupDone) {
+    for (const id of ['youtube', 'netflix', 'browser']) {
+      const item = findItem(id)!
+      addCandidates([{ platformId: 'apps', title: item.name, path: appPath(id), kind: 'uri', meta: { source: 'manual', storeId: id } }])
+    }
+  }
+
   // Heavy work after the UI is up.
   setTimeout(() => {
     if (Object.keys(store.settings.emulatorPaths).length === 0) {
@@ -644,11 +720,50 @@ app.whenReady().then(() => {
   }, 1200)
 })
 
-app.on('before-quit', () => {
-  updateRuntime({ cleanExit: true })
-  void session.stop()
-  void exitGameMode()
-  store.flush()
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * Console-style shutdown: the screen fades out, each cleanup step is shown in the middle
+ * of the screen (closing the game, bringing the Windows desktop back…), then the app exits.
+ */
+async function gracefulQuit(): Promise<void> {
+  if (quitting) return
+  quitting = true
+  const step = (text: string) => send('shutdown', { text })
+  if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    mainWindow.focus()
+  }
+  step('Kapatılıyor…')
+  await sleep(700) // fade-out
+  try {
+    if (session.info) {
+      step('Oyun kapatılıyor…')
+      await session.stop()
+      await sleep(400)
+    }
+    const rt = getRuntime()
+    if (rt?.explorerStopped) step('Windows masaüstü açılıyor…')
+    else if (rt?.previousPowerScheme) step('Güç planı geri yükleniyor…')
+    await exitGameMode()
+    step('Ayarlar kaydediliyor…')
+    store.flush()
+    updateRuntime({ cleanExit: true })
+    await sleep(350)
+  } catch (err) {
+    console.warn('[quit]', err)
+  }
+  send('shutdown', { text: 'Görüşmek üzere', done: true })
+  await sleep(900)
+  app.exit(0)
+}
+
+app.on('before-quit', (e) => {
+  if (quitting) return
+  // Any other quit request (tray, OS, second instance…) goes through the same sequence.
+  e.preventDefault()
+  void gracefulQuit()
 })
 
 app.on('will-quit', () => globalShortcut.unregisterAll())

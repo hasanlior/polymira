@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react'
 import { BRAND } from '@shared/brand'
 import type { DiscoverResult, Settings } from '@shared/types'
-import { call } from '../api'
+import { call, downloadLine } from '../api'
+import { EMULATORS, PLATFORMS } from '@shared/platforms'
 import { Icon, type IconName } from '../icons'
 import { input, useInput } from '../input'
 import type { MenuCtx } from '../menu'
 import { sfx } from '../sound'
 
-type Step = 'welcome' | 'pads' | 'scan' | 'results' | 'optimize' | 'done'
-const STEPS: Step[] = ['welcome', 'pads', 'scan', 'results', 'optimize', 'done']
+type Step = 'welcome' | 'pads' | 'scan' | 'results' | 'emulators' | 'optimize' | 'done'
+const STEPS: Step[] = ['welcome', 'pads', 'scan', 'results', 'emulators', 'optimize', 'done']
 
 interface Props {
   ctx: MenuCtx
@@ -21,7 +22,7 @@ type Toggle = { key: keyof Settings; label: string; desc: string; icon: IconName
 
 const OPTIMIZE: Toggle[] = [
   { key: 'gmPriority', label: 'Oyuna yüksek işlemci önceliği ver', desc: 'Oyun, arka plandaki programlardan önce işlemci zamanı alır.', icon: 'chip' },
-  { key: 'gmPowerPlan', label: 'Oyun sırasında yüksek performans güç planı', desc: 'Oyun bitince önceki güç planına dönülür. Bazı dizüstülerde bu plan bulunmayabilir.', icon: 'power' },
+  { key: 'gmPowerPlan', label: 'Oyun sırasında yüksek performans güç planı', desc: 'Dengeli veya Güç tasarrufu planındaysan oyun sırasında Yüksek performansa geçer, oyun bitince geri döner. Zaten performans planındaysan dokunmaz.', icon: 'power' },
   {
     key: 'gmStopExplorer',
     label: 'Oyun sırasında Windows masaüstünü kapat',
@@ -40,6 +41,7 @@ export function Setup({ ctx, mode, onClose }: Props) {
   const [idx, setIdx] = useState(0)
   const [imported, setImported] = useState<{ games: number; emulators: number; folders: number } | null>(null)
   const [pads, setPads] = useState<string[]>([])
+  const [emuPick, setEmuPick] = useState<Set<string>>(new Set())
   const s = ctx.state.settings
 
   useEffect(() => window.bridge.on('progress', setProgress), [])
@@ -85,16 +87,31 @@ export function Setup({ ctx, mode, onClose }: Props) {
   const importSelected = async () => {
     const r = await call('discover:apply', [...picked])
     setImported(r)
-    go(mode === 'setup' ? 'optimize' : 'done')
+    if (mode === 'setup') {
+      // Pre-select emulators for platforms that now have games and no emulator yet.
+      const st = await call('state:get')
+      const have = new Set(st.emulators.filter((e) => e.found).map((e) => e.id))
+      const needed = new Set<string>()
+      for (const p of PLATFORMS) {
+        if (!st.games.some((g) => g.platformId === p.id)) continue
+        const r = p.runners[0]
+        if (r && !have.has(r.emulatorId) && st.downloadable.includes(r.emulatorId)) needed.add(r.emulatorId)
+      }
+      setEmuPick(needed)
+      go('emulators')
+    } else go('done')
   }
 
   const groups = result?.groups ?? []
   // Rows on the results screen: one per group, then the action button.
   const resultRows = groups.length + 1
   const optimizeRows = OPTIMIZE.length + 1
+  const installed = new Set(ctx.state.emulators.filter((e) => e.found).map((e) => e.id))
+  const emuList = ctx.state.downloadable.filter((id) => !installed.has(id))
+  const emulatorRows = emuList.length + 1
 
   useInput((a) => {
-    const rows = step === 'results' ? resultRows : step === 'optimize' ? optimizeRows : 0
+    const rows = step === 'results' ? resultRows : step === 'optimize' ? optimizeRows : step === 'emulators' ? emulatorRows : 0
     if (rows && (a === 'up' || a === 'down')) {
       const n = idx + (a === 'up' ? -1 : 1)
       if (n >= 0 && n < rows) {
@@ -110,7 +127,7 @@ export function Setup({ ctx, mode, onClose }: Props) {
         if (mode === 'scan') onClose()
         return
       }
-      const order: Step[] = ['welcome', 'pads', 'scan', 'results', 'optimize', 'done']
+      const order: Step[] = STEPS
       const prev = order[Math.max(0, order.indexOf(step) - 1)]
       setStep(prev === 'scan' ? 'pads' : prev)
       setIdx(0)
@@ -136,6 +153,21 @@ export function Setup({ ctx, mode, onClose }: Props) {
           })
         } else {
           void importSelected()
+        }
+        break
+      case 'emulators':
+        if (idx < emuList.length) {
+          sfx('move')
+          const id = emuList[idx]
+          setEmuPick((p) => {
+            const n = new Set(p)
+            if (n.has(id)) n.delete(id)
+            else n.add(id)
+            return n
+          })
+        } else {
+          if (emuPick.size) void call('emu:download', [...emuPick])
+          go('optimize')
         }
         break
       case 'optimize':
@@ -224,6 +256,41 @@ export function Setup({ ctx, mode, onClose }: Props) {
             </div>
             <div className={`btn primary ${idx === groups.length ? 'sel' : ''}`}>{groups.length ? 'Seçilenleri ekle' : 'Devam'}</div>
             {result && <div className="setup-foot">Tarama {Math.max(1, Math.round(result.durationMs / 1000))} sn sürdü · {result.romRoots.length} klasör tarandı</div>}
+          </div>
+        )}
+
+        {step === 'emulators' && (
+          <div className="setup-section">
+            <h2>Emülatörler</h2>
+            <p className="setup-text">
+              İstersen emülatörleri resmi kaynaklarından otomatik indirip kurabilirim. İndirme arka planda sürer; bu sırada konsolda gezinebilir, oyun oynayabilirsin.
+              BIOS ve sistem dosyaları indirilmez, onları kendi cihazından sağlaman gerekir.
+            </p>
+            <div className="setup-list">
+              {emuList.length === 0 && (
+                <div className="setup-row on">
+                  <Icon name="check" />
+                  <span>İndirilebilen tüm emülatörler zaten kurulu.</span>
+                </div>
+              )}
+              {emuList.map((id, i) => {
+                const emu = EMULATORS.find((e) => e.id === id)
+                const job = ctx.state.downloads.find((j) => j.id === id)
+                const usedBy = PLATFORMS.filter((p) => p.runners.some((r) => r.emulatorId === id)).map((p) => p.short)
+                return (
+                  <div key={id} className={`setup-row ${i === idx ? 'sel' : ''} ${emuPick.has(id) ? 'on' : ''}`}>
+                    {emuPick.has(id) ? <Icon name="check" /> : <span className="x-radio" />}
+                    <div className="setup-row-text">
+                      <b>{emu?.name}</b>
+                      <small>{job ? downloadLine(job) : usedBy.join(' · ')}</small>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+            <div className={`btn primary ${idx === emuList.length ? 'sel' : ''}`}>
+              {emuPick.size ? `${emuPick.size} emülatörü arka planda indir` : 'Atla'}
+            </div>
           </div>
         )}
 

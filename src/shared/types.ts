@@ -1,4 +1,4 @@
-export type PlatformFamily = 'playstation' | 'xbox' | 'nintendo' | 'sega' | 'other' | 'pc'
+export type PlatformFamily = 'playstation' | 'xbox' | 'nintendo' | 'sega' | 'other' | 'pc' | 'apps'
 
 /** How mature the emulation path for a platform is. Shown to the user as-is. */
 export type SupportLevel = 'stable' | 'experimental' | 'unsupported'
@@ -7,7 +7,7 @@ export type SupportLevel = 'stable' | 'experimental' | 'unsupported'
 export type GameKind = 'file' | 'folder' | 'titleId' | 'exe' | 'uri'
 
 /** Where a PC game was found. */
-export type GameSource = 'manual' | 'steam' | 'epic' | 'gog' | 'xbox' | 'riot' | 'ubisoft'
+export type GameSource = 'manual' | 'steam' | 'epic' | 'gog' | 'xbox' | 'riot' | 'ubisoft' | 'ea' | 'battlenet' | 'other'
 
 export interface GameMeta {
   year?: number
@@ -44,11 +44,15 @@ export interface Game {
   hasCover: boolean
   /** Cache-busting token for the cover image. */
   coverRev?: number
+  /** The cover is only an app icon (no box art found): shown small, on a tile. */
+  coverIsIcon?: boolean
   /** Full-screen background art shown when the game is focused. */
   hasBackground?: boolean
   bgRev?: number
   /** When artwork lookup last ran; avoids re-querying games that have no art online. */
   artCheckedAt?: number
+  /** Artwork lookup version that last ran; a new app version with better sources re-checks. */
+  artVersion?: number
   /** Theme music played while the game is focused (a local audio file). */
   musicPath?: string
   /** Official trailer stream (HLS) shown with sound when the game is focused. Empty string = none found. */
@@ -102,6 +106,12 @@ export interface Settings {
   musicVolume: number
   /** Play the focused game's official trailer in the background. */
   gameTrailers: boolean
+  /** Store themes the user added. */
+  installedThemes: string[]
+  /** Enabled CSS mods (folder names under mods/). */
+  enabledMods: string[]
+  /** Optional URL of a remote store catalog (JSON array of StoreItem). */
+  storeCatalogUrl: string
 }
 
 export interface DiscoverGroup {
@@ -165,7 +175,33 @@ export interface Screenshot {
   takenAt: number
 }
 
+export interface DownloadJob {
+  id: string
+  name: string
+  status: 'queued' | 'downloading' | 'extracting' | 'done' | 'error'
+  received: number
+  total: number
+  /** Bytes per second (smoothed). */
+  speed: number
+  etaSec: number | null
+  version?: string
+  detail?: string
+  error?: string
+}
+
+export interface ModInfo {
+  id: string
+  name: string
+  description?: string
+  enabled: boolean
+}
+
 export interface AppState {
+  themes: import('./catalog').ThemeDef[]
+  mods: ModInfo[]
+  downloads: DownloadJob[]
+  /** Emulators that can be downloaded automatically. */
+  downloadable: string[]
   games: Game[]
   settings: Settings
   emulators: EmulatorStatus[]

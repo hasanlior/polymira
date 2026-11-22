@@ -368,6 +368,11 @@ export const PLATFORMS: PlatformDef[] = [
     extensions: ['.d64', '.t64', '.prg', '.crt', '.tap', '.zip'], uniqueExtensions: ['.d64', '.t64'], folderHints: ['c64', 'commodore'],
     runners: [{ emulatorId: 'retroarch', core: 'vice_x64sc' }], thumbnails: 'Commodore - 64', hue: 170
   },
+  // ── Apps (YouTube, Netflix, browser…) from the store ─────────
+  {
+    id: 'apps', name: 'Uygulamalar', short: 'APP', family: 'apps', support: 'stable', kind: 'uri',
+    extensions: [], runners: [], hue: 200
+  },
   // ── PC ───────────────────────────────────────────────────────
   {
     id: 'pc', name: 'PC Oyunları', short: 'PC', family: 'pc', support: 'stable', kind: 'exe',
@@ -387,7 +392,8 @@ export const FAMILIES: FamilyDef[] = [
   { id: 'nintendo', name: 'Nintendo', hue: 355 },
   { id: 'sega', name: 'Sega', hue: 215 },
   { id: 'other', name: 'Diğer Platformlar', hue: 30 },
-  { id: 'pc', name: 'PC Oyunları', hue: 265 }
+  { id: 'pc', name: 'PC Oyunları', hue: 265 },
+  { id: 'apps', name: 'Uygulamalar', hue: 200 }
 ]
 
 const platformMap = new Map(PLATFORMS.map((p) => [p.id, p]))

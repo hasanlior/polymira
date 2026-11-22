@@ -11,11 +11,11 @@ function Cover({ game, className }: { game: Game; className?: string }) {
   const p = getPlatform(game.platformId)
   return (
     <div className={`cover-box ${className ?? ''}`}>
-      {game.hasCover ? (
+      {game.hasCover && !game.coverIsIcon ? (
         <img src={coverUrl(game.id, game.coverRev)} alt="" draggable={false} />
       ) : (
         <div className="cover-fallback">
-          {p && <Badge text={p.short} hue={p.hue} />}
+          {game.hasCover ? <img className="cover-fallback-icon" src={coverUrl(game.id, game.coverRev)} alt="" /> : p && <Badge text={p.short} hue={p.hue} />}
           <div className="cover-fallback-title">{game.title}</div>
         </div>
       )}

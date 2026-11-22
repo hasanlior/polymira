@@ -1,55 +1,94 @@
-/** Menu sounds synthesized with WebAudio — no audio assets needed. */
+/**
+ * Menu sounds. They are synthesized once into small WAV files in memory and played with
+ * ordinary <audio> elements. (A live WebAudio context fails on some audio devices and can take
+ * the page down with it; plain media playback does not.)
+ */
 type Sfx = 'move' | 'confirm' | 'back' | 'error' | 'category'
 
-let ctx: AudioContext | null = null
+interface Tone {
+  freq: number
+  start: number
+  dur: number
+  gain: number
+  wave?: 'sine' | 'triangle'
+  endFreq?: number
+}
+
+const RATE = 44100
 let enabled = true
 let volume = 0.5
+const urls = new Map<Sfx, string>()
 
 export function configureSound(on: boolean, vol: number): void {
   enabled = on
   volume = vol
 }
 
-function tone(freq: number, start: number, dur: number, gain: number, type: OscillatorType = 'sine', endFreq?: number) {
-  const c = ctx!
-  const o = c.createOscillator()
-  const g = c.createGain()
-  o.type = type
-  o.frequency.setValueAtTime(freq, c.currentTime + start)
-  if (endFreq) o.frequency.exponentialRampToValueAtTime(endFreq, c.currentTime + start + dur)
-  g.gain.setValueAtTime(0, c.currentTime + start)
-  g.gain.linearRampToValueAtTime(gain * volume, c.currentTime + start + 0.008)
-  g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + start + dur)
-  o.connect(g).connect(c.destination)
-  o.start(c.currentTime + start)
-  o.stop(c.currentTime + start + dur + 0.02)
+function render(tones: Tone[]): string {
+  const length = Math.ceil(RATE * Math.max(...tones.map((t) => t.start + t.dur + 0.02)))
+  const data = new Float32Array(length)
+  for (const t of tones) {
+    const from = Math.floor(t.start * RATE)
+    const n = Math.floor(t.dur * RATE)
+    let phase = 0
+    for (let i = 0; i < n && from + i < length; i++) {
+      const k = i / n
+      const f = t.endFreq ? t.freq * Math.pow(t.endFreq / t.freq, k) : t.freq
+      phase += (2 * Math.PI * f) / RATE
+      const osc = t.wave === 'triangle' ? (2 / Math.PI) * Math.asin(Math.sin(phase)) : Math.sin(phase)
+      // 8 ms attack, exponential decay
+      const env = Math.min(1, i / (0.008 * RATE)) * Math.exp(-5 * k)
+      data[from + i] += osc * env * t.gain
+    }
+  }
+  // 16-bit PCM WAV
+  const buf = new ArrayBuffer(44 + length * 2)
+  const v = new DataView(buf)
+  const str = (o: number, s: string) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)))
+  str(0, 'RIFF')
+  v.setUint32(4, 36 + length * 2, true)
+  str(8, 'WAVEfmt ')
+  v.setUint32(16, 16, true)
+  v.setUint16(20, 1, true)
+  v.setUint16(22, 1, true)
+  v.setUint32(24, RATE, true)
+  v.setUint32(28, RATE * 2, true)
+  v.setUint16(32, 2, true)
+  v.setUint16(34, 16, true)
+  str(36, 'data')
+  v.setUint32(40, length * 2, true)
+  for (let i = 0; i < length; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, data[i])) * 0x7fff, true)
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }))
+}
+
+const DEFS: Record<Sfx, Tone[]> = {
+  move: [{ freq: 1320, start: 0, dur: 0.06, gain: 0.35 }],
+  category: [
+    { freq: 990, start: 0, dur: 0.08, gain: 0.35 },
+    { freq: 1480, start: 0.015, dur: 0.07, gain: 0.18 }
+  ],
+  confirm: [
+    { freq: 880, start: 0, dur: 0.09, gain: 0.4 },
+    { freq: 1320, start: 0.06, dur: 0.14, gain: 0.35 }
+  ],
+  back: [{ freq: 1100, start: 0, dur: 0.12, gain: 0.35, endFreq: 620 }],
+  error: [
+    { freq: 220, start: 0, dur: 0.2, gain: 0.45, wave: 'triangle' },
+    { freq: 180, start: 0.09, dur: 0.22, gain: 0.4, wave: 'triangle' }
+  ]
 }
 
 export function sfx(kind: Sfx): void {
   if (!enabled || volume <= 0) return
   try {
-    ctx ??= new AudioContext()
-    if (ctx.state === 'suspended') void ctx.resume()
-    switch (kind) {
-      case 'move':
-        tone(1320, 0, 0.05, 0.08)
-        break
-      case 'category':
-        tone(990, 0, 0.07, 0.09)
-        tone(1480, 0.015, 0.06, 0.04)
-        break
-      case 'confirm':
-        tone(880, 0, 0.08, 0.12)
-        tone(1320, 0.06, 0.12, 0.1)
-        break
-      case 'back':
-        tone(1100, 0, 0.1, 0.1, 'sine', 620)
-        break
-      case 'error':
-        tone(220, 0, 0.18, 0.14, 'triangle')
-        tone(180, 0.09, 0.2, 0.12, 'triangle')
-        break
+    let url = urls.get(kind)
+    if (!url) {
+      url = render(DEFS[kind])
+      urls.set(kind, url)
     }
+    const a = new Audio(url)
+    a.volume = Math.min(1, volume)
+    void a.play().catch(() => {})
   } catch {
     // audio not available
   }

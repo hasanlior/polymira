@@ -27,7 +27,10 @@ export const DEFAULT_SETTINGS: Settings = {
   gameBackgrounds: true,
   gameMusic: true,
   musicVolume: 0.6,
-  gameTrailers: true
+  gameTrailers: true,
+  installedThemes: [],
+  enabledMods: [],
+  storeCatalogUrl: ''
 }
 
 export const paths = {

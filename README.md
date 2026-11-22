@@ -19,6 +19,7 @@ XPORT, bilgisayarı oyun konsoluna çeviren, tamamen kontrolcüyle kullanılan b
   - **Epic Games:** eski ve yeni launcher kayıtları ve her sürücüdeki `.egstore` klasörleri
   - **Xbox uygulaması / PC Game Pass:** sürücülerdeki `.GamingRoot` kayıtları
   - **GOG**, **Riot Games** (LoL, TFT, VALORANT) ve **Ubisoft Connect**
+  - **EA app, Battle.net, Rockstar ve diğer tüm kurulu oyunlar:** Windows'un yüklü uygulamalar listesi, oyun yayıncısı ve oyun motoru izleriyle (Unity, Unreal, Steamworks, EOS…) taranır
   - Kurulu emülatörler, ROM/ISO klasörleri (Masaüstü, İndirilenler, Belgeler ve tüm sürücülerde adı oyun/ROM/emülatör/platform içeren klasörler)
 - **Mağaza oyunlarının takibi:** launcher üzerinden açılan oyunun işlemi kurulum klasöründen bulunur. Böylece oyun içi menü, duraklatma, oyun modu ve süre takibi bu oyunlarda da çalışır.
 - **Otomatik görseller:** kapak ve tam ekran arka plan.
@@ -37,9 +38,16 @@ XPORT, bilgisayarı oyun konsoluna çeviren, tamamen kontrolcüyle kullanılan b
   - Performans: oyunun CPU / RAM kullanımı, sistem CPU / RAM, NVIDIA kartlarda GPU / VRAM
 - **Gerçek uyumluluk durumu:** platform seviyesi (Kararlı / Deneysel / Desteklenmiyor) ve oyunun son açılış sonucu. Çalışmayan platformlar çalışıyormuş gibi gösterilmez.
 - **Oynama süresi takibi**, açılma sayısı, son oynama tarihi.
+- **Otomatik emülatör indirme:** kurulum sihirbazında veya Ayarlar → Emülasyon'da istenen emülatörler resmi kaynaklarından indirilip kurulur. RetroArch için gerekli çekirdekler de iner. İndirme arka planda sürer; yüzde, hız ve kalan süre üst köşede görünür, bu sırada gezinilebilir ve oyun oynanabilir. BIOS/firmware indirilmez.
+- **Uygulamalar ve Mağaza:**
+  - Uygulamalar: YouTube (TV arayüzü), Netflix, Disney+, Prime Video, Spotify, Twitch ve tam ekran tarayıcı
+  - Uygulamalar Microsoft Edge'de, uygulamaya ait ayrı bir profille açılır (DRM desteği, oturumlar kalıcı). Oyun içi menü onlarda da çalışır.
+  - Mağaza'da uygulamalar ve temalar var. Uzaktan katalog adresi (`storeCatalogUrl`) ile yeni içerik uygulama güncellemesi gerekmeden yayınlanabilir.
+- **Temalar ve modlar:** `themes/*.json` tema dosyaları ve `mods/<ad>/` CSS görünüm modları (`mod.json` + `style.css`). Modlar yalnızca görünümü değiştirir, kod çalıştıramaz.
+- **Konsol tarzı kapanış:** "Çık" ya da Alt+F4 ile ekran kararır. Ortada yapılan işlemler yazar (oyun kapatılıyor, Windows masaüstü açılıyor…), iş bitince uygulama kapanır.
 - **Oyun modu:** oyun başlayınca uygulanır, oyun bitince her şey eski haline döner:
   - oyuna yüksek işlemci önceliği
-  - yüksek performans güç planı
+  - Dengeli / Güç tasarrufu planındaysan Yüksek performans güç planı (zaten performans planındaysan dokunulmaz)
   - isteğe bağlı olarak Windows masaüstünü (görev çubuğu, `explorer.exe`) kapatma
 - **Çökmeye dayanıklılık:** küçük bir bekçi süreci uygulamayı izler. Uygulama beklenmedik şekilde kapanırsa masaüstünü ve güç planını geri getirir, uygulamayı yeniden açar. Üst üste çökmelerde döngüye girmez. Arayüz süreci çökerse kendini yeniden yükler.
 - **Windows ile başlatma** (kurulu sürümde): bilgisayar açılınca doğrudan konsol arayüzü gelir.
@@ -121,7 +129,8 @@ Sadece `src/shared/platforms.ts` dosyasını düzenleyin: `EMULATORS` listesine 
 - Oyun sırasında Guide tuşu XInput üzerinden okunur. PlayStation kontrolcüleri için şimdilik Steam Input veya DS4Windows gerekir ya da `Ctrl + Shift + Home` kullanılabilir.
 - Elle eklenen `.url` kısayollarında oynama süresi takip edilemez (taranarak bulunan mağaza oyunlarında edilir).
 - Fragmanlar ve Steam isim eşleşmesi yalnızca Steam mağazasında bulunan oyunlar için çalışır. Her oyunun soundtrack'ini internetten yasal olarak çekebilecek açık bir kaynak yok; tema müziği Steam soundtrack'lerinden veya elle seçilen dosyadan gelir.
-- EA app ve Battle.net oyunları henüz otomatik bulunmuyor (elle eklenebilir).
+- Dolphin ve Ryujinx'in sabit bir indirme adresi olmadığı için otomatik indirilemiyor; elle kurulup otomatik algılanabilir.
+- Netflix gibi DRM korumalı uygulamalar Microsoft Edge (veya Chrome) gerektirir.
 - Oyun bilgileri (yıl, tür, geliştirici) için çevrimiçi veritabanı henüz bağlı değil.
 
 ## Yol haritası

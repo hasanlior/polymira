@@ -139,6 +139,25 @@ const P: Record<string, JSX.Element> = {
     </>
   ),
   play: <path d="M8 5.5v13l10.5-6.5Z" />,
+  bag: (
+    <>
+      <path d="M5 8h14l-1 12H6Z" />
+      <path d="M9 8V6.5a3 3 0 0 1 6 0V8" />
+    </>
+  ),
+  apps: (
+    <>
+      <rect x="3.5" y="5" width="17" height="12" rx="2" />
+      <path d="M10 9v4.5l4-2.25Z" />
+      <path d="M8 20h8" />
+    </>
+  ),
+  brush: (
+    <>
+      <path d="M14.5 4.5 19.5 9.5 11 18l-5-5Z" />
+      <path d="M6 13c-2 0-3 1.5-3 3.5S2.5 20 2.5 20s3.5.5 5.5-1 2-3 2-3" />
+    </>
+  ),
   pause: <path d="M8 5.5v13M16 5.5v13" />,
   camera: (
     <>

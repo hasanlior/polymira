@@ -8,7 +8,7 @@
   --glass: rgba(10, 14, 28, 0.55);
   --glass-strong: rgba(8, 10, 20, 0.82);
   --line: rgba(255, 255, 255, 0.14);
-  --glow: 0 0 calc(1.6 * var(--u)) rgba(255, 255, 255, 0.55);
+  --glow: 0 0 calc(1 * var(--u)) rgba(255, 255, 255, 0.45);
   --ok: #7ee2a8;
   --warn: #ffd479;
   --bad: #ff8a8a;
@@ -276,6 +276,9 @@ svg {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 48vw;
+  /* Room inside the clipping box for the glow, so it is not cut into a rectangle. */
+  padding: 0.35em 0.5em;
+  margin: -0.35em -0.5em;
 }
 .x-item.sel .x-title {
   font-size: calc(3.1 * var(--u));
@@ -1267,4 +1270,65 @@ body.overlay-body #root {
 }
 .backdrop-video.show {
   opacity: 0.9;
+}
+
+/* ── Shutdown screen ──────────────────────────────────────────────── */
+.shutdown {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(2.4 * var(--u));
+  animation: fade-in 700ms ease both;
+}
+.shutdown-brand {
+  font-size: calc(7 * var(--u));
+  font-weight: 200;
+  letter-spacing: 0.35em;
+  margin-right: -0.35em;
+  opacity: 0.85;
+}
+.shutdown-text {
+  font-size: calc(2.4 * var(--u));
+  color: var(--fg-dim);
+  animation: fade-in 300ms ease both;
+}
+.shutdown.done .shutdown-brand,
+.shutdown.done .shutdown-text {
+  transition: opacity 800ms ease 150ms;
+  opacity: 0;
+}
+
+/* Icon-only covers (no box art found): small icon on a glass tile. */
+.x-icon.cover.icon-only {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.04));
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: calc(1.2 * var(--u));
+  width: calc(6 * var(--u));
+  height: calc(6 * var(--u));
+}
+.x-icon.cover.icon-only.big {
+  width: calc(10 * var(--u));
+  height: calc(10 * var(--u));
+}
+.x-icon.cover.icon-only img {
+  width: 60%;
+  height: 60%;
+}
+.cover-fallback-icon {
+  width: 30% !important;
+  height: auto !important;
+  image-rendering: auto;
+}
+
+.rot180 {
+  transform: rotate(180deg);
+}
+.setup-list {
+  overflow-y: auto;
+  scrollbar-width: none;
 }
