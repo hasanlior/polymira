@@ -71,7 +71,7 @@ extern "sysv64" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
 }
 
 /// malloc/free: a size header in front of each block so free() knows the layout.
-extern "sysv64" fn malloc(size: usize) -> *mut c_void {
+pub extern "sysv64" fn malloc(size: usize) -> *mut c_void {
     let layout = std::alloc::Layout::from_size_align(size + 16, 16).unwrap();
     unsafe {
         let p = std::alloc::alloc(layout);
@@ -83,7 +83,7 @@ extern "sysv64" fn malloc(size: usize) -> *mut c_void {
     }
 }
 
-extern "sysv64" fn free(p: *mut c_void) {
+pub extern "sysv64" fn free(p: *mut c_void) {
     if p.is_null() {
         return;
     }
@@ -132,7 +132,7 @@ pub fn implemented() -> Vec<(&'static str, usize)> {
     ("memcpy", memcpy as *const () as usize),
     ("memset", memset as *const () as usize),
     ("malloc", malloc as *const () as usize),
-    ("free", free as *const () as usize),
+    ("free", crate::hle_rt::free_any as *const () as usize),
     ("sceUserServiceInitialize", sce_user_service_initialize as *const () as usize),
     ("sceUserServiceGetInitialUser", sce_user_service_get_initial_user as *const () as usize),
     ("sceSysmoduleLoadModule", sce_sysmodule_load_module as *const () as usize),
@@ -144,5 +144,5 @@ pub fn implemented() -> Vec<(&'static str, usize)> {
 /// NID → (name, address) for every implemented function.
 pub fn table() -> &'static HashMap<String, (&'static str, usize)> {
     static T: OnceLock<HashMap<String, (&'static str, usize)>> = OnceLock::new();
-    T.get_or_init(|| implemented().into_iter().map(|(name, addr)| (nid(name), (name, addr))).collect())
+    T.get_or_init(|| implemented().into_iter().chain(crate::hle_rt::functions()).map(|(name, addr)| (name.strip_prefix('#').map(str::to_string).unwrap_or_else(|| nid(name)), (name.trim_start_matches('#'), addr))).collect())
 }

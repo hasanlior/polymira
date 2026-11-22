@@ -605,6 +605,8 @@ const EN: Record<string, string> = {
 const PATTERNS: [RegExp, string][] = [
   [/^%(\d+)$/, '$1%'],
   [/^Arama: (.+)$/, 'Search: $1'],
+  [/^PS4 paketi \((.+)\): oyun dosyaları paketin şifreli dosya sisteminde\. .*$/, 'PS4 package ($1): the game files are in the encrypted file system of the package. Add the game folder you built the package from (with eboot.bin), or install the package with shadPS4 and add the folder it creates.'],
+  [/^PS4 paketi \((.+)\): şifresiz paketler henüz okunmuyor; oyun klasörünü ekle\.$/, 'PS4 package ($1): unencrypted packages cannot be read yet; add the game folder.'],
   [/^(\d+) sistem fonksiyonundan (\d+) tanesi Orbis'te hazır$/, '$2 of $1 system functions are ready in Orbis'],
   [/^Çıkış kodu (-?\d+)\.$/, 'Exit code $1.'],
   [/^(\S+) uyumluluğu: (.+)$/, '$1 compatibility: $2'],

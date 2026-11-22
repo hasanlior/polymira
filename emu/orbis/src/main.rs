@@ -9,10 +9,13 @@
 
 mod format;
 mod hle;
+mod hle_rt;
 mod known;
 mod loader;
 mod nid;
+mod pkg;
 mod selftest;
+mod tls;
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
@@ -45,6 +48,19 @@ struct Report {
 }
 
 fn analyze(path: &str) -> Result<Report, String> {
+    // A package: say what it is and why its files cannot be read.
+    if let Ok(mut f) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut head = [0u8; 4];
+        if f.read_exact(&mut head).is_ok() && pkg::is_pkg(&head) {
+            let info = pkg::read(path)?;
+            return Err(format!(
+                "pkg:{}:{}",
+                info.content_id,
+                if info.pfs_encrypted { "encrypted" } else { "plain" }
+            ));
+        }
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let exe = Executable::parse(&bytes).map_err(|e| e.to_string())?;
     let imports = exe.imports();
@@ -102,8 +118,14 @@ fn main() -> ExitCode {
         Some("run") if args.len() >= 2 => (|| {
             let bytes = std::fs::read(&args[1]).map_err(|e| e.to_string())?;
             let exe = Executable::parse(&bytes).map_err(|e| e.to_string())?;
+            let mut kinds = std::collections::BTreeMap::new();
+            for (_, kind, _, _) in exe.relocations() {
+                *kinds.entry(kind).or_insert(0usize) += 1;
+            }
+            eprintln!("[orbis] {} ({}), {} relocations by type: {:?}", args[1], exe.container, kinds.values().sum::<usize>(), kinds);
             let loaded = loader::load(&exe)?;
-            eprintln!("[orbis] {} functions bound, {} stubbed; starting", loaded.bound, loaded.stubbed);
+            loader::install_crash_report();
+            eprintln!("[orbis] loaded at {:p}; {} imports bound, {} stubbed; starting at entry {:#x}", loaded.base, loaded.bound, loaded.stubbed, exe.entry);
             let code = loader::run(&loaded);
             eprintln!("[orbis] exited with {code}");
             Ok(())

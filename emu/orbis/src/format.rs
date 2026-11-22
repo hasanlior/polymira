@@ -15,6 +15,16 @@ pub const PT_SCE_PROCPARAM: u32 = 0x6100_0001;
 pub const PT_SCE_RELRO: u32 = 0x6100_0010;
 
 pub const DT_NULL: i64 = 0;
+// Standard ELF tags, used by PS5 executables
+pub const DT_PLTRELSZ: i64 = 2;
+pub const DT_STRTAB: i64 = 5;
+pub const DT_SYMTAB: i64 = 6;
+pub const DT_RELA: i64 = 7;
+pub const DT_RELASZ: i64 = 8;
+pub const DT_JMPREL: i64 = 0x17;
+// PS5 library / module tags
+pub const DT_SCE_NEEDED_MODULE_PS5: i64 = 0x6100_0045;
+pub const DT_SCE_IMPORT_LIB_PS5: i64 = 0x6100_0049;
 pub const DT_SCE_NEEDED_MODULE: i64 = 0x6100_000F;
 pub const DT_SCE_IMPORT_LIB: i64 = 0x6100_0015;
 pub const DT_SCE_JMPREL: i64 = 0x6100_0029;
@@ -94,6 +104,8 @@ impl Executable {
         }
         let (elf, container) = if file[..4] == [0x4F, 0x15, 0x3D, 0x1D] {
             (unwrap_self(file)?, "SELF")
+        } else if file[..4] == [0x54, 0x14, 0xF5, 0xEE] {
+            (unwrap_self(file)?, "PS5 SELF")
         } else if file[..4] == [0x7F, b'E', b'L', b'F'] {
             (file.to_vec(), "ELF")
         } else {
@@ -132,12 +144,49 @@ impl Executable {
         self.dynamic.iter().find(|(t, _)| *t == tag).map(|(_, v)| *v)
     }
 
-    /// Bytes of the PT_SCE_DYNLIBDATA segment, where Sony keeps the symbol and string tables.
-    pub fn dynlib(&self) -> &[u8] {
-        match self.segment(PT_SCE_DYNLIBDATA) {
-            Some(p) => self.elf.get(p.offset as usize..(p.offset + p.filesz) as usize).unwrap_or(&[]),
-            None => &[],
+    /// PS4 keeps the symbol and string tables in PT_SCE_DYNLIBDATA (addresses are offsets
+    /// into it); PS5 keeps them in a loaded segment (addresses are virtual addresses).
+    pub fn is_ps5_layout(&self) -> bool {
+        self.segment(PT_SCE_DYNLIBDATA).is_none()
+    }
+
+    /// Bytes from table address `addr` to the end of the region that contains it.
+    pub fn at(&self, addr: u64) -> &[u8] {
+        if let Some(p) = self.segment(PT_SCE_DYNLIBDATA) {
+            let dl = self.elf.get(p.offset as usize..(p.offset + p.filesz) as usize).unwrap_or(&[]);
+            return dl.get(addr as usize..).unwrap_or(&[]);
         }
+        for p in self.phdrs.iter().filter(|p| p.kind == PT_LOAD) {
+            if addr >= p.vaddr && addr < p.vaddr + p.filesz {
+                let start = (p.offset + (addr - p.vaddr)) as usize;
+                let end = (p.offset + p.filesz) as usize;
+                return self.elf.get(start..end.min(self.elf.len())).unwrap_or(&[]);
+            }
+        }
+        &[]
+    }
+
+    fn tag(&self, t: Table) -> Option<u64> {
+        let ps5 = self.is_ps5_layout();
+        let code = match t {
+            Table::Strtab => if ps5 { DT_STRTAB } else { DT_SCE_STRTAB },
+            Table::Symtab => if ps5 { DT_SYMTAB } else { DT_SCE_SYMTAB },
+            Table::Symtabsz => DT_SCE_SYMTABSZ,
+            Table::Rela => if ps5 { DT_RELA } else { DT_SCE_RELA },
+            Table::Relasz => if ps5 { DT_RELASZ } else { DT_SCE_RELASZ },
+            Table::Jmprel => if ps5 { DT_JMPREL } else { DT_SCE_JMPREL },
+            Table::Pltrelsz => if ps5 { DT_PLTRELSZ } else { DT_SCE_PLTRELSZ },
+        };
+        self.dyn_value(code)
+    }
+
+    fn string(&self, off: u64) -> String {
+        let Some(strtab) = self.tag(Table::Strtab) else { return String::new() };
+        let bytes = self.at(strtab);
+        let start = (off & 0xFFFF_FFFF) as usize;
+        let s = bytes.get(start..).unwrap_or(&[]);
+        let len = s.iter().position(|&b| b == 0).unwrap_or(0);
+        String::from_utf8_lossy(&s[..len]).into_owned()
     }
 
     fn read_dynamic(&mut self) -> Result<(), FormatError> {
@@ -153,22 +202,16 @@ impl Executable {
             self.dynamic.push((tag, val));
             o += 16;
         }
-        let strtab = self.dyn_value(DT_SCE_STRTAB).unwrap_or(0) as usize;
-        let read_name = |exe: &Executable, off: u64| -> String {
-            let dl = exe.dynlib();
-            let start = strtab + (off & 0xFFFF_FFFF) as usize;
-            let bytes = dl.get(start..).unwrap_or(&[]);
-            let len = bytes.iter().position(|&b| b == 0).unwrap_or(0);
-            String::from_utf8_lossy(&bytes[..len]).into_owned()
-        };
+        let ps5 = self.is_ps5_layout();
+        let (lib_tag, mod_tag) = if ps5 { (DT_SCE_IMPORT_LIB_PS5, DT_SCE_NEEDED_MODULE_PS5) } else { (DT_SCE_IMPORT_LIB, DT_SCE_NEEDED_MODULE) };
         let mut libs = vec![];
         let mut mods = vec![];
         for &(tag, val) in &self.dynamic {
             let id = (val >> 48) as u32;
-            if tag == DT_SCE_IMPORT_LIB {
-                libs.push((id, read_name(self, val)));
-            } else if tag == DT_SCE_NEEDED_MODULE {
-                mods.push((id, read_name(self, val)));
+            if tag == lib_tag {
+                libs.push((id, self.string(val)));
+            } else if tag == mod_tag {
+                mods.push((id, self.string(val)));
             }
         }
         self.libraries = libs;
@@ -176,25 +219,20 @@ impl Executable {
         Ok(())
     }
 
-    /// Name of the symbol at `index` in the Sony symbol table.
+    /// Name of the symbol at `index` in the symbol table.
     pub fn symbol_name(&self, index: u64) -> Option<String> {
-        let dl = self.dynlib();
-        let symtab = self.dyn_value(DT_SCE_SYMTAB)? as usize;
-        let strtab = self.dyn_value(DT_SCE_STRTAB)? as usize;
-        let name_off = u32_at(dl, symtab + index as usize * 24).ok()? as usize;
-        let bytes = dl.get(strtab + name_off..)?;
-        let len = bytes.iter().position(|&b| b == 0)?;
-        Some(String::from_utf8_lossy(&bytes[..len]).into_owned())
+        let symtab = self.tag(Table::Symtab)?;
+        let name_off = u32_at(self.at(symtab), index as usize * 24).ok()? as u64;
+        Some(self.string(name_off))
     }
 
     /// Every imported function, from the symbol table ("NID#libraryId#moduleId").
     pub fn imports(&self) -> Vec<Import> {
-        let dl = self.dynlib();
-        let (Some(symtab), Some(size)) = (self.dyn_value(DT_SCE_SYMTAB), self.dyn_value(DT_SCE_SYMTABSZ)) else { return vec![] };
+        let (Some(symtab), Some(size)) = (self.tag(Table::Symtab), self.tag(Table::Symtabsz)) else { return vec![] };
+        let tbl = self.at(symtab);
         let mut out = vec![];
         for i in 0..(size / 24) {
-            let o = symtab as usize + i as usize * 24;
-            let shndx = u16_at(dl, o + 6).unwrap_or(1);
+            let shndx = u16_at(tbl, i as usize * 24 + 6).unwrap_or(1);
             if shndx != 0 {
                 continue; // defined here, not imported
             }
@@ -210,18 +248,29 @@ impl Executable {
 
     /// Relocation entries: (offset, type, symbol index, addend).
     pub fn relocations(&self) -> Vec<(u64, u32, u64, i64)> {
-        let dl = self.dynlib();
         let mut out = vec![];
-        for (start_tag, size_tag) in [(DT_SCE_RELA, DT_SCE_RELASZ), (DT_SCE_JMPREL, DT_SCE_PLTRELSZ)] {
-            let (Some(start), Some(size)) = (self.dyn_value(start_tag), self.dyn_value(size_tag)) else { continue };
+        for (start_t, size_t) in [(Table::Rela, Table::Relasz), (Table::Jmprel, Table::Pltrelsz)] {
+            let (Some(start), Some(size)) = (self.tag(start_t), self.tag(size_t)) else { continue };
+            let tbl = self.at(start);
             for i in 0..size / 24 {
-                let o = (start + i * 24) as usize;
-                let (Ok(off), Ok(info), Ok(add)) = (u64_at(dl, o), u64_at(dl, o + 8), u64_at(dl, o + 16)) else { continue };
+                let o = (i * 24) as usize;
+                let (Ok(off), Ok(info), Ok(add)) = (u64_at(tbl, o), u64_at(tbl, o + 8), u64_at(tbl, o + 16)) else { break };
                 out.push((off, (info & 0xFFFF_FFFF) as u32, info >> 32, add as i64));
             }
         }
         out
     }
+}
+
+#[derive(Clone, Copy)]
+enum Table {
+    Strtab,
+    Symtab,
+    Symtabsz,
+    Rela,
+    Relasz,
+    Jmprel,
+    Pltrelsz,
 }
 
 /// Rebuilds the ELF file from a fake-signed (unencrypted) SELF.

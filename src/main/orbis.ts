@@ -36,6 +36,14 @@ export async function analyzeGame(game: Game): Promise<OrbisReport> {
   if (!file) throw new Error('Oyunun çalıştırılabilir dosyası (eboot.bin) bulunamadı.')
   const r = await run(['analyze', file, '--json'], 30000)
   const json = JSON.parse(r.out.trim().split('\n').pop() || '{}') as OrbisReport & { error?: string }
+  if (json.error?.startsWith('pkg:')) {
+    const [, contentId, state] = json.error.split(':')
+    throw new Error(
+      state === 'encrypted'
+        ? `PS4 paketi (${contentId}): oyun dosyaları paketin şifreli dosya sisteminde. Paketi oluşturduğun oyun klasörünü (eboot.bin içeren) ekle ya da paketi shadPS4 ile kurup çıkan klasörü ekle.`
+        : `PS4 paketi (${contentId}): şifresiz paketler henüz okunmuyor; oyun klasörünü ekle.`
+    )
+  }
   if (json.error) throw new Error(json.error)
   return json
 }
