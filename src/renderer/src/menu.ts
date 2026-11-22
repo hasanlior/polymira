@@ -639,6 +639,21 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
         'Ekranın altındaki tuş ipuçları bu simgelerle gösterilir'
       ),
       { id: 'set:pads:remap', title: 'Tuş ataması', icon: 'grid', subtitle: 'Her işlemi istediğin tuşa ata', value: Object.keys(s.padMap).length ? 'Özel' : 'Varsayılan', onActivate: () => ctx.openRemap() },
+      toggle(
+        'set:pads:auto',
+        'Emülatörlerde otomatik kol ayarı',
+        'chip',
+        s.autoPadConfig,
+        (v) => set({ autoPadConfig: v }),
+        'Oyun başlamadan önce emülatörün kol ayarları yazılır; emülatörü açıp ayarlamana gerek kalmaz'
+      ),
+      {
+        id: 'set:pads:reapply',
+        title: 'Kol ayarlarını yeniden uygula',
+        icon: 'refresh',
+        subtitle: 'Emülatörlerde değiştirdiğin kol ayarlarını varsayılana döndürür (bir sonraki oyunda yazılır)',
+        onActivate: () => ctx.confirm('Emülatörlerin kol ayarları bir sonraki oyunda yeniden yazılsın mı?', () => set({ padConfigured: {} }))
+      },
       toggle('set:pads:rumble', 'Titreşim', 'pad', s.padRumble, (v) => set({ padRumble: v }), 'Seçim yaparken kısa titreşim (destekleyen kumandalarda)'),
       choice('set:hotkey', 'Oyun içi menü tuşu', 'game', s.overlayHotkey, HOTKEYS, (v) => set({ overlayHotkey: v }), ctx, 'Klavye: Ctrl + Shift + Home'),
       {

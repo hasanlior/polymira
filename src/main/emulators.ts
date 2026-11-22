@@ -2,6 +2,7 @@ import { shell } from 'electron'
 import fs from 'fs'
 import os from 'os'
 import { paths } from './store'
+import { ensurePadConfig } from './padconfig'
 import path from 'path'
 import { EMULATORS, getEmulator, getPlatform, resolveRunner, runnerLabel } from '@shared/platforms'
 import type { EmulatorStatus, Game, Settings } from '@shared/types'
@@ -143,6 +144,7 @@ export function planLaunch(game: Game, settings: Settings): LaunchPlan {
     }
   }
 
+  ensurePadConfig(emu.id, exe)
   const args = emu.args.map((a) => a.replace('{rom}', target).replace('{core}', core))
   const extra: string[] = []
   if (emu.id === 'retroarch') extra.push(...retroArchExtras(game, exe))
@@ -176,7 +178,20 @@ function retroArchExtras(game: Game, exe: string): string[] {
   const cfgDir = path.join(paths.cache, 'retroarch')
   fs.mkdirSync(cfgDir, { recursive: true })
   const cfg = path.join(cfgDir, 'append.cfg')
-  fs.writeFileSync(cfg, `network_cmd_enable = "true"\nnetwork_cmd_port = "${RETROARCH_CMD_PORT}"\nsavestate_auto_index = "false"\n`)
+  // Controllers: RetroArch's own autoconfig profiles bind XInput / DualShock / Switch pads.
+  fs.writeFileSync(
+    cfg,
+    [
+      'network_cmd_enable = "true"',
+      `network_cmd_port = "${RETROARCH_CMD_PORT}"`,
+      'savestate_auto_index = "false"',
+      'input_autodetect_enable = "true"',
+      'input_joypad_driver = "xinput"',
+      'pause_nonactive = "false"',
+      'video_fullscreen = "true"',
+      'config_save_on_exit = "true"'
+    ].join('\n') + '\n'
+  )
   const out = [`--appendconfig=${cfg}`]
   const shader = game.emuOptions?.shader
   if (shader && shader !== 'none') {

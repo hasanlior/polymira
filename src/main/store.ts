@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS: Settings = {
   raUser: '',
   raKey: '',
   autoPadConfig: true,
+  padConfigured: {},
   watchedFolders: [],
   emulatorPaths: {},
   platformEmulator: {},

@@ -108,6 +108,8 @@ export interface Settings {
   raKey: string
   /** Write controller settings into emulators before launching, so they work with no setup. */
   autoPadConfig: boolean
+  /** Emulators whose controller settings were written (id → exe path). */
+  padConfigured: Record<string, string>
   watchedFolders: WatchedFolder[]
   emulatorPaths: Record<string, string>
   /** Per-platform emulator choice; falls back to the platform's first option. */
