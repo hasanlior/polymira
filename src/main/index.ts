@@ -6,11 +6,17 @@ import { BRAND } from '@shared/brand'
 import { MEDIA_SCHEME, type IpcContract, type IpcEvents, type IpcEvent } from '@shared/ipc'
 import type { AppState, DirEntry, Screenshot, Toast, WindowMode } from '@shared/types'
 import { initStores, paths, store } from './store'
-import { addSingle, addWatchedFolder, moveGame, refreshMissing, removeGame, removeWatchedFolder, scanFolders, setCustomCover } from './library'
-import { CoverQueue, coverFile } from './covers'
+import { addSingle, addWatchedFolder, moveGame, refreshMissing, removeGame, removeWatchedFolder, scanFolders, setCustomBackground, setCustomCover, setMusic } from './library'
+import { ArtQueue, backgroundFile, coverFile } from './covers'
 import { detectEmulators, emulatorStatus, LaunchError, planLaunch } from './emulators'
 import { SessionManager } from './session'
 import { GamepadWatcher } from './gamepadWatcher'
+import { spawn } from 'child_process'
+import { applyDiscovery, runDiscovery } from './discover'
+import { riotClientPath } from './launchers'
+import { attachSoundtracks } from './music'
+import { enterGameMode, exitGameMode, startExplorer } from './gameMode'
+import { initRuntime, readRuntime, runtimeFile, updateRuntime } from './runtime'
 
 /** Keyboard fallback for opening the in-game menu (works while the emulator has focus). */
 const OVERLAY_SHORTCUT = 'Control+Shift+Home'
@@ -70,20 +76,34 @@ function broadcast(): void {
   broadcastTimer = setTimeout(() => {
     broadcastTimer = null
     send('state', snapshot())
-  }, 40)
+  }, 150)
 }
 
-const covers = new CoverQueue((id, ok) => {
-  if (!ok) return
-  const g = store.games.find((x) => x.id === id)
-  store.updateGame(id, { hasCover: true, coverRev: (g?.coverRev ?? 0) + 1 })
-  broadcast()
-})
+const ART_RECHECK_MS = 7 * 24 * 3600 * 1000
 
-function queueCovers(): number {
-  if (!store.settings.downloadCovers) return 0
-  const todo = store.games.filter((g) => !g.hasCover && g.platformId !== 'pc')
-  covers.push(todo)
+const art = new ArtQueue(
+  (id, r) => {
+    const g = store.games.find((x) => x.id === id)
+    if (!g) return
+    const patch: Partial<typeof g> = { artCheckedAt: Date.now() }
+    if (r.cover) Object.assign(patch, { hasCover: true, coverRev: (g.coverRev ?? 0) + 1 })
+    if (r.background) Object.assign(patch, { hasBackground: true, bgRev: (g.bgRev ?? 0) + 1 })
+    if (r.trailer !== undefined) patch.trailerUrl = r.trailer
+    if (r.steamAppId && r.steamAppId !== g.meta.steamAppId) patch.meta = { ...g.meta, steamAppId: r.steamAppId }
+    store.updateGame(id, patch)
+    if (r.cover || r.background || r.trailer) broadcast()
+  },
+  () => store.settings.downloadCovers
+)
+
+/** Queues artwork lookup for games missing a cover or background. Returns how many were queued. */
+function queueCovers(force = false): number {
+  const todo = store.games.filter(
+    (g) =>
+      (!g.hasCover || !g.hasBackground || (g.platformId === 'pc' && g.trailerUrl === undefined)) &&
+      (force || !g.artCheckedAt || Date.now() - g.artCheckedAt > ART_RECHECK_MS)
+  )
+  art.push(todo)
   return todo.length
 }
 
@@ -125,6 +145,12 @@ function createMainWindow(): void {
   })
   mainWindow.on('closed', () => {
     if (mainWindow?.isDestroyed()) mainWindow = null
+  })
+  // Logging off / shutting down Windows is not a crash.
+  mainWindow.on('session-end', () => updateRuntime({ cleanExit: true }))
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    console.warn('[main] renderer gone:', details.reason, 'exit', details.exitCode)
+    if (details.reason !== 'clean-exit') setTimeout(() => mainWindow?.webContents.reload(), 500)
   })
   load(mainWindow, 'index')
   if (old && !old.isDestroyed()) old.destroy()
@@ -209,7 +235,10 @@ function toggleOverlay(): void {
   else openOverlay()
 }
 
-session.on('started', () => {
+session.on('started', (info: import('@shared/types').SessionInfo) => {
+  void enterGameMode(info.pid).then((applied) => {
+    if (applied.length) console.log('[game mode]', applied.join(', '))
+  })
   mainWindow?.hide()
   ensureOverlay()
   watcher.hotkey = store.settings.overlayHotkey
@@ -220,6 +249,7 @@ session.on('started', () => {
 session.on('changed', () => broadcast())
 
 session.on('ended', (end: import('./session').SessionEnd) => {
+  void exitGameMode()
   watcher.stop()
   globalShortcut.unregister(OVERLAY_SHORTCUT)
   if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.destroy()
@@ -318,11 +348,11 @@ function listDir(dir: string | null): { path: string | null; parent: string | nu
 
 type Handlers = { [C in keyof IpcContract]: (...args: Parameters<IpcContract[C]>) => ReturnType<IpcContract[C]> | Promise<ReturnType<IpcContract[C]>> }
 
-function runScan(fn: () => ReturnType<typeof scanFolders>) {
+async function runScan(fn: () => ReturnType<typeof scanFolders>) {
   scanning = true
   broadcast()
   try {
-    const { report } = fn()
+    const { report } = await fn()
     queueCovers()
     return report
   } finally {
@@ -340,6 +370,11 @@ const handlers: Handlers = {
     if (patch.windowMode) applyWindowMode(prev.windowMode, next.windowMode)
     if (patch.overlayHotkey && watcher) watcher.hotkey = next.overlayHotkey
     if (patch.downloadCovers) queueCovers()
+    if (patch.autoRestart !== undefined) updateRuntime({ autoRestart: next.autoRestart })
+    if (patch.launchOnStartup !== undefined) {
+      if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: next.launchOnStartup })
+      else toast('warning', 'Windows ile başlatma yalnızca kurulu sürümde çalışır.')
+    }
     broadcast()
     return next
   },
@@ -377,7 +412,15 @@ const handlers: Handlers = {
     setCustomCover(id, image)
     broadcast()
   },
-  'library:fetchCovers': () => queueCovers(),
+  'library:fetchCovers': () => queueCovers(true),
+  'library:setBackground': (id, image) => {
+    setCustomBackground(id, image)
+    broadcast()
+  },
+  'library:setMusic': (id, file) => {
+    setMusic(id, file)
+    broadcast()
+  },
 
   'fs:list': (dir) => listDir(dir),
   'dialog:folder': async () => {
@@ -425,8 +468,26 @@ const handlers: Handlers = {
     }
     store.updateGame(id, { lastPlayedAt: Date.now(), playCount: game.playCount + 1 })
     if (plan.type === 'url') {
-      await shell.openExternal(plan.url)
-      toast('info', `${game.title} başlatıcı üzerinden açılıyor. Bu oyunun süresi takip edilemez.`)
+      const riot = plan.url.match(/^riot:\/\/([a-z_]+)\/([a-z]+)/i)
+      if (riot) {
+        const client = riotClientPath()
+        if (!client) throw new Error('Riot Client bulunamadı.')
+        spawn(client, [`--launch-product=${riot[1]}`, `--launch-patchline=${riot[2]}`], { detached: true, stdio: 'ignore' }).unref()
+      } else if (/^shell:/i.test(plan.url)) {
+        // Xbox app / Microsoft Store games are started through their app id.
+        spawn('explorer.exe', [plan.url], { detached: true, stdio: 'ignore' }).unref()
+      } else {
+        await shell.openExternal(plan.url)
+      }
+      const dir = game.meta.installDir
+      if (dir && fs.existsSync(dir)) {
+        toast('info', `${game.title} başlatıcı üzerinden açılıyor…`)
+        void session.attachByFolder(game, dir).then((info) => {
+          if (!info) toast('warning', `${game.title} işlemi bulunamadı; süre ve oyun içi menü bu oturumda kullanılamaz.`)
+        })
+      } else {
+        toast('info', `${game.title} başlatıcı üzerinden açılıyor. Bu oyunun süresi takip edilemez.`)
+      }
       broadcast()
       return
     }
@@ -470,6 +531,23 @@ const handlers: Handlers = {
     if (!resolved.startsWith(path.resolve(paths.screenshots) + path.sep)) throw new Error('Geçersiz dosya.')
     fs.rmSync(resolved, { force: true })
   },
+  'discover:run': async () => {
+    scanning = true
+    broadcast()
+    try {
+      return await runDiscovery((text) => send('progress', text))
+    } finally {
+      scanning = false
+      broadcast()
+    }
+  },
+  'discover:apply': (keys) => {
+    const r = applyDiscovery(keys)
+    void attachSoundtracks().then((n) => n && broadcast())
+    queueCovers()
+    broadcast()
+    return r
+  },
   'app:quit': () => app.quit()
 }
 
@@ -485,6 +563,11 @@ function registerMediaProtocol(): void {
     const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '')
     let file: string | null = null
     if (url.host === 'covers') file = coverFile(path.basename(rel, '.png'))
+    else if (url.host === 'bg') file = backgroundFile(path.basename(rel, '.jpg'))
+    else if (url.host === 'music') {
+      // Only files the user (or discovery) attached to a game can be served.
+      file = store.games.find((g) => g.id === path.basename(rel))?.musicPath ?? null
+    }
     else if (url.host === 'shots') {
       const candidate = path.resolve(paths.screenshots, rel)
       if (candidate.startsWith(path.resolve(paths.screenshots) + path.sep)) file = candidate
@@ -504,8 +587,39 @@ app.on('second-instance', () => {
   }
 })
 
+/** Undo leftovers from a previous run that ended badly (desktop shell stopped, power plan). */
+function recoverPreviousRun(): void {
+  const prev = readRuntime()
+  if (!prev) return
+  if (prev.explorerStopped) startExplorer()
+  if (prev.previousPowerScheme) spawn('powercfg', ['/setactive', prev.previousPowerScheme], { windowsHide: true })
+}
+
+function startWatchdog(): void {
+  if (process.argv.includes('--no-watchdog')) return
+  const script = path.join(__dirname, 'watchdog.js')
+  if (!fs.existsSync(script)) return
+  const child = spawn(process.execPath, [script, runtimeFile()], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+  })
+  child.unref()
+}
+
 app.whenReady().then(() => {
   initStores()
+  recoverPreviousRun()
+  initRuntime({
+    pid: process.pid,
+    cleanExit: false,
+    autoRestart: store.settings.autoRestart,
+    relaunch: { exe: process.execPath, args: process.argv.slice(1), cwd: process.cwd() },
+    explorerStopped: false,
+    previousPowerScheme: null
+  })
+  startWatchdog()
   watcher = new GamepadWatcher(store.settings.overlayHotkey)
   watcher.on('menu', toggleOverlay)
   registerMediaProtocol()
@@ -521,12 +635,19 @@ app.whenReady().then(() => {
     if (store.settings.scanOnStartup && store.settings.watchedFolders.length) runScan(() => scanFolders())
     else refreshMissing()
     queueCovers()
+    void attachSoundtracks().then((n) => n && broadcast())
     broadcast()
+    if (process.env.APP_RESTARTED) {
+      delete process.env.APP_RESTARTED
+      toast('warning', `${BRAND.name} beklenmedik şekilde kapandı ve yeniden başlatıldı.`)
+    }
   }, 1200)
 })
 
 app.on('before-quit', () => {
+  updateRuntime({ cleanExit: true })
   void session.stop()
+  void exitGameMode()
   store.flush()
 })
 

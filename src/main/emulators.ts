@@ -93,6 +93,8 @@ export function planLaunch(game: Game, settings: Settings): LaunchPlan {
   const platform = getPlatform(game.platformId)
   if (!platform) throw new LaunchError('Bilinmeyen platform.')
 
+  if (game.kind === 'uri') return { type: 'url', url: game.path, label: game.meta.source ?? 'PC' }
+
   const target = game.kind === 'titleId' ? game.meta.titleId ?? path.basename(game.path) : game.path
   if (game.kind !== 'titleId' && !fs.existsSync(game.path)) {
     throw new LaunchError('Oyun dosyası bulunamadı. Taşınmış ya da silinmiş olabilir.')

@@ -62,6 +62,7 @@ export interface MenuCtx {
   launch: (gameId: string) => void
   run: (fn: () => Promise<unknown>, success?: string | ((r: unknown) => string | null)) => void
   openScreenshots: (gameId?: string) => void
+  openScan: () => void
   setSettings: (patch: Partial<Settings>) => void
 }
 
@@ -77,9 +78,11 @@ export function platformGames(state: AppState, platformId: string): Game[] {
   return state.games.filter((g) => g.platformId === platformId).sort(byTitle)
 }
 
+const SOURCE_LABEL: Record<string, string> = { steam: 'Steam', epic: 'Epic Games', gog: 'GOG', xbox: 'Xbox uygulaması', riot: 'Riot Games', ubisoft: 'Ubisoft Connect' }
+
 export function gameSubtitle(g: Game): string {
   const p = getPlatform(g.platformId)
-  const parts = [p?.name ?? g.platformId]
+  const parts = [(g.meta.source && SOURCE_LABEL[g.meta.source]) || p?.name || g.platformId]
   if (g.missing) parts.push('Dosya bulunamadı')
   else if (g.lastLaunch?.result === 'crashed') parts.push('Son açılışta sorun')
   else if (g.playTimeSec > 0) parts.push(formatPlayTime(g.playTimeSec))
@@ -125,6 +128,34 @@ export function gameOptions(g: Game, ctx: MenuCtx): OptItem[] {
           onPick: (file) => ctx.run(() => window.bridge.invoke('library:setCover', g.id, file), 'Kapak güncellendi.')
         })
     },
+    {
+      label: 'Arka plan görseli seç',
+      icon: 'display',
+      onSelect: () =>
+        ctx.browse({
+          title: 'Arka plan görseli seç',
+          mode: 'file',
+          extensions: ['.png', '.jpg', '.jpeg', '.webp'],
+          onPick: (file) => ctx.run(() => window.bridge.invoke('library:setBackground', g.id, file), 'Arka plan güncellendi.')
+        })
+    },
+    g.musicPath
+      ? {
+          label: 'Tema müziğini kaldır',
+          icon: 'sound',
+          onSelect: () => ctx.run(() => window.bridge.invoke('library:setMusic', g.id, null), 'Tema müziği kaldırıldı.')
+        }
+      : {
+          label: 'Tema müziği seç',
+          icon: 'sound',
+          onSelect: () =>
+            ctx.browse({
+              title: 'Tema müziği seç (mp3, ogg, wav, flac, m4a)',
+              mode: 'file',
+              extensions: ['.mp3', '.ogg', '.wav', '.flac', '.m4a', '.opus'],
+              onPick: (file) => ctx.run(() => window.bridge.invoke('library:setMusic', g.id, file), 'Tema müziği ayarlandı.')
+            })
+        },
     {
       label: 'Platformu değiştir',
       icon: 'folder',
@@ -357,6 +388,7 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     children: [
       choice('set:windowMode', 'Ekran modu', 'display', s.windowMode, WINDOW_MODES, (v) => set({ windowMode: v }), ctx),
       toggle('set:animations', 'Menü animasyonları', 'refresh', s.animations, (v) => set({ animations: v }), 'Kapatmak düşük donanımda akıcılığı artırır'),
+      toggle('set:gameBg', 'Oyun arka planları', 'photo', s.gameBackgrounds, (v) => set({ gameBackgrounds: v }), 'Bir oyunun üstüne gelince görseli arka planda gösterilir'),
       choice('set:theme', 'Arka plan teması', 'palette', s.theme, THEMES.map((t) => ({ value: t.value, label: t.label })), (v) => set({ theme: v }), ctx)
     ]
   }
@@ -366,6 +398,17 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     icon: 'sound',
     children: [
       toggle('set:menuSounds', 'Menü sesleri', 'sound', s.menuSounds, (v) => set({ menuSounds: v })),
+      toggle('set:trailers', 'Oyun fragmanları', 'play', s.gameTrailers, (v) => set({ gameTrailers: v }), 'Bir oyunun üstünde durunca resmi fragmanı sesiyle arka planda oynar (Steam)'),
+      toggle('set:gameMusic', 'Oyun tema müzikleri', 'sound', s.gameMusic, (v) => set({ gameMusic: v }), 'Bir oyunun üstüne gelince tema müziği çalar (oyun seçeneklerinden müzik atanabilir)'),
+      choice(
+        'set:musicVolume',
+        'Tema müziği ses seviyesi',
+        'sound',
+        s.musicVolume,
+        [0.2, 0.4, 0.6, 0.8, 1].map((v) => ({ value: v, label: `%${Math.round(v * 100)}` })),
+        (v) => set({ musicVolume: v }),
+        ctx
+      ),
       choice(
         'set:volume',
         'Menü ses seviyesi',
@@ -401,10 +444,37 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
   }
   const gameSettings: XItem = {
     id: 'set:game',
-    title: 'Oyun Ayarları',
+    title: 'Oyun Modu ve Sistem',
     icon: 'game',
     children: [
-      toggle('set:pause', 'Menü açılınca oyunu duraklat', 'pause', s.pauseOnOverlay, (v) => set({ pauseOnOverlay: v }), 'Oyun içi menü açıkken oyun işlemi askıya alınır')
+      toggle('set:pause', 'Menü açılınca oyunu duraklat', 'pause', s.pauseOnOverlay, (v) => set({ pauseOnOverlay: v }), 'Oyun içi menü açıkken oyun işlemi askıya alınır'),
+      toggle('set:gm:prio', 'Oyuna yüksek işlemci önceliği', 'chip', s.gmPriority, (v) => set({ gmPriority: v }), 'Oyun, arka plandaki programlardan önce işlemci zamanı alır'),
+      toggle('set:gm:power', 'Yüksek performans güç planı', 'power', s.gmPowerPlan, (v) => set({ gmPowerPlan: v }), 'Oyun sırasında açılır, oyun bitince önceki plana dönülür'),
+      {
+        ...toggle(
+          'set:gm:explorer',
+          'Oyun sırasında Windows masaüstünü kapat',
+          'monitor',
+          s.gmStopExplorer,
+          (v) => set({ gmStopExplorer: v }),
+          'Görev çubuğu ve masaüstü oyun boyunca kapanır, oyun bitince geri açılır. Açık Dosya Gezgini pencereleri kapanır.'
+        ),
+        onActivate: () =>
+          s.gmStopExplorer
+            ? set({ gmStopExplorer: false })
+            : ctx.confirm(
+                'Oyun sırasında Windows masaüstü (görev çubuğu, Dosya Gezgini) kapatılsın mı?\nOyun bitince veya uygulama kapanınca otomatik geri açılır.',
+                () => set({ gmStopExplorer: true })
+              )
+      },
+      toggle('set:sys:restart', 'Kapanırsa otomatik yeniden başlat', 'refresh', s.autoRestart, (v) => set({ autoRestart: v }), 'Beklenmedik kapanmada uygulama kendini yeniden açar ve masaüstünü geri getirir'),
+      toggle('set:sys:startup', 'Windows açılınca başlat', 'home', s.launchOnStartup, (v) => set({ launchOnStartup: v }), 'Bilgisayar açılınca doğrudan konsol arayüzü gelir'),
+      {
+        id: 'set:sys:wizard',
+        title: 'Kurulum sihirbazını yeniden çalıştır',
+        icon: 'refresh',
+        onActivate: () => set({ setupDone: false })
+      }
     ]
   }
   const emulation: XItem = {
@@ -502,7 +572,7 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
       toggle('set:lib:covers', 'Kapakları otomatik indir', 'photo', s.downloadCovers, (v) => set({ downloadCovers: v }), 'libretro-thumbnails arşivinden'),
       {
         id: 'set:lib:fetch',
-        title: 'Eksik kapakları şimdi indir',
+        title: 'Eksik kapak ve arka planları şimdi indir',
         icon: 'photo',
         onActivate: () => ctx.run(() => window.bridge.invoke('library:fetchCovers'), (n) => (n ? `${n} oyun için kapak aranıyor…` : 'Eksik kapak yok ya da indirme kapalı.'))
       }
@@ -629,6 +699,13 @@ function homeItems(ctx: MenuCtx): XItem[] {
     subtitle: 'Klasör tara veya tek oyun ekle',
     icon: 'plus',
     children: [
+      {
+        id: 'home:add:scan',
+        title: 'Bilgisayarı tara',
+        subtitle: 'Steam, Epic Games, GOG oyunlarını, emülatörleri ve oyun klasörlerini otomatik bulur',
+        icon: 'search',
+        onActivate: () => ctx.openScan()
+      },
       { id: 'home:add:folder', title: 'Oyun klasörü ekle', subtitle: 'Platformu otomatik algıla veya seç', icon: 'folder', onActivate: () => addFolderFlow(ctx) },
       {
         id: 'home:add:rescan',

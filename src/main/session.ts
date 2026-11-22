@@ -3,11 +3,21 @@ import { EventEmitter } from 'events'
 import os from 'os'
 import type { Game, LaunchResult, PerfSnapshot, SessionInfo } from '@shared/types'
 import type { LaunchPlan } from './emulators'
-import { processCpuTimeMs, processWorkingSetMb, resumeProcess, suspendProcess, focusProcessWindow } from './native/win32'
+import path from 'path'
+import {
+  focusProcessWindow,
+  listProcesses,
+  processAlive,
+  processCpuTimeMs,
+  processWorkingSetMb,
+  resumeProcess,
+  suspendProcess
+} from './native/win32'
 
 interface Running {
   game: Game
-  child: ChildProcess
+  /** Null for games started by a store launcher (tracked by polling instead). */
+  child: ChildProcess | null
   info: SessionInfo
   pausedAt: number | null
   stoppedByUser: boolean
@@ -63,6 +73,56 @@ export class SessionManager extends EventEmitter {
         resolve({ ...info })
       })
     })
+  }
+
+  /**
+   * Store games (Steam, Epic…) are started by their launcher, not by us. Wait for a process
+   * running from the game's install folder and track that one, so the in-game menu,
+   * pausing, game mode and play time work for them too.
+   */
+  async attachByFolder(game: Game, installDir: string, timeoutMs = 120000): Promise<SessionInfo | null> {
+    if (this.cur) throw new Error('Zaten çalışan bir oyun var.')
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (this.cur) return null
+      const pid = findGameProcess(installDir)
+      if (pid) {
+        const info: SessionInfo = { gameId: game.id, pid, startedAt: Date.now(), paused: false, pausedMs: 0 }
+        this.cur = { game, child: null, info, pausedAt: null, stoppedByUser: false, lastCpu: null }
+        this.watchDetached(installDir)
+        this.emit('started', { ...info })
+        this.emit('changed', this.info)
+        return { ...info }
+      }
+      await sleep(1500)
+    }
+    return null
+  }
+
+  private watchDetached(installDir: string): void {
+    const tick = async () => {
+      const cur = this.cur
+      if (!cur || cur.child) return
+      if (!processAlive(cur.info.pid)) {
+        // Launchers often hand over to the real game executable: give it a moment.
+        let next: number | null = null
+        if (!cur.stoppedByUser) {
+          for (let i = 0; i < 5 && !next; i++) {
+            await sleep(1500)
+            next = findGameProcess(installDir)
+          }
+        }
+        if (next && this.cur === cur) {
+          cur.info.pid = next
+          this.emit('changed', this.info)
+        } else {
+          if (this.cur === cur) this.finish(0)
+          return
+        }
+      }
+      setTimeout(tick, 2000)
+    }
+    setTimeout(tick, 2000)
   }
 
   private finish(code: number | null): void {
@@ -185,4 +245,24 @@ function readGpu(): Promise<PerfSnapshot['gpu']> {
       }
     )
   })
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const HELPERS = /crash|report|unins|setup|redist|easyanticheat|battleye|launcherhelper|cefprocess|webhelper/i
+
+function findGameProcess(installDir: string): number | null {
+  const prefix = path.resolve(installDir).toLowerCase() + path.sep
+  const hits = listProcesses().filter((p) => p.exe.toLowerCase().startsWith(prefix) && !HELPERS.test(path.basename(p.exe)))
+  if (!hits.length) return null
+  // Prefer the process using the most memory: that is the game, not its bootstrapper.
+  let best = hits[0]
+  let bestMem = -1
+  for (const h of hits) {
+    const mem = processWorkingSetMb(h.pid) ?? 0
+    if (mem > bestMem) {
+      best = h
+      bestMem = mem
+    }
+  }
+  return best.pid
 }

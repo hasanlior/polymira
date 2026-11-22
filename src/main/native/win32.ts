@@ -27,6 +27,9 @@ interface Bindings {
   SetForegroundWindow: Fn
   ShowWindow: Fn
   IsIconic: Fn
+  EnumProcesses: Fn
+  QueryFullProcessImageNameW: Fn
+  GetExitCodeProcess: Fn
   EnumWindowsProc: unknown
 }
 
@@ -163,6 +166,11 @@ function load(): Bindings | null {
       SetForegroundWindow: user32.func('bool __stdcall SetForegroundWindow(void *hwnd)'),
       ShowWindow: user32.func('bool __stdcall ShowWindow(void *hwnd, int cmd)'),
       IsIconic: user32.func('bool __stdcall IsIconic(void *hwnd)'),
+      EnumProcesses: kernel32.func('bool __stdcall K32EnumProcesses(_Out_ uint32 *pids, uint32 cb, _Out_ uint32 *needed)'),
+      QueryFullProcessImageNameW: kernel32.func(
+        'bool __stdcall QueryFullProcessImageNameW(void *h, uint32 flags, _Out_ uint16 *name, _Inout_ uint32 *size)'
+      ),
+      GetExitCodeProcess: kernel32.func('bool __stdcall GetExitCodeProcess(void *h, _Out_ uint32 *code)'),
       EnumWindowsProc
     }
     // Registered by name for the function signatures above.
@@ -259,4 +267,39 @@ export function focusProcessWindow(pids: number[]): boolean {
   if (!hwnd) return false
   if (b.IsIconic(hwnd)) b.ShowWindow(hwnd, SW_RESTORE)
   return Boolean(b.SetForegroundWindow(hwnd))
+}
+
+const STILL_ACTIVE = 259
+
+/** True while the process exists and has not exited. */
+export function processAlive(pid: number): boolean {
+  const r = withProcess(pid, PROCESS_QUERY_LIMITED_INFORMATION, (h, b) => {
+    const code = [0]
+    if (!b.GetExitCodeProcess(h, code)) return false
+    return code[0] === STILL_ACTIVE
+  })
+  return r ?? false
+}
+
+/** Lists running processes with their executable path (processes we may not open are skipped). */
+export function listProcesses(): { pid: number; exe: string }[] {
+  const b = load()
+  if (!b) return []
+  const pids = new Uint32Array(4096)
+  const needed = [0]
+  if (!b.EnumProcesses(pids, pids.byteLength, needed)) return []
+  const count = Math.min(pids.length, needed[0] / 4)
+  const out: { pid: number; exe: string }[] = []
+  const buf = new Uint16Array(1024)
+  for (let i = 0; i < count; i++) {
+    const pid = pids[i]
+    if (!pid) continue
+    const exe = withProcess(pid, PROCESS_QUERY_LIMITED_INFORMATION, (h, bb) => {
+      const size = [buf.length]
+      if (!bb.QueryFullProcessImageNameW(h, 0, buf, size)) return null
+      return String.fromCharCode(...buf.subarray(0, size[0]))
+    })
+    if (exe) out.push({ pid, exe })
+  }
+  return out
 }

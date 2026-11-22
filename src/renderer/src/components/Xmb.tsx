@@ -11,7 +11,7 @@ export interface XmbHandle {
 interface Props {
   cats: XCategory[]
   handle: MutableRefObject<XmbHandle | null>
-  onFocus: (hue: number) => void
+  onFocus: (hue: number, gameId: string | null) => void
 }
 
 const ROW = 8.2 // vertical distance between unselected rows (u)
@@ -82,7 +82,8 @@ export function Xmb({ cats, handle, onFocus }: Props) {
   }, [validPath, path])
 
   const hue = item?.hue ?? parent?.hue ?? cat?.hue ?? 220
-  useEffect(() => onFocus(hue), [hue, onFocus])
+  const focusedGameId = item?.game?.id ?? null
+  useEffect(() => onFocus(hue, focusedGameId), [hue, focusedGameId, onFocus])
 
   const setIdx = (n: number) => setSel((s) => ({ ...s, [key(depth)]: n }))
 

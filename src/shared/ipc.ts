@@ -1,4 +1,4 @@
-import type { AppState, DirEntry, Game, PerfSnapshot, ScanReport, Screenshot, Settings, Toast } from './types'
+import type { AppState, DirEntry, DiscoverResult, Game, PerfSnapshot, ScanReport, Screenshot, Settings, Toast } from './types'
 
 /** Renderer → main request/response channels. The single source of truth for the IPC surface. */
 export interface IpcContract {
@@ -12,6 +12,8 @@ export interface IpcContract {
   'library:favorite': (id: string, favorite: boolean) => void
   'library:move': (id: string, platformId: string) => void
   'library:setCover': (id: string, image: string) => void
+  'library:setBackground': (id: string, image: string) => void
+  'library:setMusic': (id: string, file: string | null) => void
   'library:fetchCovers': () => number
   'fs:list': (dir: string | null) => { path: string | null; parent: string | null; entries: DirEntry[] }
   'dialog:folder': () => string | null
@@ -28,6 +30,8 @@ export interface IpcContract {
   'overlay:close': () => void
   'media:screenshots': (gameId?: string) => Screenshot[]
   'media:deleteScreenshot': (file: string) => void
+  'discover:run': () => DiscoverResult
+  'discover:apply': (keys: string[]) => { games: number; emulators: number; folders: number }
   'app:quit': () => void
 }
 
@@ -44,6 +48,8 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'library:favorite',
   'library:move',
   'library:setCover',
+  'library:setBackground',
+  'library:setMusic',
   'library:fetchCovers',
   'fs:list',
   'dialog:folder',
@@ -60,6 +66,8 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'overlay:close',
   'media:screenshots',
   'media:deleteScreenshot',
+  'discover:run',
+  'discover:apply',
   'app:quit'
 ]
 
@@ -68,10 +76,12 @@ export interface IpcEvents {
   state: AppState
   toast: Toast
   'overlay:opened': null
+  /** Progress text for long tasks (PC scan). */
+  progress: string
 }
 
 export type IpcEvent = keyof IpcEvents
-export const IPC_EVENTS: IpcEvent[] = ['state', 'toast', 'overlay:opened']
+export const IPC_EVENTS: IpcEvent[] = ['state', 'toast', 'overlay:opened', 'progress']
 
 /** Custom protocol used to serve covers and screenshots to the renderer. */
 export const MEDIA_SCHEME = 'app-media'

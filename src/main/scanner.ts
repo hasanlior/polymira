@@ -13,7 +13,9 @@ export interface Candidate {
 }
 
 const MAX_DEPTH = 6
-const SKIP_DIRS = new Set(['$recycle.bin', 'system volume information', 'node_modules', '.git', 'windows'])
+const SKIP_DIRS = new Set(['$recycle.bin', 'system volume information', 'node_modules', '.git', 'windows', 'program files', 'program files (x86)', 'appdata', 'site-packages', 'vendor', 'xboxgames'])
+/** Files that mark a folder as a software project; auto-detection skips those folders. */
+const PROJECT_MARKERS = ['package.json', 'cargo.toml', 'pyproject.toml', '.gitignore', 'go.mod', 'pom.xml']
 const VITA_TITLE_ID = /^[A-Z]{4}\d{5}$/
 const REGIONS = ['USA', 'Europe', 'Japan', 'World', 'Korea', 'Asia', 'Brazil', 'Germany', 'France', 'Spain', 'Italy', 'Turkey']
 
@@ -131,21 +133,26 @@ function m3uEntries(dir: string, files: string[]): Set<string> {
 }
 
 /**
- * Scans `root` for games.
+ * Scans `root` for games. Asynchronous so large folders never freeze the app.
  * @param platformId a platform id to force, or 'auto' to guess per file.
  */
-export function scanFolder(root: string, platformId: string): { candidates: Candidate[]; errors: string[] } {
+export async function scanFolder(
+  root: string,
+  platformId: string,
+  onDir?: (dir: string) => void
+): Promise<{ candidates: Candidate[]; errors: string[] }> {
   const forced: PlatformDef | undefined = platformId === 'auto' ? undefined : getPlatform(platformId)
   const allowed = (id: string) => !forced || forced.id === id
   const candidates: Candidate[] = []
   const errors: string[] = []
   const rootChain = [path.basename(root)]
 
-  const walk = (dir: string, depth: number, chain: string[]) => {
+  const walk = async (dir: string, depth: number, chain: string[]): Promise<void> => {
     if (depth > MAX_DEPTH) return
+    onDir?.(dir)
     let entries: fs.Dirent[]
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true })
+      entries = await fs.promises.readdir(dir, { withFileTypes: true })
     } catch (err) {
       errors.push(`${dir}: ${(err as Error).message}`)
       return
@@ -158,6 +165,9 @@ export function scanFolder(root: string, platformId: string): { candidates: Cand
     }
 
     const files = entries.filter((e) => e.isFile()).map((e) => e.name)
+    if (!forced && files.some((f) => PROJECT_MARKERS.includes(f.toLowerCase()))) return
+    // A folder with programs in it is a PC game/app install: its data files are not ROMs.
+    const programFolder = !forced && files.some((f) => /\.(exe|dll)$/i.test(f))
     const lowerFiles = new Set(files.map((f) => f.toLowerCase()))
     const inPlaylist = m3uEntries(dir, files)
     const hasCueSheet = files.some((f) => ['.cue', '.gdi'].includes(path.extname(f).toLowerCase()))
@@ -166,6 +176,7 @@ export function scanFolder(root: string, platformId: string): { candidates: Cand
       const ext = path.extname(file).toLowerCase()
       const lower = file.toLowerCase()
       if (inPlaylist.has(lower)) continue
+      if (programFolder) continue
       // Track files belong to a .cue/.gdi sheet: list the sheet, not every track.
       if (hasCueSheet && (ext === '.bin' || ext === '.img' || ext === '.raw')) continue
       // .cue next to a .chd with the same name: prefer the chd
@@ -197,11 +208,11 @@ export function scanFolder(root: string, platformId: string): { candidates: Cand
     for (const e of entries) {
       if (!e.isDirectory()) continue
       if (e.name.startsWith('.') || SKIP_DIRS.has(e.name.toLowerCase())) continue
-      walk(path.join(dir, e.name), depth + 1, [...chain, e.name])
+      await walk(path.join(dir, e.name), depth + 1, [...chain, e.name])
     }
   }
 
-  walk(root, 0, rootChain)
+  await walk(root, 0, rootChain)
   return { candidates, errors }
 }
 

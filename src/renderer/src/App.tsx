@@ -10,6 +10,8 @@ import { configureSound, sfx } from './sound'
 import { Xmb, type XmbHandle } from './components/Xmb'
 import { ConfirmDialog, FileBrowser, OptionsPanel, Toasts } from './components/Modals'
 import { GameDetail, Gallery, Screenshots } from './components/GameViews'
+import { Setup } from './components/Setup'
+import { Backdrop, ThemeMusic, Trailer } from './components/Ambience'
 
 type Modal =
   | { type: 'detail'; gameId: string }
@@ -18,6 +20,7 @@ type Modal =
   | { type: 'browse'; req: BrowseRequest }
   | { type: 'confirm'; text: string; onYes: () => void }
   | { type: 'shots'; gameId?: string }
+  | { type: 'scan' }
 
 type ModalEntry = Modal & { key: number }
 
@@ -70,6 +73,7 @@ export function App() {
   const [toasts, setToasts] = useState<(Toast & { id: number })[]>([])
   const [pads, setPads] = useState<string[]>([])
   const [launching, setLaunching] = useState<Game | null>(null)
+  const [focusId, setFocusId] = useState<string | null>(null)
   const keyRef = useRef(1)
 
   // Background
@@ -117,7 +121,8 @@ export function App() {
   const closeModal = (key: number) => setModals((ms) => ms.filter((m) => m.key !== key))
 
   const onFocusHue = useCallback(
-    (hue: number) => {
+    (hue: number, gameId: string | null) => {
+      setFocusId(gameId)
       const theme = THEMES.find((t) => t.value === state?.settings.theme)
       if (!theme || theme.hue === null) bgRef.current?.setHue(hue)
       else bgRef.current?.setHue(theme.hue, theme.value === 'night')
@@ -137,6 +142,7 @@ export function App() {
       browse: (req) => openModal({ type: 'browse', req }),
       confirm: (text, onYes) => openModal({ type: 'confirm', text, onYes }),
       openScreenshots: (gameId) => openModal({ type: 'shots', gameId }),
+      openScan: () => openModal({ type: 'scan' }),
       setSettings: (patch) => void call('settings:set', patch),
       run: (fn, success) => {
         fn()
@@ -173,10 +179,35 @@ export function App() {
   return (
     <div className="app">
       <canvas ref={canvasRef} className="bg" />
+      {state && (() => {
+        // The detail screen keeps its game's ambience; otherwise follow the XMB focus.
+        const detail = [...modals].reverse().find((m) => m.type === 'detail') as { gameId: string } | undefined
+        const id = detail?.gameId ?? (state.settings.setupDone ? focusId : null)
+        const g = id ? state.games.find((x) => x.id === id) ?? null : null
+        return (
+          <>
+            {state.settings.gameBackgrounds && <Backdrop game={g} />}
+            <div className="backdrop trailer-layer">
+              <Trailer
+                game={state.session ? null : g}
+                enabled={state.settings.gameTrailers}
+                volume={state.settings.musicVolume}
+                muted={Boolean(g?.musicPath && state.settings.gameMusic)}
+              />
+              <div className="backdrop-shade show" style={{ opacity: g?.trailerUrl && state.settings.gameTrailers ? undefined : 0 }} />
+            </div>
+            <ThemeMusic game={state.session ? null : g} enabled={state.settings.gameMusic} volume={state.settings.musicVolume} />
+          </>
+        )
+      })()}
       {state && ctx && (
         <>
-          <Clock state={state} pads={pads.length} />
-          <Xmb cats={cats} handle={xmbHandle} onFocus={onFocusHue} />
+          {state.settings.setupDone && (
+            <>
+              <Clock state={state} pads={pads.length} />
+              <Xmb cats={cats} handle={xmbHandle} onFocus={onFocusHue} />
+            </>
+          )}
           {modals.map((m) => {
             const close = () => closeModal(m.key)
             switch (m.type) {
@@ -192,8 +223,11 @@ export function App() {
                 return <ConfirmDialog key={m.key} text={m.text} onYes={m.onYes} onClose={close} />
               case 'shots':
                 return <Screenshots key={m.key} gameId={m.gameId} ctx={ctx} onClose={close} />
+              case 'scan':
+                return <Setup key={m.key} mode="scan" ctx={ctx} onClose={close} />
             }
           })}
+          {!state.settings.setupDone && <Setup mode="setup" ctx={ctx} onClose={() => {}} />}
           {launching && <LaunchSplash game={launching} />}
         </>
       )}

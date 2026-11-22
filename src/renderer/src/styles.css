@@ -236,15 +236,20 @@ svg {
 .x-item.sel .x-icon > svg {
   filter: drop-shadow(0 0 calc(1 * var(--u)) rgba(255, 255, 255, 0.7));
 }
+.x-icon.cover {
+  overflow: hidden;
+}
 .x-icon.cover img {
-  max-width: 100%;
-  max-height: 100%;
+  /* Covers come in every aspect ratio (portrait posters, square icons, wide headers): always fit the slot. */
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   object-fit: contain;
-  border-radius: calc(0.4 * var(--u));
-  box-shadow: 0 calc(0.4 * var(--u)) calc(1.6 * var(--u)) rgba(0, 0, 0, 0.45);
+  filter: drop-shadow(0 calc(0.4 * var(--u)) calc(1 * var(--u)) rgba(0, 0, 0, 0.5));
 }
 .x-item.sel .x-icon.cover img {
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5), 0 0 calc(2.4 * var(--u)) rgba(255, 255, 255, 0.35);
+  filter: drop-shadow(0 0 calc(1.4 * var(--u)) rgba(255, 255, 255, 0.45));
 }
 .x-radio {
   width: 36%;
@@ -1024,4 +1029,242 @@ body.overlay-body #root {
   top: calc(5 * var(--u));
   left: 50%;
   transform: translateX(-50%);
+}
+
+/* ── Setup wizard ─────────────────────────────────────────────────── */
+.modal-layer.setup {
+  /* Full-screen first-boot experience over the animated background. */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 12vw;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.15) 70%);
+}
+.setup-card {
+  width: 100%;
+  max-width: calc(150 * var(--u));
+  max-height: 80vh;
+  /* Room for button glow / row highlights so nothing is clipped at the edges. */
+  padding: calc(2 * var(--u)) calc(3 * var(--u));
+  margin-left: calc(-3 * var(--u));
+  animation: slide-up 420ms var(--ease);
+}
+.setup-card .btn {
+  margin-top: calc(1 * var(--u));
+  font-size: calc(2.5 * var(--u));
+  padding: calc(1.4 * var(--u)) calc(4 * var(--u));
+}
+.setup-steps {
+  position: absolute;
+  left: 12vw;
+  bottom: calc(6 * var(--u));
+  display: flex;
+  gap: calc(1.2 * var(--u));
+}
+.setup-steps span {
+  width: calc(4 * var(--u));
+  height: calc(0.5 * var(--u));
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.2);
+  transition: background var(--t), width var(--t) var(--ease);
+}
+.setup-steps span.done {
+  background: rgba(255, 255, 255, 0.55);
+}
+.setup-steps span.cur {
+  width: calc(8 * var(--u));
+  background: #fff;
+  box-shadow: 0 0 calc(1 * var(--u)) rgba(255, 255, 255, 0.7);
+}
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(calc(3 * var(--u)));
+  }
+}
+@keyframes brand-in {
+  from {
+    opacity: 0;
+    letter-spacing: 0.8em;
+    filter: blur(8px);
+  }
+}
+.setup-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(2 * var(--u));
+}
+.setup-welcome {
+  font-size: calc(2.6 * var(--u));
+  color: var(--fg-dim);
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  animation: fade-in 900ms ease 300ms both;
+}
+.setup-brand {
+  font-size: calc(15 * var(--u));
+  line-height: 1;
+  font-weight: 200;
+  letter-spacing: 0.3em;
+  text-shadow: 0 0 calc(4 * var(--u)) rgba(255, 255, 255, 0.5);
+  animation: brand-in 1400ms var(--ease) both;
+}
+.setup-hero .setup-tagline,
+.setup-hero .setup-text,
+.setup-hero .btn {
+  animation: fade-in 900ms ease 900ms both;
+}
+.setup-tagline {
+  font-size: calc(2.2 * var(--u));
+  color: var(--fg-dim);
+  letter-spacing: 0.08em;
+}
+.setup-text {
+  font-size: calc(2.2 * var(--u));
+  color: var(--fg-dim);
+  line-height: 1.5;
+  max-width: 90ch;
+  margin: calc(1 * var(--u)) 0 calc(2 * var(--u));
+}
+.setup-section h2,
+.setup-hero h2 {
+  margin: 0;
+  font-weight: 200;
+  font-size: calc(6.5 * var(--u));
+}
+.setup-section.center {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(1.6 * var(--u));
+}
+.setup-progress {
+  font-size: calc(1.8 * var(--u));
+  color: var(--fg-faint);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.setup-list {
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.6 * var(--u));
+  margin-bottom: calc(3 * var(--u));
+  max-height: 46vh;
+  overflow: hidden;
+}
+.setup-row {
+  display: flex;
+  align-items: center;
+  gap: calc(2 * var(--u));
+  padding: calc(1.3 * var(--u)) calc(2 * var(--u));
+  border-radius: calc(0.8 * var(--u));
+  font-size: calc(2.2 * var(--u));
+  color: var(--fg-dim);
+  flex: none;
+}
+.setup-row > svg,
+.setup-row > .x-radio {
+  width: calc(3 * var(--u));
+  height: calc(3 * var(--u));
+  flex: none;
+}
+.setup-row.on > svg {
+  color: var(--ok);
+}
+.setup-row.sel {
+  color: #fff;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.03));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+.setup-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.4 * var(--u));
+  min-width: 0;
+  flex: 1;
+}
+.setup-row-text b {
+  font-weight: 400;
+}
+.setup-row-text small {
+  font-size: calc(1.7 * var(--u));
+  color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.setup-row.sel .setup-row-text small {
+  white-space: normal;
+}
+.setup-count {
+  margin-left: calc(1 * var(--u));
+  color: var(--fg-dim);
+}
+.setup-value {
+  font-size: calc(1.9 * var(--u));
+  color: var(--fg-dim);
+}
+.setup-row.on .setup-value {
+  color: var(--ok);
+}
+.setup-foot {
+  margin-top: calc(2 * var(--u));
+  font-size: calc(1.6 * var(--u));
+  color: var(--fg-faint);
+}
+.setup-done-icon {
+  width: calc(10 * var(--u));
+  height: calc(10 * var(--u));
+  color: var(--ok);
+}
+
+/* ── Game backdrop (focused game's artwork) ───────────────────────── */
+.backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.backdrop-img {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  opacity: 0;
+  transform: scale(1.04);
+  transition: opacity 900ms ease, transform 6s ease-out;
+}
+.backdrop-img.show {
+  opacity: 0.85;
+  transform: scale(1);
+}
+.backdrop-shade {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 900ms ease;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.82) 0%, rgba(0, 0, 0, 0.55) 45%, rgba(0, 0, 0, 0.2) 100%),
+    linear-gradient(0deg, rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0) 40%);
+}
+.backdrop-shade.show {
+  opacity: 1;
+}
+.no-anim .backdrop-img,
+.no-anim .backdrop-shade {
+  transition: none;
+}
+.backdrop-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 1200ms ease;
+  pointer-events: none;
+}
+.backdrop-video.show {
+  opacity: 0.9;
 }

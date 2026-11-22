@@ -4,11 +4,18 @@ import path from 'path'
 import type { Game, ScanReport } from '@shared/types'
 import { getPlatform } from '@shared/platforms'
 import { candidateFromPath, scanFolder, type Candidate } from './scanner'
-import { coverFile } from './covers'
+import { backgroundFile, coverFile } from './covers'
 import { store } from './store'
 
+const URI = /^[a-z][\w+.-]*:\/\//i
+
+export function isUri(p: string): boolean {
+  return URI.test(p) || /^shell:/i.test(p)
+}
+
 export function gameIdFor(p: string): string {
-  return crypto.createHash('sha1').update(path.resolve(p).toLowerCase()).digest('hex').slice(0, 16)
+  const key = isUri(p) ? p : path.resolve(p)
+  return crypto.createHash('sha1').update(key.toLowerCase()).digest('hex').slice(0, 16)
 }
 
 function toGame(c: Candidate): Game {
@@ -24,6 +31,7 @@ function toGame(c: Candidate): Game {
     playCount: 0,
     favorite: false,
     hasCover: fs.existsSync(coverFile(id)),
+    hasBackground: fs.existsSync(backgroundFile(id)),
     meta: c.meta
   }
 }
@@ -43,7 +51,7 @@ export function addCandidates(candidates: Candidate[]): Game[] {
   return added
 }
 
-export function scanFolders(folders = store.settings.watchedFolders): { report: ScanReport; added: Game[] } {
+export async function scanFolders(folders = store.settings.watchedFolders): Promise<{ report: ScanReport; added: Game[] }> {
   const report: ScanReport = { added: 0, skipped: 0, folders: folders.length, errors: [] }
   const added: Game[] = []
   for (const f of folders) {
@@ -51,7 +59,7 @@ export function scanFolders(folders = store.settings.watchedFolders): { report: 
       report.errors.push(`Klasör bulunamadı: ${f.path}`)
       continue
     }
-    const { candidates, errors } = scanFolder(f.path, f.platformId)
+    const { candidates, errors } = await scanFolder(f.path, f.platformId)
     report.errors.push(...errors.slice(0, 5))
     const fresh = addCandidates(candidates)
     added.push(...fresh)
@@ -95,6 +103,7 @@ export function removeGame(id: string): void {
   store.setGames(store.games.filter((g) => g.id !== id))
   try {
     fs.rmSync(coverFile(id), { force: true })
+    fs.rmSync(backgroundFile(id), { force: true })
   } catch {
     // ignore
   }
@@ -103,6 +112,17 @@ export function removeGame(id: string): void {
 export function moveGame(id: string, platformId: string): void {
   if (!getPlatform(platformId)) throw new Error('Bilinmeyen platform.')
   store.updateGame(id, { platformId, lastLaunch: undefined })
+}
+
+export function setCustomBackground(id: string, imagePath: string): void {
+  fs.copyFileSync(imagePath, backgroundFile(id))
+  const g = store.games.find((x) => x.id === id)
+  store.updateGame(id, { hasBackground: true, bgRev: (g?.bgRev ?? 0) + 1 })
+}
+
+export function setMusic(id: string, file: string | null): void {
+  if (file && !fs.existsSync(file)) throw new Error('Ses dosyası bulunamadı.')
+  store.updateGame(id, { musicPath: file ?? undefined })
 }
 
 export function setCustomCover(id: string, imagePath: string): void {
@@ -115,7 +135,7 @@ export function setCustomCover(id: string, imagePath: string): void {
 export function refreshMissing(): void {
   let changed = false
   for (const g of store.games) {
-    if (g.kind === 'titleId') continue
+    if (g.kind === 'titleId' || g.kind === 'uri') continue
     const missing = !fs.existsSync(g.path)
     if (Boolean(g.missing) !== missing) {
       g.missing = missing

@@ -17,7 +17,17 @@ export const DEFAULT_SETTINGS: Settings = {
   emulatorPaths: {},
   platformEmulator: {},
   categoryOrder: [],
-  hiddenCategories: []
+  hiddenCategories: [],
+  setupDone: false,
+  gmPriority: true,
+  gmPowerPlan: true,
+  gmStopExplorer: false,
+  autoRestart: true,
+  launchOnStartup: false,
+  gameBackgrounds: true,
+  gameMusic: true,
+  musicVolume: 0.6,
+  gameTrailers: true
 }
 
 export const paths = {

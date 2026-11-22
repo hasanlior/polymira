@@ -256,7 +256,7 @@ export const PLATFORMS: PlatformDef[] = [
   },
   {
     id: 'wii', name: 'Wii', short: 'WII', family: 'nintendo', support: 'stable', kind: 'file',
-    extensions: ['.wbfs', '.rvz', '.iso', '.wad'], uniqueExtensions: ['.wbfs', '.wad'], folderHints: ['wii'],
+    extensions: ['.wbfs', '.rvz', '.iso', '.wad'], uniqueExtensions: ['.wbfs'], folderHints: ['wii'],
     runners: [{ emulatorId: 'dolphin' }], thumbnails: 'Nintendo - Wii', hue: 190
   },
   {
@@ -308,7 +308,7 @@ export const PLATFORMS: PlatformDef[] = [
   },
   {
     id: 'md', name: 'Mega Drive', short: 'MD', family: 'sega', support: 'stable', kind: 'file',
-    extensions: ['.md', '.gen', '.smd', '.bin', '.zip', '.7z'], uniqueExtensions: ['.md', '.gen', '.smd'], folderHints: ['mega drive', 'megadrive', 'genesis'],
+    extensions: ['.md', '.gen', '.smd', '.bin', '.zip', '.7z'], uniqueExtensions: ['.gen', '.smd'], folderHints: ['mega drive', 'megadrive', 'genesis'],
     runners: [{ emulatorId: 'retroarch', core: 'genesis_plus_gx' }],
     thumbnails: 'Sega - Mega Drive - Genesis', hue: 230
   },

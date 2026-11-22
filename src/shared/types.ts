@@ -3,8 +3,11 @@ export type PlatformFamily = 'playstation' | 'xbox' | 'nintendo' | 'sega' | 'oth
 /** How mature the emulation path for a platform is. Shown to the user as-is. */
 export type SupportLevel = 'stable' | 'experimental' | 'unsupported'
 
-/** What a library entry points at. */
-export type GameKind = 'file' | 'folder' | 'titleId' | 'exe'
+/** What a library entry points at. `uri` = a store launcher link such as steam://rungameid/… */
+export type GameKind = 'file' | 'folder' | 'titleId' | 'exe' | 'uri'
+
+/** Where a PC game was found. */
+export type GameSource = 'manual' | 'steam' | 'epic' | 'gog' | 'xbox' | 'riot' | 'ubisoft'
 
 export interface GameMeta {
   year?: number
@@ -14,6 +17,15 @@ export interface GameMeta {
   description?: string
   titleId?: string
   region?: string
+  source?: GameSource
+  /** Store-specific id (Steam app id, Epic app name, GOG game id). */
+  storeId?: string
+  /** Install folder of a store game; used to find its process after the launcher starts it. */
+  installDir?: string
+  /** Epic catalog namespace (used to find launcher artwork). */
+  namespace?: string
+  /** Steam app id found for this game (for PC games from other stores too). */
+  steamAppId?: string
 }
 
 export type LaunchResult = 'ok' | 'crashed' | 'error'
@@ -32,6 +44,15 @@ export interface Game {
   hasCover: boolean
   /** Cache-busting token for the cover image. */
   coverRev?: number
+  /** Full-screen background art shown when the game is focused. */
+  hasBackground?: boolean
+  bgRev?: number
+  /** When artwork lookup last ran; avoids re-querying games that have no art online. */
+  artCheckedAt?: number
+  /** Theme music played while the game is focused (a local audio file). */
+  musicPath?: string
+  /** Official trailer stream (HLS) shown with sound when the game is focused. Empty string = none found. */
+  trailerUrl?: string
   missing?: boolean
   meta: GameMeta
   lastLaunch?: { at: number; result: LaunchResult; message?: string }
@@ -62,6 +83,40 @@ export interface Settings {
   platformEmulator: Record<string, string>
   categoryOrder: string[]
   hiddenCategories: string[]
+  /** False until the first-run setup wizard is finished. */
+  setupDone: boolean
+  /** Game mode: raise the game's CPU priority. */
+  gmPriority: boolean
+  /** Game mode: switch to the High performance power plan while playing. */
+  gmPowerPlan: boolean
+  /** Game mode: close the Windows desktop shell (explorer.exe) while playing. */
+  gmStopExplorer: boolean
+  /** Relaunch the app automatically if it crashes. */
+  autoRestart: boolean
+  /** Start with Windows (packaged builds only). */
+  launchOnStartup: boolean
+  /** Show the focused game's artwork as the background. */
+  gameBackgrounds: boolean
+  /** Play the focused game's theme music. */
+  gameMusic: boolean
+  musicVolume: number
+  /** Play the focused game's official trailer in the background. */
+  gameTrailers: boolean
+}
+
+export interface DiscoverGroup {
+  /** 'steam' | 'epic' | 'gog' | 'roms:<platformId>' | 'emulators' */
+  key: string
+  label: string
+  count: number
+  /** A few example titles to show the user. */
+  sample: string[]
+}
+
+export interface DiscoverResult {
+  groups: DiscoverGroup[]
+  romRoots: string[]
+  durationMs: number
 }
 
 export interface SessionInfo {
