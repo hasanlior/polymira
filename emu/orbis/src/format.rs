@@ -226,6 +226,39 @@ impl Executable {
         Some(self.string(name_off))
     }
 
+    /// Raw symbol entry: (st_info, st_shndx, st_value).
+    pub fn symbol(&self, index: u64) -> (u8, u16, u64) {
+        let Some(symtab) = self.tag(Table::Symtab) else { return (0, 0, 0) };
+        let t = self.at(symtab);
+        let o = index as usize * 24;
+        (t.get(o + 4).copied().unwrap_or(0), u16_at(t, o + 6).unwrap_or(0), u64_at(t, o + 8).unwrap_or(0))
+    }
+
+    /// Exported symbols: (NID, value relative to the image base).
+    pub fn exports(&self) -> Vec<(String, u64)> {
+        let (Some(_), Some(size)) = (self.tag(Table::Symtab), self.tag(Table::Symtabsz)) else { return vec![] };
+        let mut out = vec![];
+        for i in 0..(size / 24) {
+            let (info, shndx, value) = self.symbol(i);
+            if shndx == 0 || info >> 4 == 0 {
+                continue; // imported, or local
+            }
+            let Some(name) = self.symbol_name(i) else { continue };
+            if let Some(nid) = name.split('#').next() {
+                if !nid.is_empty() {
+                    out.push((nid.to_string(), value));
+                }
+            }
+        }
+        out
+    }
+
+    /// ELF symbol type (low 4 bits of st_info): 1 = data object, 2 = function.
+    pub fn symbol_type(&self, index: u64) -> u8 {
+        let Some(symtab) = self.tag(Table::Symtab) else { return 0 };
+        self.at(symtab).get(index as usize * 24 + 4).map(|b| b & 0xF).unwrap_or(0)
+    }
+
     /// Every imported function, from the symbol table ("NID#libraryId#moduleId").
     pub fn imports(&self) -> Vec<Import> {
         let (Some(symtab), Some(size)) = (self.tag(Table::Symtab), self.tag(Table::Symtabsz)) else { return vec![] };

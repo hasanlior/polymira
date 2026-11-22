@@ -11,6 +11,9 @@ mod format;
 mod hle;
 mod hle_rt;
 mod known;
+mod kernel;
+mod system;
+mod thread;
 mod loader;
 mod nid;
 mod pkg;
@@ -123,9 +126,11 @@ fn main() -> ExitCode {
                 *kinds.entry(kind).or_insert(0usize) += 1;
             }
             eprintln!("[orbis] {} ({}), {} relocations by type: {:?}", args[1], exe.container, kinds.values().sum::<usize>(), kinds);
-            let loaded = loader::load(&exe)?;
+            let path = std::path::Path::new(&args[1]);
+            *kernel::GAME_DIR.lock().unwrap() = path.parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
             loader::install_crash_report();
-            eprintln!("[orbis] loaded at {:p}; {} imports bound, {} stubbed; starting at entry {:#x}", loaded.base, loaded.bound, loaded.stubbed, exe.entry);
+            let loaded = loader::load_with_modules(exe, Some(path))?;
+            eprintln!("[orbis] loaded at {:p} with {} game modules; {} imports bound, {} stubbed; starting at entry {:#x}", loaded.base, loaded.modules.len(), loaded.bound, loaded.stubbed, loaded.entry - loaded.base as u64);
             let code = loader::run(&loaded);
             eprintln!("[orbis] exited with {code}");
             Ok(())

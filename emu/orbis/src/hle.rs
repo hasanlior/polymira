@@ -141,8 +141,14 @@ pub fn implemented() -> Vec<(&'static str, usize)> {
     ]
 }
 
+/// Functions Orbis must provide even when a game module exports the same name.
+pub fn forced(nid_: &str) -> bool {
+    static F: OnceLock<Vec<String>> = OnceLock::new();
+    F.get_or_init(|| ["__tls_get_addr"].iter().map(|n| nid(n)).collect()).iter().any(|n| n == nid_)
+}
+
 /// NID → (name, address) for every implemented function.
 pub fn table() -> &'static HashMap<String, (&'static str, usize)> {
     static T: OnceLock<HashMap<String, (&'static str, usize)>> = OnceLock::new();
-    T.get_or_init(|| implemented().into_iter().chain(crate::hle_rt::functions()).map(|(name, addr)| (name.strip_prefix('#').map(str::to_string).unwrap_or_else(|| nid(name)), (name.trim_start_matches('#'), addr))).collect())
+    T.get_or_init(|| crate::hle_rt::functions().into_iter().chain(implemented()).chain(crate::kernel::functions()).chain(crate::thread::functions()).chain(crate::system::functions()).map(|(name, addr)| (name.strip_prefix('#').map(str::to_string).unwrap_or_else(|| nid(name)), (name.trim_start_matches('#'), addr))).collect())
 }

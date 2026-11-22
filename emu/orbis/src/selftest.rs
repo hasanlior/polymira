@@ -137,7 +137,7 @@ pub fn run() -> Result<(), String> {
         let exe = Executable::parse(&bytes).map_err(|e| e.to_string())?;
         let imports = exe.imports();
         println!("   container: {}, imports: {}", exe.container, imports.iter().map(|i| format!("{}::{}", i.library, crate::known::names().get(&i.nid).copied().unwrap_or(&i.nid))).collect::<Vec<_>>().join(", "));
-        let loaded = crate::loader::load(&exe)?;
+        let loaded = crate::loader::load(exe)?;
         println!("   loaded at {:p}: {} bound to Orbis, {} stubbed", loaded.base, loaded.bound, loaded.stubbed);
         print!("   output: ");
         let code = crate::loader::run(&loaded);

@@ -38,6 +38,10 @@ pub extern "sysv64" fn stack_chk_fail() -> ! {
 pub static mut STACK_CHK_GUARD: u64 = 0x2A9F_5D3C_71E4_0B86;
 static mut ERRNO: i32 = 0;
 
+pub fn set_errno(e: i32) {
+    unsafe { ERRNO = e };
+}
+
 pub extern "sysv64" fn error() -> *mut i32 {
     std::ptr::addr_of_mut!(ERRNO)
 }
@@ -307,6 +311,45 @@ pub extern "sysv64" fn thread_self() -> usize {
     crate::tls::THREAD_POINTER
 }
 
+// ── C++ locale ────────────────────────────────────────────────────────
+// `std::_sceLibcClassicLocale` is a `std::locale` object: one pointer to its implementation
+// (_Locimp). The game's inlined code calls the implementation's virtual _Incref/_Decref and
+// looks facets up in its table. An empty table makes facet lookups fall back to libc.
+
+extern "sysv64" fn facet_noop(_this: usize) -> usize {
+    0
+}
+
+#[repr(C)]
+struct Locimp {
+    vtable: *const usize,
+    refs: u64,
+    facetvec: usize,
+    facetcount: u64,
+    catmask: u64,
+    xparent: u64,
+    name: [u64; 8],
+}
+
+static mut FACET_VTABLE: [usize; 16] = [0; 16];
+static mut CLASSIC_IMP: Locimp = Locimp { vtable: std::ptr::null(), refs: 1, facetvec: 0, facetcount: 0, catmask: 0x3F, xparent: 0, name: [0; 8] };
+static mut CLASSIC_LOCALE: [usize; 4] = [0; 4];
+
+fn classic_locale() -> usize {
+    unsafe {
+        let vt = std::ptr::addr_of_mut!(FACET_VTABLE);
+        for slot in (*vt).iter_mut() {
+            *slot = facet_noop as *const () as usize;
+        }
+        let imp = std::ptr::addr_of_mut!(CLASSIC_IMP);
+        (*imp).vtable = vt as *const usize;
+        (*imp).name[0] = b"C ".as_ptr() as u64;
+        let loc = std::ptr::addr_of_mut!(CLASSIC_LOCALE);
+        (*loc)[0] = imp as usize;
+        loc as usize
+    }
+}
+
 /// (name, address) for everything above. Mutex/condition functions share the success stubs.
 pub fn functions() -> Vec<(&'static str, usize)> {
     let mut v: Vec<(&'static str, usize)> = vec![
@@ -365,6 +408,7 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("scePthreadGetspecific", getspecific as *const () as usize),
         ("scePthreadSetspecific", setspecific as *const () as usize),
         ("scePthreadSelf", thread_self as *const () as usize),
+        ("_ZSt21_sceLibcClassicLocale", classic_locale()),
     ];
     for name in [
         "_Mtx_lock", "_Mtx_unlock", "_Mtxinit", "_Mtxlock", "_Mtxunlock", "_Mtxdst", "_Cnd_init",

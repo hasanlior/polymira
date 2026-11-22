@@ -7,7 +7,7 @@
 
 use std::sync::Mutex;
 
-use crate::format::{Executable, PT_LOAD, PT_SCE_RELRO};
+use crate::format::{Executable, PT_LOAD, PT_SCE_PROCPARAM, PT_SCE_RELRO, PT_TLS};
 use crate::hle;
 
 const R_X86_64_64: u32 = 1;
@@ -34,12 +34,27 @@ extern "sysv64" fn unimplemented(index: u64) -> u64 {
             eprintln!("[orbis] unimplemented system function: {name}");
         }
     }
+    if std::env::var_os("ORBIS_TRACE").is_some() {
+        eprintln!("[orbis] call {name}");
+    }
     let mut recent = RECENT.lock().unwrap();
     recent.push(name);
     if recent.len() > 8 {
         recent.remove(0);
     }
     0
+}
+
+/// Whether `addr..addr+8` can be read (the crash report must never fault itself).
+#[cfg(windows)]
+fn readable(addr: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS};
+    if addr < 0x10000 {
+        return false;
+    }
+    let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    let n = unsafe { VirtualQuery(addr as *const _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+    n != 0 && mbi.State == MEM_COMMIT && mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD) == 0 && addr + 16 <= mbi.BaseAddress as usize + mbi.RegionSize
 }
 
 /// Reports where the game stopped (address, offset in the game, instruction bytes, the last
@@ -54,8 +69,21 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
         return 0; // EXCEPTION_CONTINUE_SEARCH
     }
     let rip = ctx.Rip as usize;
+    {
+        // First, a minimal line that needs no locks or allocation.
+        use windows_sys::Win32::Storage::FileSystem::WriteFile;
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+        let mut line = *b"[orbis] fault at 0x0000000000000000
+";
+        let hex = b"0123456789abcdef";
+        for i in 0..16 {
+            line[19 + i] = hex[(rip >> ((15 - i) * 4)) & 0xF];
+        }
+        let mut n = 0u32;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), line.as_ptr(), line.len() as u32, &mut n, std::ptr::null_mut());
+    }
     let (base, size) = *GAME.lock().unwrap();
-    let place = if rip >= base && rip < base + size { format!("game code at offset {:#x}", rip - base) } else { "outside the game image".to_string() };
+    let place = describe(rip);
     let what = match code {
         0xC000_0005 => {
             let kind = if rec.NumberParameters >= 2 { if rec.ExceptionInformation[0] == 0 { "read" } else { "write" } } else { "access" };
@@ -66,7 +94,8 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
         0xC000_00FD => "stack overflow".to_string(),
         c => format!("exception {c:#x}"),
     };
-    let bytes: Vec<String> = if rip >= base && rip + 16 <= base + size {
+    let known = IMAGES.try_lock().map(|v| v.iter().any(|(_, b, s)| rip >= *b && rip + 16 <= b + s)).unwrap_or(false);
+    let bytes: Vec<String> = if (known || (rip >= base && rip + 16 <= base + size)) && readable(rip) {
         (0..16).map(|i| format!("{:02x}", *(rip as *const u8).add(i))).collect()
     } else {
         vec![]
@@ -81,15 +110,11 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
     let mut frames = vec![];
     let mut rbp = ctx.Rbp as usize;
     for _ in 0..12 {
-        if rbp < 0x10000 || rbp % 8 != 0 {
+        if rbp % 8 != 0 || !readable(rbp) {
             break;
         }
         let ret = *((rbp + 8) as *const usize);
-        if ret >= base && ret < base + size {
-            frames.push(format!("{:#x}", ret - base));
-        } else {
-            frames.push(format!("{ret:#x}"));
-        }
+        frames.push(describe(ret));
         let next = *(rbp as *const usize);
         if next <= rbp {
             break;
@@ -97,7 +122,7 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
         rbp = next;
     }
     if !frames.is_empty() {
-        eprintln!("[orbis]   called from (game offsets): {}", frames.join(" <- "));
+        eprintln!("[orbis]   called from: {}", frames.join(" <- "));
     }
     let recent = RECENT.lock().map(|r| r.clone()).unwrap_or_default();
     if !recent.is_empty() {
@@ -107,8 +132,27 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
 }
 
 #[cfg(windows)]
+unsafe extern "system" fn on_unhandled(info: *const windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS) -> i32 {
+    on_exception(info as *mut _)
+}
+
+/// Reserves stack for the crash report on the current thread (stack overflows).
+pub fn install_thread_guard() {
+    #[cfg(windows)]
+    unsafe {
+        let mut guarantee: u32 = 0x10000;
+        windows_sys::Win32::System::Threading::SetThreadStackGuarantee(&mut guarantee);
+    }
+}
+
+#[cfg(windows)]
 pub fn install_crash_report() {
-    unsafe { windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler(1, Some(on_exception)) };
+    unsafe {
+        let mut guarantee: u32 = 0x10000;
+        windows_sys::Win32::System::Threading::SetThreadStackGuarantee(&mut guarantee);
+        windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler(1, Some(on_exception));
+        windows_sys::Win32::System::Diagnostics::Debug::SetUnhandledExceptionFilter(Some(on_unhandled));
+    }
 }
 
 #[cfg(not(windows))]
@@ -130,80 +174,292 @@ pub struct Loaded {
     pub entry: u64,
     pub bound: usize,
     pub stubbed: usize,
+    /// Modules the game brought with it (sce_module/*.prx, *.prx next to eboot.bin).
+    pub modules: Vec<String>,
+    /// (module name, init function) in the order they must run before the game's entry.
+    inits: Vec<(String, u64)>,
 }
 
-pub fn load(exe: &Executable) -> Result<Loaded, String> {
-    let segs: Vec<_> = exe.phdrs.iter().filter(|p| p.kind == PT_LOAD || p.kind == PT_SCE_RELRO).collect();
+/// Every mapped image: (name, base, size), for crash reports.
+static IMAGES: Mutex<Vec<(String, usize, usize)>> = Mutex::new(Vec::new());
+/// Thread-local blocks, indexed by TLS module id (dynamic TLS model, __tls_get_addr).
+static TLS_BLOCKS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+const R_X86_64_DTPMOD64: u32 = 16;
+const R_X86_64_DTPOFF64: u32 = 17;
+const DT_INIT: i64 = 0xC;
+
+/// Module TLS templates (initial image, size), by TLS id; ids 0 and 1 are unused here.
+static TLS_TEMPLATES: Mutex<Vec<(Vec<u8>, usize)>> = Mutex::new(Vec::new());
+
+thread_local! {
+    /// This thread's blocks for module TLS (the main thread uses TLS_BLOCKS).
+    static MY_BLOCKS: std::cell::RefCell<std::collections::HashMap<u64, usize>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// `void* __tls_get_addr(tls_index*)`: { module id, offset }.
+pub extern "sysv64" fn tls_get_addr(ti: *const u64) -> usize {
+    let (m, off) = unsafe { (*ti, *ti.add(1)) };
+    let tp = crate::tls::current();
+    if m == 1 {
+        return tp - crate::tls::static_size() + off as usize;
+    }
+    if tp == crate::tls::THREAD_POINTER {
+        return TLS_BLOCKS.lock().unwrap().get(m as usize).copied().unwrap_or(0) + off as usize;
+    }
+    let base = MY_BLOCKS.with(|b| {
+        *b.borrow_mut().entry(m).or_insert_with(|| {
+            let t = TLS_TEMPLATES.lock().unwrap();
+            let (image, size) = t.get(m as usize).cloned().unwrap_or_default();
+            let block = Box::leak(vec![0u8; size + 0x40].into_boxed_slice()).as_mut_ptr();
+            unsafe { std::ptr::copy_nonoverlapping(image.as_ptr(), block, image.len()) };
+            block as usize
+        })
+    });
+    base + off as usize
+}
+
+/// Where an address belongs: "libc.prx+0x1234", or the plain address.
+pub fn describe(addr: usize) -> String {
+    if let Ok(images) = IMAGES.try_lock() {
+        for (name, base, size) in images.iter() {
+            if addr >= *base && addr < base + size {
+                return format!("{name}+{:#x}", addr - base);
+            }
+        }
+    }
+    format!("{addr:#x}")
+}
+
+/// Every mapped image (name, base, size), sorted by base.
+pub fn images() -> Vec<(String, usize, usize)> {
+    let mut v = IMAGES.lock().map(|v| v.clone()).unwrap_or_default();
+    v.sort_by_key(|x| x.1);
+    v
+}
+
+/// (base, size) of a mapped module, by file name.
+pub fn image(name: &str) -> Option<(usize, usize)> {
+    IMAGES.lock().ok()?.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(name)).map(|(_, b, s)| (*b, *s))
+}
+
+struct Image {
+    name: String,
+    exe: Executable,
+    base: *mut u8,
+    size: usize,
+}
+
+fn map(name: &str, exe: Executable) -> Result<Image, String> {
+    let segs: Vec<_> = exe.phdrs.iter().filter(|p| p.kind == PT_LOAD || p.kind == PT_SCE_RELRO).cloned().collect();
     if segs.is_empty() {
-        return Err("no loadable segments".into());
+        return Err(format!("{name}: no loadable segments"));
     }
     let end = segs.iter().map(|p| p.vaddr + p.memsz).max().unwrap();
     let size = ((end + 0xFFFF) & !0xFFFF) as usize;
     let base = alloc_rwx(size);
     if base.is_null() {
-        return Err("could not reserve memory for the executable".into());
+        return Err(format!("{name}: could not reserve memory"));
     }
     for p in &segs {
         let src = exe.elf.get(p.offset as usize..(p.offset + p.filesz) as usize).ok_or("segment outside file")?;
         unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), base.add(p.vaddr as usize), src.len()) };
     }
+    IMAGES.lock().unwrap().push((name.to_string(), base as usize, size));
+    Ok(Image { name: name.to_string(), exe, base, size })
+}
 
-    // Stubs: mov rdi, index ; mov rax, handler ; jmp rax  (22 bytes, padded to 32)
-    let relocs = exe.relocations();
-    let stubs = alloc_rwx(relocs.len().max(1) * 32);
+/// Modules shipped with the game: *.prx in sce_module/ and next to eboot.bin. libc first.
+fn game_modules(main: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![];
+    let Some(dir) = main.parent() else { return out };
+    for d in [dir.join("sce_module"), dir.to_path_buf()] {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let mut v: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("prx")).unwrap_or(false)).collect();
+        v.sort();
+        out.extend(v);
+    }
+    out.sort_by_key(|p| !p.file_name().map(|n| n.to_string_lossy().eq_ignore_ascii_case("libc.prx")).unwrap_or(false));
+    out
+}
+
+/// Loads only the executable (no game modules).
+pub fn load(exe: Executable) -> Result<Loaded, String> {
+    load_with_modules(exe, None)
+}
+
+/// Loads the executable and the modules in its folder, links them together and to Orbis.
+pub fn load_with_modules(main_exe: Executable, main_path: Option<&std::path::Path>) -> Result<Loaded, String> {
+    let mut images = vec![map("eboot.bin", main_exe)?];
+    if let Some(path) = main_path {
+        for m in game_modules(path) {
+            let name = m.file_name().unwrap().to_string_lossy().to_string();
+            match std::fs::read(&m).map_err(|e| e.to_string()).and_then(|b| Executable::parse(&b).map_err(|e| e.to_string())) {
+                Ok(exe) => images.push(map(&name, exe)?),
+                Err(e) => eprintln!("[orbis] module {name} skipped: {e}"),
+            }
+        }
+    }
+
+    // Exports of the game's own modules (libc, fmod, …), by NID.
+    let mut exports: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for img in images.iter().skip(1) {
+        for (nid, value) in img.exe.exports() {
+            exports.entry(nid).or_insert(img.base as u64 + value);
+        }
+    }
+
+    let table = hle::table();
+    let total_relocs: usize = images.iter().map(|i| i.exe.relocations().len()).sum();
+    let stubs = alloc_rwx(total_relocs.max(1) * 32);
     let mut stub_count = 0usize;
     let mut bound = 0usize;
-    let table = hle::table();
-    let mut by_symbol: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    let mut stub_of: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut data_of: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
-    for (offset, kind, sym, addend) in relocs {
-        let target = unsafe { base.add(offset as usize) as *mut u64 };
-        let value = match kind {
-            R_X86_64_RELATIVE => base as u64 + addend as u64,
-            R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
-                let name = exe.symbol_name(sym).unwrap_or_default();
-                let nid = name.split('#').next().unwrap_or("").to_string();
-                if let Some(&stub) = by_symbol.get(&sym) {
-                    stub + if kind == R_X86_64_64 { addend as u64 } else { 0 }
-                } else if let Some(&(_, addr)) = table.get(&nid) {
-                    by_symbol.insert(sym, addr as u64);
-                    bound += 1;
-                    addr as u64 + if kind == R_X86_64_64 { addend as u64 } else { 0 }
-                } else {
-                    let label = crate::known::names().get(&nid).map(|n| format!("{n} ({nid})")).unwrap_or(nid);
-                    let index = {
-                        let mut m = MISSING.lock().unwrap();
-                        m.push(label);
-                        (m.len() - 1) as u64
-                    };
-                    let stub = unsafe { stubs.add(stub_count * 32) };
-                    stub_count += 1;
-                    let mut code = Vec::with_capacity(32);
-                    code.extend_from_slice(&[0x48, 0xBF]);
-                    code.extend_from_slice(&index.to_le_bytes());
-                    code.extend_from_slice(&[0x48, 0xB8]);
-                    code.extend_from_slice(&(unimplemented as usize as u64).to_le_bytes());
-                    code.extend_from_slice(&[0xFF, 0xE0]);
-                    unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), stub, code.len()) };
-                    by_symbol.insert(sym, stub as u64);
-                    stub as u64
-                }
-            }
-            _ => continue,
+    // TLS ids: 1 = the main executable's static block below the thread pointer; modules get
+    // their own blocks (dynamic model, __tls_get_addr).
+    *TLS_BLOCKS.lock().unwrap() = vec![0, 0];
+
+    let mut inits = vec![];
+    for (index, img) in images.iter().enumerate() {
+        let base = img.base;
+        let exe = &img.exe;
+        let tls_id = if index == 0 {
+            1u64
+        } else if let Some(t) = exe.segment(PT_TLS) {
+            let block = Box::leak(vec![0u8; t.memsz as usize + 0x40].into_boxed_slice()).as_mut_ptr();
+            unsafe { std::ptr::copy_nonoverlapping(base.add(t.vaddr as usize), block, t.filesz as usize) };
+            let mut b = TLS_BLOCKS.lock().unwrap();
+            b.push(block as usize);
+            let mut tt = TLS_TEMPLATES.lock().unwrap();
+            tt.resize(b.len() - 1, (vec![], 0));
+            tt.push((unsafe { std::slice::from_raw_parts(base.add(t.vaddr as usize), t.filesz as usize) }.to_vec(), t.memsz as usize));
+            (b.len() - 1) as u64
+        } else {
+            0
         };
-        unsafe { target.write_unaligned(value) };
+        let mut unsupported = std::collections::BTreeMap::new();
+        for (offset, kind, sym, addend) in exe.relocations() {
+            let target = unsafe { base.add(offset as usize) as *mut u64 };
+            let value = match kind {
+                R_X86_64_RELATIVE => base as u64 + addend as u64,
+                R_X86_64_DTPMOD64 => tls_id,
+                R_X86_64_DTPOFF64 => exe.symbol(sym).2.wrapping_add(addend as u64),
+                R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
+                    let add = if kind == R_X86_64_64 { addend as u64 } else { 0 };
+                    let (info, shndx, st_value) = exe.symbol(sym);
+                    if shndx != 0 {
+                        base as u64 + st_value + add // defined in this image
+                    } else {
+                        let name = exe.symbol_name(sym).unwrap_or_default();
+                        let nid = name.split('#').next().unwrap_or("").to_string();
+                        if let Some(&(_, addr)) = table.get(&nid).filter(|_| hle::forced(&nid)) {
+                            bound += 1;
+                            addr as u64 + add
+                        } else if let Some(&addr) = exports.get(&nid) {
+                            bound += 1;
+                            addr + add
+                        } else if let Some(&(_, addr)) = table.get(&nid) {
+                            bound += 1;
+                            addr as u64 + add
+                        } else if info & 0xF == 1 {
+                            // Data object nobody provides: zeroed memory, never code.
+                            let block = *data_of.entry(nid.clone()).or_insert_with(|| {
+                                let label = crate::known::names().get(&nid).map(|n| n.to_string()).unwrap_or_else(|| nid.clone());
+                                eprintln!("[orbis] {}: data import {label} not provided, zeroed", img.name);
+                                Box::leak(vec![0u64; 0x200].into_boxed_slice()).as_mut_ptr() as u64
+                            });
+                            block + add
+                        } else {
+                            let stub = *stub_of.entry(nid.clone()).or_insert_with(|| {
+                                let label = crate::known::names().get(&nid).map(|n| format!("{n} ({nid})")).unwrap_or(nid.clone());
+                                let index = {
+                                    let mut m = MISSING.lock().unwrap();
+                                    m.push(label);
+                                    (m.len() - 1) as u64
+                                };
+                                let stub = unsafe { stubs.add(stub_count * 32) };
+                                stub_count += 1;
+                                let mut code = Vec::with_capacity(32);
+                                code.extend_from_slice(&[0x48, 0xBF]);
+                                code.extend_from_slice(&index.to_le_bytes());
+                                code.extend_from_slice(&[0x48, 0xB8]);
+                                code.extend_from_slice(&(unimplemented as usize as u64).to_le_bytes());
+                                code.extend_from_slice(&[0xFF, 0xE0]);
+                                unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), stub, code.len()) };
+                                stub as u64
+                            });
+                            stub + add
+                        }
+                    }
+                }
+                other => {
+                    *unsupported.entry(other).or_insert(0usize) += 1;
+                    continue;
+                }
+            };
+            unsafe { target.write_unaligned(value) };
+        }
+        if !unsupported.is_empty() {
+            eprintln!("[orbis] {}: unsupported relocation types {:?}", img.name, unsupported);
+        }
+        let fs_patched = crate::tls::patch_fs_accesses(exe, base);
+        if index == 0 {
+            *GAME.lock().unwrap() = (base as usize, img.size);
+            if let Some(p) = exe.segment(PT_SCE_PROCPARAM) {
+                unsafe { crate::kernel::PROC_PARAM = base as usize + p.vaddr as usize };
+            }
+            let tls_size = crate::tls::setup(exe, base)?;
+            TLS_BLOCKS.lock().unwrap()[1] = crate::tls::THREAD_POINTER - tls_size;
+            eprintln!("[orbis] thread-local storage: {tls_size} bytes at {:#x}, {fs_patched} fs: accesses rewritten", crate::tls::THREAD_POINTER);
+        } else {
+            eprintln!("[orbis] module {} at {:p}: {} exports, TLS id {tls_id}, {fs_patched} fs: accesses rewritten", img.name, base, exe.exports().len());
+            if let Some(init) = exe.dyn_value(DT_INIT) {
+                inits.push((img.name.clone(), base as u64 + init));
+            }
+        }
     }
-    *GAME.lock().unwrap() = (base as usize, size);
-    let tls_size = crate::tls::setup(exe, base)?;
-    let fs_patched = crate::tls::patch_fs_accesses(exe, base);
-    eprintln!("[orbis] thread-local storage: {tls_size} bytes at {:#x}, {fs_patched} fs: accesses rewritten", crate::tls::THREAD_POINTER);
-    Ok(Loaded { base, entry: base as u64 + exe.entry, bound, stubbed: stub_count })
+    let main = &images[0];
+    Ok(Loaded {
+        base: main.base,
+        entry: main.base as u64 + main.exe.entry,
+        bound,
+        stubbed: stub_count,
+        modules: images.iter().skip(1).map(|i| i.name.clone()).collect(),
+        inits,
+    })
 }
 
 extern "sysv64" fn exit_handler() {}
 
-/// Calls the entry point: entry(args, exit_handler), System V convention.
+/// Runs the modules' initialisers, then the entry point, on a thread with a console-sized
+/// stack (the PC main thread has only 1 MB).
 pub fn run(loaded: &Loaded) -> i32 {
+    struct P(usize);
+    unsafe impl Send for P {}
+    let p = P(loaded as *const Loaded as usize);
+    std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(64 << 20)
+        .spawn(move || {
+            let p = p;
+            install_thread_guard();
+            crate::tls::set_current(crate::tls::THREAD_POINTER);
+            run_here(unsafe { &*(p.0 as *const Loaded) })
+        })
+        .map_err(|e| e.to_string())
+        .and_then(|h| h.join().map_err(|_| "the game thread panicked".to_string()))
+        .unwrap_or(-1)
+}
+
+fn run_here(loaded: &Loaded) -> i32 {
+    for (name, init) in &loaded.inits {
+        eprintln!("[orbis] initialising {name}");
+        let f: extern "sysv64" fn(u64, u64, u64) -> i32 = unsafe { std::mem::transmute(*init as usize) };
+        f(0, 0, 0);
+    }
+    eprintln!("[orbis] starting the game at its entry point");
     let mut args = [0u64; 32];
     let entry: extern "sysv64" fn(*mut u64, extern "sysv64" fn()) -> i32 = unsafe { std::mem::transmute(loaded.entry as usize) };
     entry(args.as_mut_ptr(), exit_handler)

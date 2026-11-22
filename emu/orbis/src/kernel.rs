@@ -1,0 +1,601 @@
+//! libkernel: the functions the console's own C library (libc.prx, shipped with games) and
+//! games call for memory, time, files and process information.
+//!
+//! Return values follow the console: 0 on success, an SCE error code (0x8002_xxxx) on failure
+//! for `sceKernel*`, and -1 with errno for POSIX-style names.
+
+use std::ffi::{c_char, c_void, CStr};
+use std::sync::Mutex;
+
+const SCE_KERNEL_ERROR_ENOMEM: i32 = 0x8002_000Cu32 as i32;
+const SCE_KERNEL_ERROR_ENOENT: i32 = 0x8002_0002u32 as i32;
+const SCE_KERNEL_ERROR_EBADF: i32 = 0x8002_0009u32 as i32;
+
+fn text(p: *const c_char) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
+// ── memory ────────────────────────────────────────────────────────────
+
+/// Regions handed to the game: (start, end, direct?, name).
+static REGIONS: Mutex<Vec<(usize, usize, bool)>> = Mutex::new(Vec::new());
+
+fn record(start: usize, len: usize, direct: bool) {
+    if start != 0 {
+        let mut r = REGIONS.lock().unwrap();
+        r.push((start, start + len, direct));
+        r.sort_by_key(|x| x.0);
+    }
+}
+
+#[repr(C)]
+pub struct VirtualQueryInfo {
+    start: usize,
+    end: usize,
+    offset: u64,
+    protection: i32,
+    memory_type: i32,
+    flags: u8,
+    name: [u8; 32],
+}
+
+/// sceKernelVirtualQuery(addr, flags, info, size): flags & 1 = find the next region.
+pub extern "sysv64" fn virtual_query(addr: usize, flags: i32, info: *mut VirtualQueryInfo, _size: usize) -> i32 {
+    const EACCES: i32 = 0x8002_000Du32 as i32;
+    let mut found = None;
+    for &(s, e, direct) in REGIONS.lock().unwrap().iter() {
+        if addr >= s && addr < e {
+            found = Some((s, e, direct));
+            break;
+        }
+        if flags & 1 != 0 && s > addr {
+            found = Some((s, e, direct));
+            break;
+        }
+    }
+    if found.is_none() {
+        for (_, s, size) in crate::loader::images() {
+            if addr >= s && addr < s + size || (flags & 1 != 0 && s > addr) {
+                found = Some((s, s + size, false));
+                break;
+            }
+        }
+    }
+    let Some((s, e, direct)) = found else { return EACCES };
+    if info.is_null() {
+        return 0;
+    }
+    unsafe {
+        std::ptr::write_bytes(info as *mut u8, 0, std::mem::size_of::<VirtualQueryInfo>());
+        (*info).start = s;
+        (*info).end = e;
+        (*info).protection = 0x7;
+        (*info).flags = if direct { 0b10010 } else { 0b10001 }; // direct/flexible + committed
+    }
+    0
+}
+
+#[cfg(windows)]
+fn vmem(addr: usize, len: usize) -> usize {
+    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE};
+    let len = (len + 0x3FFF) & !0x3FFF;
+    unsafe {
+        let mut p = if addr != 0 { VirtualAlloc(addr as *const c_void, len, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) } else { std::ptr::null_mut() };
+        if p.is_null() {
+            p = VirtualAlloc(std::ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        }
+        record(p as usize, len, false);
+        p as usize
+    }
+}
+#[cfg(not(windows))]
+fn vmem(_addr: usize, _len: usize) -> usize {
+    0
+}
+
+/// sceKernelMapFlexibleMemory(void** addr, size_t len, int prot, int flags)
+pub extern "sysv64" fn map_flexible(addr: *mut usize, len: usize, _prot: i32, _flags: i32) -> i32 {
+    if addr.is_null() {
+        return SCE_KERNEL_ERROR_ENOMEM;
+    }
+    let p = vmem(unsafe { *addr }, len);
+    if p == 0 {
+        return SCE_KERNEL_ERROR_ENOMEM;
+    }
+    unsafe { *addr = p };
+    0
+}
+
+/// sceKernelMapNamedFlexibleMemory(void** addr, size_t len, int prot, int flags, const char* name)
+pub extern "sysv64" fn map_named_flexible(addr: *mut usize, len: usize, prot: i32, flags: i32, _name: *const c_char) -> i32 {
+    map_flexible(addr, len, prot, flags)
+}
+
+/// mmap(addr, len, prot, flags, fd, offset): anonymous mappings only for now.
+pub extern "sysv64" fn mmap(addr: usize, len: usize, _prot: i32, _flags: i32, _fd: i32, _off: i64) -> usize {
+    let p = vmem(addr, len);
+    if p == 0 {
+        usize::MAX
+    } else {
+        p
+    }
+}
+
+pub extern "sysv64" fn munmap(_addr: usize, _len: usize) -> i32 {
+    0 // memory is kept; games rarely depend on unmapping
+}
+
+pub extern "sysv64" fn mprotect(_addr: usize, _len: usize, _prot: i32) -> i32 {
+    0
+}
+
+/// Direct memory: one counter, the "physical" offset handed back to the game.
+static DIRECT: Mutex<u64> = Mutex::new(0);
+const DIRECT_SIZE: u64 = 13 << 30;
+
+/// sceKernelAllocateDirectMemory(start, end, len, align, type, out_offset)
+pub extern "sysv64" fn allocate_direct(_start: i64, _end: i64, len: u64, align: u64, _kind: i32, out: *mut u64) -> i32 {
+    let mut d = DIRECT.lock().unwrap();
+    let a = align.max(0x10000);
+    let off = (*d + a - 1) / a * a;
+    if off + len > DIRECT_SIZE {
+        return SCE_KERNEL_ERROR_ENOMEM;
+    }
+    *d = off + len;
+    unsafe { *out = off };
+    0
+}
+
+pub extern "sysv64" fn allocate_main_direct(len: u64, align: u64, kind: i32, out: *mut u64) -> i32 {
+    allocate_direct(0, DIRECT_SIZE as i64, len, align, kind, out)
+}
+
+/// sceKernelMapDirectMemory(void** addr, len, prot, flags, offset, align)
+pub extern "sysv64" fn map_direct(addr: *mut usize, len: usize, prot: i32, flags: i32, _off: i64, _align: u64) -> i32 {
+    map_flexible(addr, len, prot, flags)
+}
+
+pub extern "sysv64" fn map_named_direct(addr: *mut usize, len: usize, prot: i32, flags: i32, off: i64, align: u64, _name: *const c_char) -> i32 {
+    map_direct(addr, len, prot, flags, off, align)
+}
+
+pub extern "sysv64" fn direct_memory_size() -> u64 {
+    DIRECT_SIZE
+}
+
+/// sceKernelAvailableFlexibleMemorySize(size_t* out)
+pub extern "sysv64" fn available_flexible(out: *mut u64) -> i32 {
+    if !out.is_null() {
+        unsafe { *out = 448 << 20 };
+    }
+    0
+}
+
+/// sceKernelAvailableDirectMemorySize(start, end, align, out_start, out_size)
+pub extern "sysv64" fn available_direct(_s: i64, _e: i64, _a: u64, out_start: *mut u64, out_size: *mut u64) -> i32 {
+    let used = *DIRECT.lock().unwrap();
+    unsafe {
+        if !out_start.is_null() {
+            *out_start = used;
+        }
+        if !out_size.is_null() {
+            *out_size = DIRECT_SIZE - used;
+        }
+    }
+    0
+}
+
+/// sceKernelReserveVirtualRange(void** addr, len, flags, align)
+pub extern "sysv64" fn reserve_virtual_range(addr: *mut usize, len: usize, _flags: i32, align: usize) -> i32 {
+    if addr.is_null() {
+        return SCE_KERNEL_ERROR_ENOMEM;
+    }
+    let want = unsafe { *addr };
+    // Over-allocate to honour the alignment.
+    let a = align.max(0x4000);
+    let p = vmem(want, len + if want == 0 { a } else { 0 });
+    if p == 0 {
+        return SCE_KERNEL_ERROR_ENOMEM;
+    }
+    unsafe { *addr = if want == 0 { (p + a - 1) / a * a } else { p } };
+    0
+}
+
+/// pthread_once / scePthreadOnce: { int state; mutex }.
+pub extern "sysv64" fn pthread_once(ctrl: *mut i32, f: extern "sysv64" fn()) -> i32 {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        if *ctrl == 0 {
+            *ctrl = 1;
+            f();
+            *ctrl = 2;
+        }
+    }
+    0
+}
+
+// ── process ───────────────────────────────────────────────────────────
+
+pub static mut PROC_PARAM: usize = 0;
+
+pub extern "sysv64" fn get_proc_param() -> usize {
+    unsafe { PROC_PARAM }
+}
+
+/// `__progname`: data symbol, a pointer to the program name.
+pub static mut PROGNAME: [usize; 2] = [0; 2];
+
+pub fn progname() -> usize {
+    unsafe {
+        PROGNAME[0] = b"eboot.bin\0".as_ptr() as usize;
+        std::ptr::addr_of!(PROGNAME) as usize
+    }
+}
+
+pub extern "sysv64" fn zero() -> u64 {
+    0
+}
+
+/// _sceKernelRtldSetApplicationHeapAPI(table): libc hands over its malloc family.
+pub static mut HEAP_API: usize = 0;
+pub extern "sysv64" fn set_application_heap_api(api: usize) -> i32 {
+    unsafe { HEAP_API = api };
+    0
+}
+
+/// sceKernelGetModuleInfoFromAddr(addr, flags, info): enough for unwinding to find nothing.
+pub extern "sysv64" fn module_info_from_addr(_addr: usize, _flags: i32, _info: *mut c_void) -> i32 {
+    SCE_KERNEL_ERROR_ENOENT
+}
+
+pub extern "sysv64" fn debug_raise_exception(code: u32, arg: u64) -> i32 {
+    eprintln!("[orbis] the game raised a debug exception {code:#x} ({arg:#x})");
+    0
+}
+
+// ── time ──────────────────────────────────────────────────────────────
+
+fn start() -> &'static std::time::Instant {
+    static T: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    T.get_or_init(std::time::Instant::now)
+}
+
+#[repr(C)]
+pub struct Timespec {
+    sec: i64,
+    nsec: i64,
+}
+
+/// clock_gettime(clock, ts): realtime (0) from the system clock, every other clock monotonic.
+pub extern "sysv64" fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32 {
+    if ts.is_null() {
+        return -1;
+    }
+    let d = if clock == 0 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+    } else {
+        start().elapsed()
+    };
+    unsafe {
+        (*ts).sec = d.as_secs() as i64;
+        (*ts).nsec = d.subsec_nanos() as i64;
+    }
+    0
+}
+
+#[repr(C)]
+pub struct Timeval {
+    sec: i64,
+    usec: i64,
+}
+
+pub extern "sysv64" fn gettimeofday(tv: *mut Timeval, _tz: *mut c_void) -> i32 {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    if !tv.is_null() {
+        unsafe {
+            (*tv).sec = d.as_secs() as i64;
+            (*tv).usec = d.subsec_micros() as i64;
+        }
+    }
+    0
+}
+
+pub extern "sysv64" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> i32 {
+    if !req.is_null() {
+        let (s, n) = unsafe { ((*req).sec, (*req).nsec) };
+        std::thread::sleep(std::time::Duration::new(s.max(0) as u64, n.clamp(0, 999_999_999) as u32));
+    }
+    0
+}
+
+pub extern "sysv64" fn read_tsc() -> u64 {
+    start().elapsed().as_nanos() as u64
+}
+
+pub extern "sysv64" fn tsc_frequency() -> u64 {
+    1_000_000_000
+}
+
+// ── files ─────────────────────────────────────────────────────────────
+// Console paths: /app0 is the game folder; /data, /temp0, /download0 map to a folder under
+// %LOCALAPPDATA%\POLYMIRA\orbis.
+
+pub static GAME_DIR: Mutex<String> = Mutex::new(String::new());
+
+fn host_path(p: &str) -> std::path::PathBuf {
+    let game = GAME_DIR.lock().unwrap().clone();
+    let data = std::env::var("LOCALAPPDATA").map(|d| format!("{d}/POLYMIRA/orbis")).unwrap_or_else(|_| "orbis-data".into());
+    for (prefix, root) in [("/app0", game.clone()), ("/hostapp", game), ("/data", format!("{data}/data")), ("/temp0", format!("{data}/temp0")), ("/temp", format!("{data}/temp0")), ("/download0", format!("{data}/download0"))] {
+        if let Some(rest) = p.strip_prefix(prefix) {
+            if rest.is_empty() || rest.starts_with('/') {
+                return std::path::PathBuf::from(format!("{root}{rest}"));
+            }
+        }
+    }
+    std::path::PathBuf::from(format!("{data}/root{p}"))
+}
+
+static FILES: Mutex<Vec<Option<std::fs::File>>> = Mutex::new(Vec::new());
+
+const O_WRONLY: i32 = 1;
+const O_RDWR: i32 = 2;
+const O_APPEND: i32 = 8;
+const O_CREAT: i32 = 0x200;
+const O_TRUNC: i32 = 0x400;
+
+fn open_file(path: &str, flags: i32) -> Result<i32, i32> {
+    let host = host_path(path);
+    let mut o = std::fs::OpenOptions::new();
+    let acc = flags & 3;
+    o.read(acc != O_WRONLY).write(acc == O_WRONLY || acc == O_RDWR).append(flags & O_APPEND != 0).create(flags & O_CREAT != 0).truncate(flags & O_TRUNC != 0);
+    if flags & O_CREAT != 0 {
+        if let Some(parent) = host.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    if host.is_dir() {
+        // Directories open as a handle with no file behind it.
+        let mut f = FILES.lock().unwrap();
+        f.push(None);
+        return Ok((f.len() + 2) as i32);
+    }
+    match o.open(&host) {
+        Ok(file) => {
+            let mut f = FILES.lock().unwrap();
+            f.push(Some(file));
+            let fd = (f.len() + 2) as i32;
+            eprintln!("[orbis] open {path} → fd {fd}");
+            Ok(fd)
+        }
+        Err(_) => {
+            eprintln!("[orbis] open {path}: not found ({})", host.display());
+            Err(SCE_KERNEL_ERROR_ENOENT)
+        }
+    }
+}
+
+pub extern "sysv64" fn sce_open(path: *const c_char, flags: i32, _mode: i32) -> i32 {
+    match open_file(&text(path), flags) {
+        Ok(fd) => fd,
+        Err(e) => e,
+    }
+}
+
+pub extern "sysv64" fn posix_open(path: *const c_char, flags: i32, _mode: i32) -> i32 {
+    match open_file(&text(path), flags) {
+        Ok(fd) => fd,
+        Err(_) => {
+            crate::hle_rt::set_errno(2);
+            -1
+        }
+    }
+}
+
+fn with_file<R>(fd: i32, f: impl FnOnce(&mut std::fs::File) -> R) -> Option<R> {
+    let mut files = FILES.lock().unwrap();
+    files.get_mut((fd - 3).max(0) as usize).and_then(|x| x.as_mut()).map(f)
+}
+
+pub extern "sysv64" fn sce_close(fd: i32) -> i32 {
+    if fd < 3 {
+        return 0;
+    }
+    let mut files = FILES.lock().unwrap();
+    match files.get_mut((fd - 3) as usize) {
+        Some(slot) => {
+            *slot = None;
+            0
+        }
+        None => SCE_KERNEL_ERROR_EBADF,
+    }
+}
+
+pub extern "sysv64" fn sce_read(fd: i32, buf: *mut u8, len: usize) -> i64 {
+    use std::io::Read;
+    if fd < 3 {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts_mut(buf, len) };
+    with_file(fd, |f| f.read(slice).map(|n| n as i64).unwrap_or(-1)).unwrap_or(SCE_KERNEL_ERROR_EBADF as i64)
+}
+
+pub extern "sysv64" fn sce_write(fd: i32, buf: *const u8, len: usize) -> i64 {
+    use std::io::Write;
+    let slice = unsafe { std::slice::from_raw_parts(buf, len) };
+    if fd == 1 || fd == 2 {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(slice);
+        let _ = out.flush();
+        return len as i64;
+    }
+    with_file(fd, |f| f.write(slice).map(|n| n as i64).unwrap_or(-1)).unwrap_or(SCE_KERNEL_ERROR_EBADF as i64)
+}
+
+pub extern "sysv64" fn sce_lseek(fd: i32, off: i64, whence: i32) -> i64 {
+    use std::io::{Seek, SeekFrom};
+    let pos = match whence {
+        0 => SeekFrom::Start(off.max(0) as u64),
+        1 => SeekFrom::Current(off),
+        _ => SeekFrom::End(off),
+    };
+    with_file(fd, |f| f.seek(pos).map(|n| n as i64).unwrap_or(-1)).unwrap_or(SCE_KERNEL_ERROR_EBADF as i64)
+}
+
+/// FreeBSD struct stat (the fields games read: mode, size, blocks).
+#[repr(C)]
+pub struct Stat {
+    dev: u32,
+    ino: u32,
+    mode: u16,
+    nlink: u16,
+    uid: u32,
+    gid: u32,
+    rdev: u32,
+    atime: [i64; 2],
+    mtime: [i64; 2],
+    ctime: [i64; 2],
+    size: i64,
+    blocks: i64,
+    blksize: u32,
+    flags: u32,
+    gen: u32,
+    lspare: i32,
+    birthtime: [i64; 2],
+}
+
+fn fill_stat(meta: &std::fs::Metadata, st: *mut Stat) {
+    unsafe {
+        std::ptr::write_bytes(st as *mut u8, 0, std::mem::size_of::<Stat>());
+        (*st).mode = if meta.is_dir() { 0o040755 } else { 0o100644 };
+        (*st).size = meta.len() as i64;
+        (*st).blksize = 0x10000;
+        (*st).blocks = (meta.len() as i64 + 511) / 512;
+        (*st).nlink = 1;
+    }
+}
+
+pub extern "sysv64" fn sce_stat(path: *const c_char, st: *mut Stat) -> i32 {
+    let p = text(path);
+    match std::fs::metadata(host_path(&p)) {
+        Ok(m) => {
+            fill_stat(&m, st);
+            0
+        }
+        Err(_) => SCE_KERNEL_ERROR_ENOENT,
+    }
+}
+
+pub extern "sysv64" fn posix_stat(path: *const c_char, st: *mut Stat) -> i32 {
+    if sce_stat(path, st) == 0 {
+        0
+    } else {
+        crate::hle_rt::set_errno(2);
+        -1
+    }
+}
+
+pub extern "sysv64" fn sce_fstat(fd: i32, st: *mut Stat) -> i32 {
+    match with_file(fd, |f| f.metadata()) {
+        Some(Ok(m)) => {
+            fill_stat(&m, st);
+            0
+        }
+        _ => {
+            unsafe {
+                std::ptr::write_bytes(st as *mut u8, 0, std::mem::size_of::<Stat>());
+                (*st).mode = 0o020666; // character device (console streams)
+            }
+            0
+        }
+    }
+}
+
+pub extern "sysv64" fn sce_mkdir(path: *const c_char, _mode: i32) -> i32 {
+    let _ = std::fs::create_dir_all(host_path(&text(path)));
+    0
+}
+
+/// (name, address) for everything here.
+pub fn functions() -> Vec<(&'static str, usize)> {
+    vec![
+        ("__tls_get_addr", crate::loader::tls_get_addr as *const () as usize),
+        ("sceKernelMapFlexibleMemory", map_flexible as *const () as usize),
+        ("#4h6F1LLbTiw", map_flexible as *const () as usize), // PS5 6.xx variant
+        ("sceKernelMapNamedFlexibleMemory", map_named_flexible as *const () as usize),
+        ("sceKernelMapNamedSystemFlexibleMemory", map_named_flexible as *const () as usize),
+        ("sceKernelAllocateDirectMemory", allocate_direct as *const () as usize),
+        ("sceKernelAllocateMainDirectMemory", allocate_main_direct as *const () as usize),
+        ("sceKernelMapDirectMemory", map_direct as *const () as usize),
+        ("sceKernelMapNamedDirectMemory", map_named_direct as *const () as usize),
+        ("sceKernelGetDirectMemorySize", direct_memory_size as *const () as usize),
+        ("sceKernelAvailableFlexibleMemorySize", available_flexible as *const () as usize),
+        ("sceKernelAvailableDirectMemorySize", available_direct as *const () as usize),
+        ("sceKernelVirtualQuery", virtual_query as *const () as usize),
+        ("sceKernelReserveVirtualRange", reserve_virtual_range as *const () as usize),
+        ("scePthreadOnce", pthread_once as *const () as usize),
+        ("pthread_once", pthread_once as *const () as usize),
+        ("sceLibcHeapGetTraceInfo", zero as *const () as usize),
+        ("mmap", mmap as *const () as usize),
+        ("sceKernelMmap", mmap as *const () as usize),
+        ("munmap", munmap as *const () as usize),
+        ("sceKernelMunmap", munmap as *const () as usize),
+        ("mprotect", mprotect as *const () as usize),
+        ("sceKernelMprotect", mprotect as *const () as usize),
+        ("sceKernelMlock", zero as *const () as usize),
+        ("sceKernelGetProcParam", get_proc_param as *const () as usize),
+        ("__progname", progname()),
+        ("_sceKernelRtldSetApplicationHeapAPI", set_application_heap_api as *const () as usize),
+        ("_sceKernelRtldThreadAtexitIncrement", zero as *const () as usize),
+        ("_sceKernelRtldThreadAtexitDecrement", zero as *const () as usize),
+        ("_sceKernelSetThreadAtexitCount", zero as *const () as usize),
+        ("_sceKernelSetThreadAtexitReport", zero as *const () as usize),
+        ("_sceKernelSetThreadDtors", zero as *const () as usize),
+        ("sceKernelIsAddressSanitizerEnabled", zero as *const () as usize),
+        ("sceKernelGetSanitizerMallocReplaceExternal", zero as *const () as usize),
+        ("sceKernelGetSanitizerNewReplaceExternal", zero as *const () as usize),
+        ("sceKernelGetModuleInfoFromAddr", module_info_from_addr as *const () as usize),
+        ("sceKernelGetModuleInfoForUnwind", module_info_from_addr as *const () as usize),
+        ("sceSysmoduleGetModuleInfoForUnwind", module_info_from_addr as *const () as usize),
+        ("sceKernelDebugRaiseException", debug_raise_exception as *const () as usize),
+        ("sceKernelDebugRaiseExceptionOnReleaseMode", debug_raise_exception as *const () as usize),
+        ("#cfwBSQyr5Ys", zero as *const () as usize),
+        ("_sigprocmask", zero as *const () as usize),
+        ("signal", zero as *const () as usize),
+        ("_is_signal_return", zero as *const () as usize),
+        ("clock_gettime", clock_gettime as *const () as usize),
+        ("sceKernelClockGettime", clock_gettime as *const () as usize),
+        ("gettimeofday", gettimeofday as *const () as usize),
+        ("sceKernelGettimeofday", gettimeofday as *const () as usize),
+        ("nanosleep", nanosleep as *const () as usize),
+        ("_nanosleep", nanosleep as *const () as usize),
+        ("sceKernelNanosleep", nanosleep as *const () as usize),
+        ("sceKernelReadTsc", read_tsc as *const () as usize),
+        ("sceKernelGetTscFrequency", tsc_frequency as *const () as usize),
+        ("sceKernelGetProcessTimeCounter", read_tsc as *const () as usize),
+        ("sceKernelGetProcessTimeCounterFrequency", tsc_frequency as *const () as usize),
+        ("sceKernelOpen", sce_open as *const () as usize),
+        ("_open", posix_open as *const () as usize),
+        ("open", posix_open as *const () as usize),
+        ("sceKernelClose", sce_close as *const () as usize),
+        ("_close", sce_close as *const () as usize),
+        ("close", sce_close as *const () as usize),
+        ("sceKernelRead", sce_read as *const () as usize),
+        ("_read", sce_read as *const () as usize),
+        ("read", sce_read as *const () as usize),
+        ("sceKernelWrite", sce_write as *const () as usize),
+        ("_write", sce_write as *const () as usize),
+        ("write", sce_write as *const () as usize),
+        ("sceKernelLseek", sce_lseek as *const () as usize),
+        ("lseek", sce_lseek as *const () as usize),
+        ("sceKernelStat", sce_stat as *const () as usize),
+        ("stat", posix_stat as *const () as usize),
+        ("sceKernelFstat", sce_fstat as *const () as usize),
+        ("fstat", sce_fstat as *const () as usize),
+        ("sceKernelMkdir", sce_mkdir as *const () as usize),
+        ("mkdir", sce_mkdir as *const () as usize),
+    ]
+}

@@ -7,11 +7,79 @@
 //!   2. copies the game's TLS template (PT_TLS) right below it,
 //!   3. rewrites every `fs:[disp32]` access in the game's code into a plain memory access to
 //!      `[THREAD_POINTER + disp32]` (same length: the 0x64 prefix is dropped, a NOP pads).
-//! Single-threaded for now: every thread shares this block.
+//! Loads of the thread pointer itself (`mov reg, fs:[0]`, by far the most common form) become
+//! `mov reg, gs:[TlsSlots + slot*8]` instead: same length, and each Windows thread keeps its
+//! own thread pointer in that TLS slot, so every game thread gets its own TLS block.
+//! The main thread's block sits at THREAD_POINTER; other `fs:[disp]` forms use that block.
 
 use crate::format::{Executable, PT_LOAD, PT_TLS};
 
 pub const THREAD_POINTER: usize = 0x1000_0000;
+
+/// Windows TLS slot holding each thread's thread pointer (TEB.TlsSlots is at gs:[0x1480]).
+static SLOT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+/// The executable's TLS template and its aligned size, for new threads.
+static TEMPLATE: std::sync::Mutex<(Vec<u8>, usize)> = std::sync::Mutex::new((Vec::new(), 0));
+
+#[cfg(windows)]
+fn slot() -> u32 {
+    use std::sync::atomic::Ordering;
+    let s = SLOT.load(Ordering::SeqCst);
+    if s != u32::MAX {
+        return s;
+    }
+    let s = unsafe { windows_sys::Win32::System::Threading::TlsAlloc() };
+    SLOT.store(if s < 64 { s } else { u32::MAX - 1 }, Ordering::SeqCst);
+    SLOT.load(Ordering::SeqCst)
+}
+#[cfg(not(windows))]
+fn slot() -> u32 {
+    u32::MAX - 1
+}
+
+/// Makes `tp` the current thread's thread pointer.
+pub fn set_current(tp: usize) {
+    #[cfg(windows)]
+    unsafe {
+        let s = slot();
+        if s < 64 {
+            windows_sys::Win32::System::Threading::TlsSetValue(s, tp as *const _);
+        }
+    }
+}
+
+/// The current thread's thread pointer.
+pub fn current() -> usize {
+    #[cfg(windows)]
+    unsafe {
+        let s = slot();
+        if s < 64 {
+            let v = windows_sys::Win32::System::Threading::TlsGetValue(s) as usize;
+            if v != 0 {
+                return v;
+            }
+        }
+    }
+    THREAD_POINTER
+}
+
+/// Size of the executable's static TLS block (below the thread pointer).
+pub fn static_size() -> usize {
+    TEMPLATE.lock().unwrap().1
+}
+
+/// A fresh thread control block + static TLS for a new thread. Returns its thread pointer.
+pub fn new_thread_block() -> usize {
+    let (image, aligned) = TEMPLATE.lock().unwrap().clone();
+    let total = aligned + 0x1000;
+    let mem = Box::leak(vec![0u8; total + 64].into_boxed_slice()).as_mut_ptr() as usize;
+    let tp = (mem + aligned + 63) & !63;
+    unsafe {
+        std::ptr::copy_nonoverlapping(image.as_ptr(), (tp - aligned) as *mut u8, image.len());
+        *(tp as *mut u64) = tp as u64;
+    }
+    tp
+}
 
 #[cfg(windows)]
 fn alloc_at(addr: usize, size: usize) -> *mut u8 {
@@ -49,6 +117,8 @@ pub fn setup(exe: &Executable, base: *mut u8) -> Result<usize, String> {
         // Thread control block: first field points to itself (what `fs:[0]` returns).
         *(THREAD_POINTER as *mut u64) = THREAD_POINTER as u64;
     }
+    *TEMPLATE.lock().unwrap() = (image, aligned);
+    set_current(THREAD_POINTER);
     Ok(aligned)
 }
 
@@ -89,6 +159,15 @@ pub fn patch_fs_accesses(exe: &Executable, base: *mut u8) -> usize {
                 continue;
             }
             let disp = i32::from_le_bytes(code[j + 3..j + 7].try_into().unwrap()) as i64;
+            // `mov r64, fs:[0]`: read the thread pointer from the Windows TLS slot instead.
+            let s = slot();
+            if disp == 0 && op == 0x8B && j == i + 2 && code[i + 1] & 0x48 == 0x48 && s < 64 {
+                code[i] = 0x65;
+                code[j + 3..j + 7].copy_from_slice(&((0x1480 + s * 8) as i32).to_le_bytes());
+                patched += 1;
+                i = j + 7;
+                continue;
+            }
             let new_disp = THREAD_POINTER as i64 + disp;
             if new_disp < 0 || new_disp > i32::MAX as i64 {
                 i += 1;

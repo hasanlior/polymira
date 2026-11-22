@@ -42,5 +42,5 @@ const NAMES: &[&str] = &[
 /// NID → function name, for the names above.
 pub fn names() -> &'static HashMap<String, &'static str> {
     static T: OnceLock<HashMap<String, &'static str>> = OnceLock::new();
-    T.get_or_init(|| NAMES.iter().map(|&n| (crate::nid::nid(n), n)).collect())
+    T.get_or_init(|| NAMES.iter().copied().chain(include_str!("known_extra.txt").lines().filter(|l| !l.is_empty())).map(|n| (crate::nid::nid(n), n)).collect())
 }
