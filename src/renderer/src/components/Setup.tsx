@@ -4,6 +4,7 @@ import type { DiscoverResult, Settings } from '@shared/types'
 import { call, downloadLine } from '../api'
 import { EMULATORS, PLATFORMS } from '@shared/platforms'
 import { Icon, type IconName } from '../icons'
+import { Hint } from '../glyphs'
 import { input, useInput } from '../input'
 import type { MenuCtx } from '../menu'
 import { sfx } from '../sound'
@@ -196,7 +197,7 @@ export function Setup({ ctx, mode, onClose }: Props) {
             <p className="setup-text">
               Birkaç adımda bilgisayarındaki oyunları bulup hepsini tek bir konsol arayüzünde toplayacağız. Her şeyi kontrolcüyle yapabilirsin.
             </p>
-            <div className="btn primary sel">A/✕ Başla</div>
+            <div className="btn primary sel"><Hint action="confirm">Başla</Hint></div>
           </div>
         )}
 
@@ -220,7 +221,7 @@ export function Setup({ ctx, mode, onClose }: Props) {
                 </div>
               ))}
             </div>
-            <div className="btn primary sel">A/✕ Bilgisayarı tara</div>
+            <div className="btn primary sel"><Hint action="confirm">Bilgisayarı tara</Hint></div>
           </div>
         )}
 
@@ -238,7 +239,7 @@ export function Setup({ ctx, mode, onClose }: Props) {
             <h2>Bulunanlar</h2>
             <p className="setup-text">
               {groups.length
-                ? 'Eklemek istediklerini seç. A/✕ ile işaretini kaldırabilirsin.'
+                ? 'Eklemek istediklerini seç; seç tuşuyla işaretini kaldırabilirsin.'
                 : 'Bilinen konumlarda yeni oyun bulunamadı. Oyun klasörlerini daha sonra Ana Sayfa → Oyun ekle bölümünden ekleyebilirsin.'}
             </p>
             <div className="setup-list">
@@ -323,7 +324,7 @@ export function Setup({ ctx, mode, onClose }: Props) {
               {imported?.emulators ? `${imported.emulators} emülatör ayarlandı. ` : ''}
               {imported?.folders ? `${imported.folders} klasör yeni oyunlar için izlenecek.` : ''}
             </p>
-            <div className="btn primary sel">A/✕ {mode === 'setup' ? 'Konsola geç' : 'Tamam'}</div>
+            <div className="btn primary sel"><Hint action="confirm">{mode === 'setup' ? 'Konsola geç' : 'Tamam'}</Hint></div>
           </div>
         )}
       </div>
@@ -335,8 +336,8 @@ export function Setup({ ctx, mode, onClose }: Props) {
         </div>
       )}
       <div className="x-hints">
-        <span>A/✕ Seç</span>
-        {step !== 'welcome' && step !== 'scan' && <span>B/○ Geri</span>}
+        <Hint action="confirm">Seç</Hint>
+        {step !== 'welcome' && step !== 'scan' && <Hint action="back">Geri</Hint>}
       </div>
     </div>
   )

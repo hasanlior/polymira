@@ -4,7 +4,7 @@ import path from 'path'
 import { pathToFileURL } from 'url'
 import { BRAND } from '@shared/brand'
 import { MEDIA_SCHEME, type IpcContract, type IpcEvents, type IpcEvent } from '@shared/ipc'
-import type { AppState, DirEntry, Screenshot, Toast, WindowMode } from '@shared/types'
+import type { AppState, DirEntry, Notice, Screenshot, Toast, WindowMode } from '@shared/types'
 import { initStores, paths, store } from './store'
 import { addSingle, addWatchedFolder, moveGame, refreshMissing, removeGame, removeWatchedFolder, scanFolders, setCustomBackground, setCustomCover, setMusic } from './library'
 import { ArtQueue, backgroundFile, coverFile } from './covers'
@@ -89,10 +89,40 @@ function toast(kind: Toast['kind'], text: string): void {
   send('toast', { kind, text })
 }
 
+// ── Notifications ─────────────────────────────────────────────────────
+
+const notices: Notice[] = []
+let noticeId = 1
+let noticeTimer: NodeJS.Timeout | null = null
+
+/**
+ * Shows a notification card. While a game runs, the in-game menu window is shown for a few
+ * seconds without taking focus or input, so the card appears over the game.
+ */
+function notify(n: Omit<Notice, 'id' | 'at'>): void {
+  const notice: Notice = { ...n, id: noticeId++, at: Date.now() }
+  notices.unshift(notice)
+  notices.length = Math.min(notices.length, 40)
+  send('notice', notice)
+  broadcast()
+  if (session.info && !overlayVisible() && store.settings.notifyInGame) {
+    const w = ensureOverlay()
+    w.setIgnoreMouseEvents(true)
+    w.setFocusable(false)
+    w.showInactive()
+    w.setAlwaysOnTop(true, 'screen-saver')
+    if (noticeTimer) clearTimeout(noticeTimer)
+    noticeTimer = setTimeout(() => {
+      noticeTimer = null
+      if (overlayWindow && !overlayWindow.isDestroyed() && !overlayMenuOpen) overlayWindow.hide()
+    }, 6000)
+  }
+}
+
 const downloads = new DownloadManager((id, exe) => {
   store.updateSettings({ emulatorPaths: { ...store.settings.emulatorPaths, [id]: exe } })
   const name = downloads.jobs.find((j) => j.id === id)?.name ?? id
-  toast('success', `${name} indirildi ve kuruldu.`)
+  notify({ kind: 'download', title: `${name} hazır`, text: 'İndirildi ve kuruldu.' })
   broadcast()
 })
 downloads.on('changed', () => broadcast())
@@ -101,6 +131,7 @@ function snapshot(): AppState {
   return {
     themes: installedThemes(),
     appIcons: appIconRevs(),
+    notices,
     drm: drmStatus(),
     mods: listMods(),
     downloads: downloads.jobs,
@@ -274,14 +305,25 @@ function ensureOverlay(): BrowserWindow {
 
 // ── In-game menu ──────────────────────────────────────────────────────
 
+let overlayMenuOpen = false
+
+function hideOverlay(): void {
+  overlayMenuOpen = false
+  if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide()
+}
+
+/** The in-game menu is open (not just a notification over the game). */
 function overlayVisible(): boolean {
-  return Boolean(overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible())
+  return overlayMenuOpen && Boolean(overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible())
 }
 
 function openOverlay(): void {
   if (!session.info) return
   const w = ensureOverlay()
   if (store.settings.pauseOnOverlay) session.setPaused(true)
+  overlayMenuOpen = true
+  w.setIgnoreMouseEvents(false)
+  w.setFocusable(true)
   w.setBounds(screen.getPrimaryDisplay().bounds)
   w.show()
   w.setAlwaysOnTop(true, 'screen-saver')
@@ -291,6 +333,7 @@ function openOverlay(): void {
 }
 
 function closeOverlay(): void {
+  overlayMenuOpen = false
   if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide()
   session.setPaused(false)
   session.focusGame()
@@ -325,6 +368,7 @@ session.on('ended', (end: import('./session').SessionEnd) => {
   watcher.stop()
   globalShortcut.unregister(OVERLAY_SHORTCUT)
   if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.destroy()
+  overlayMenuOpen = false
   overlayWindow = null
   const g = store.games.find((x) => x.id === end.gameId)
   if (g) {
@@ -571,7 +615,7 @@ const handlers: Handlers = {
 
   'session:pause': (paused) => session.setPaused(paused),
   'session:stop': async () => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide()
+    hideOverlay()
     await session.stop()
   },
   'session:screenshot': async () => {
@@ -582,7 +626,7 @@ const handlers: Handlers = {
   'session:home': () => {
     if (!session.info) return
     session.setPaused(true)
-    if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide()
+    hideOverlay()
     if (mainWindow) {
       mainWindow.show()
       if (store.settings.windowMode === 'fullscreen') mainWindow.setFullScreen(true)
@@ -666,6 +710,10 @@ const handlers: Handlers = {
   'app:closed': (id, playedSec) => {
     const g = store.games.find((x) => x.id === id)
     if (g && playedSec > 0) store.updateGame(id, { playTimeSec: g.playTimeSec + Math.round(playedSec), lastLaunch: { at: Date.now(), result: 'ok' } })
+    broadcast()
+  },
+  'notices:clear': () => {
+    notices.length = 0
     broadcast()
   },
   'app:quit': () => void gracefulQuit()
@@ -846,7 +894,7 @@ async function gracefulQuit(): Promise<void> {
   if (quitting) return
   quitting = true
   const step = (text: string) => send('shutdown', { text })
-  if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.hide()
+  hideOverlay()
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show()
     mainWindow.focus()

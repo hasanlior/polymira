@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { DirEntry, Toast } from '@shared/types'
 import { call } from '../api'
 import { Icon } from '../icons'
+import { Hint } from '../glyphs'
 import { useInput } from '../input'
 import type { BrowseRequest, OptItem } from '../menu'
 import { sfx } from '../sound'
@@ -202,9 +203,9 @@ export function FileBrowser({ req, onClose }: { req: BrowseRequest; onClose: () 
           ))}
         </div>
         <div className="x-hints static">
-          <span>A/✕ Aç / Seç</span>
-          <span>B/○ Üst klasör</span>
-          <span>△ Kapat</span>
+          <Hint action="confirm">Aç / Seç</Hint>
+          <Hint action="back">Üst klasör</Hint>
+          <Hint action="options">Kapat</Hint>
         </div>
       </div>
     </div>

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '../icons'
+import { Hint } from '../glyphs'
 import { useInput } from '../input'
 import { sfx } from '../sound'
 
@@ -84,7 +85,7 @@ export function OnScreenKeyboard({
       onClose()
     }
     if (a === 'left' || a === 'right' || a === 'up' || a === 'down') sfx('move')
-  })
+  }, true, true)
 
   return (
     <div className="modal-layer center osk-layer">
@@ -123,12 +124,12 @@ export function OnScreenKeyboard({
           ))}
         </div>
         <div className="osk-hints">
-          <span><Icon name="check" /> Yaz</span>
-          <span>□ Sil</span>
-          <span>△ Boşluk</span>
-          <span>L1 Büyük harf</span>
-          <span>Start Tamam</span>
-          <span>○ İptal</span>
+          <Hint action="confirm">Yaz</Hint>
+          <Hint action="view">Sil</Hint>
+          <Hint action="options">Boşluk</Hint>
+          <Hint action="l1">Büyük harf</Hint>
+          <Hint action="start">Tamam</Hint>
+          <Hint action="back">İptal</Hint>
         </div>
       </div>
     </div>

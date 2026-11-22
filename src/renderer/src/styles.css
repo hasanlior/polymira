@@ -1855,3 +1855,135 @@ body.overlay-body #root {
   font-size: calc(1.8 * var(--u));
   color: var(--fg-dim);
 }
+
+/* Button glyphs */
+.hint {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(0.6 * var(--u));
+}
+.glyph {
+  display: inline-grid;
+  place-items: center;
+  min-width: calc(2.4 * var(--u));
+  height: calc(2.4 * var(--u));
+  font-size: calc(1.25 * var(--u));
+  font-weight: 700;
+  line-height: 1;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1.5px solid currentColor;
+  flex-shrink: 0;
+}
+.glyph.pill,
+.glyph.key {
+  border-radius: calc(0.6 * var(--u));
+  padding: 0 calc(0.6 * var(--u));
+  font-size: calc(1.1 * var(--u));
+  font-weight: 600;
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.4);
+}
+.glyph-shape {
+  width: 70%;
+  height: 70%;
+}
+.store-trigger .glyph {
+  border: 0;
+  background: none;
+}
+.dialog.remap {
+  min-width: calc(70 * var(--u));
+  text-align: left;
+}
+.remap-sub {
+  color: var(--fg-dim);
+  font-size: calc(1.7 * var(--u));
+  margin: calc(0.8 * var(--u)) 0 calc(2 * var(--u));
+}
+.remap-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: calc(1 * var(--u)) calc(1.6 * var(--u));
+  border-radius: calc(0.8 * var(--u));
+  font-size: calc(2 * var(--u));
+}
+.remap-row.sel {
+  background: rgba(255, 255, 255, 0.14);
+}
+.remap-row .glyph {
+  min-width: calc(3 * var(--u));
+  height: calc(3 * var(--u));
+  font-size: calc(1.5 * var(--u));
+}
+.remap-wait {
+  color: var(--warn);
+}
+
+/* Notifications (top right) */
+.notices {
+  position: fixed;
+  top: calc(9 * var(--u));
+  right: calc(4 * var(--u));
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: calc(1 * var(--u));
+  pointer-events: none;
+}
+.notice {
+  display: flex;
+  align-items: center;
+  gap: calc(1.4 * var(--u));
+  width: calc(46 * var(--u));
+  padding: calc(1.2 * var(--u)) calc(1.6 * var(--u));
+  border-radius: calc(1.2 * var(--u));
+  background: linear-gradient(160deg, rgba(36, 42, 78, 0.94), rgba(14, 16, 32, 0.94));
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 calc(1 * var(--u)) calc(3 * var(--u)) rgba(0, 0, 0, 0.45);
+  animation: notice-in 380ms var(--ease);
+  transition: opacity 450ms ease, transform 450ms ease;
+}
+.notice.leaving {
+  opacity: 0;
+  transform: translateX(calc(6 * var(--u)));
+}
+@keyframes notice-in {
+  from {
+    opacity: 0;
+    transform: translateX(calc(8 * var(--u)));
+  }
+}
+.notice-icon {
+  width: calc(5 * var(--u));
+  height: calc(5 * var(--u));
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: calc(0.9 * var(--u));
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.notice.trophy .notice-icon {
+  background: linear-gradient(160deg, #ffd479, #c98a1a);
+  color: #2a1800;
+}
+.notice-icon svg {
+  width: 60%;
+  height: 60%;
+}
+.notice-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.notice-title {
+  font-size: calc(1.9 * var(--u));
+  font-weight: 400;
+}
+.notice-text {
+  font-size: calc(1.5 * var(--u));
+  color: var(--fg-dim);
+  margin-top: calc(0.2 * var(--u));
+}

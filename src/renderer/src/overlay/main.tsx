@@ -4,9 +4,11 @@ import { getPlatform } from '@shared/platforms'
 import type { PerfSnapshot, Toast } from '@shared/types'
 import { call, coverUrl, formatPlayTime, useAppState } from '../api'
 import { Icon, type IconName } from '../icons'
+import { Hint } from '../glyphs'
 import { input, useInput } from '../input'
 import { configureSound, sfx } from '../sound'
 import '../styles.css'
+import { NoticeStack } from '../components/Notices'
 
 /**
  * In-game menu. Runs in a transparent always-on-top window above the emulator and is
@@ -38,7 +40,10 @@ function Overlay() {
   }, [])
 
   useEffect(() => {
-    if (state) configureSound(state.settings.menuSounds, state.settings.soundVolume)
+    if (!state) return
+    configureSound(state.settings.menuSounds, state.settings.soundVolume)
+    input.setMap(state.settings.padMap)
+    input.setForcedStyle(state.settings.padStyle === 'auto' ? null : state.settings.padStyle)
   }, [state?.settings])
 
   useEffect(() => {
@@ -104,9 +109,11 @@ function Overlay() {
     }
   })
 
-  if (!state || !session || !game) return null
+  if (!state || !session || !game) return <NoticeStack />
 
   return (
+    <>
+    <NoticeStack />
     <div className={`ov ${visible ? 'show' : ''}`}>
       <div className="ov-panel">
         <div className="ov-game">
@@ -129,12 +136,12 @@ function Overlay() {
         {confirmQuit && (
           <div className="ov-confirm">
             Oyun kapatılsın mı? Kaydedilmemiş ilerleme kaybolur.
-            <div className="ov-confirm-keys">A/✕ Evet · B/○ Hayır</div>
+            <div className="ov-confirm-keys"><Hint action="confirm">Evet</Hint> <Hint action="back">Hayır</Hint></div>
           </div>
         )}
         <div className="x-hints static">
-          <span>A/✕ Seç</span>
-          <span>B/○ Oyuna dön</span>
+          <Hint action="confirm">Seç</Hint>
+          <Hint action="back">Oyuna dön</Hint>
         </div>
       </div>
 
@@ -164,6 +171,7 @@ function Overlay() {
 
       {toast && <div className={`toast ov-toast ${toast.kind}`}>{toast.text}</div>}
     </div>
+    </>
   )
 }
 

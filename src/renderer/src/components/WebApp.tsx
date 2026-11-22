@@ -4,6 +4,7 @@ import type { StoreItem } from '@shared/catalog'
 import { appIconUrl } from '../api'
 import { BRAND } from '@shared/brand'
 import { Icon } from '../icons'
+import { Hint } from '../glyphs'
 import { input, useInput, type Action } from '../input'
 import type { MenuCtx, OptItem } from '../menu'
 import { sfx } from '../sound'
@@ -219,7 +220,7 @@ export function WebApp({
   }
   const handlerRef = useRef(handler)
   handlerRef.current = handler
-  useInput(handler)
+  useInput(handler, true, true)
 
   useEffect(() => {
     if (kiosk) return
@@ -292,13 +293,13 @@ export function WebApp({
             <div className="web-bar-url">{host}</div>
           </div>
           <div className="web-bar-hints">
-            <span>L-çubuk İmleç</span>
-            <span>R-çubuk Kaydır</span>
-            <span>✕ Tıkla</span>
-            <span>○ Geri</span>
-            <span>□ Klavye{textFocus ? ' •' : ''}</span>
-            <span>Start Adres</span>
-            <span>△ Menü</span>
+            <span>Sol çubuk: imleç</span>
+            <span>Sağ çubuk: kaydır</span>
+            <Hint action="confirm">Tıkla</Hint>
+            <Hint action="back">Geri</Hint>
+            <Hint action="view">Klavye{textFocus ? ' •' : ''}</Hint>
+            <Hint action="start">Adres</Hint>
+            <Hint action="options">Menü</Hint>
           </div>
         </div>
       )}
@@ -318,12 +319,12 @@ export function WebApp({
             <Icon name="warning" />
             <div>Sayfa açılamadı</div>
             <small>{error}</small>
-            <small>Menü (△) → Yenile</small>
+            <small><Hint action="options">Menü</Hint> → Yenile</small>
           </div>
         )}
         {kiosk && hint && (
           <div className="web-hint">
-            <Icon name="info" /> △: Menü · □ / Start: Klavye
+            <Hint action="options">Menü</Hint> <Hint action="view">Klavye</Hint>
           </div>
         )}
       </div>

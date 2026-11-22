@@ -3,6 +3,7 @@ import { getPlatform, resolveRunner, runnerLabel } from '@shared/platforms'
 import type { Game, Screenshot } from '@shared/types'
 import { call, coverUrl, formatDate, formatPlayTime } from '../api'
 import { Badge, Icon, type IconName } from '../icons'
+import { Hint } from '../glyphs'
 import { useInput } from '../input'
 import { gameOptions, SUPPORT_LABEL, type MenuCtx } from '../menu'
 import { sfx } from '../sound'
@@ -149,9 +150,9 @@ export function GameDetail({ gameId, ctx, onClose }: { gameId: string; ctx: Menu
         </div>
       </div>
       <div className="x-hints">
-        <span>A/✕ Seç</span>
-        <span>B/○ Geri</span>
-        <span>△ Seçenekler</span>
+        <Hint action="confirm">Seç</Hint>
+        <Hint action="back">Geri</Hint>
+        <Hint action="options">Seçenekler</Hint>
       </div>
     </div>
   )
@@ -214,9 +215,9 @@ export function Gallery({ title, gameIds, ctx, onClose }: { title: string; gameI
         ))}
       </div>
       <div className="x-hints">
-        <span>A/✕ Detay</span>
-        <span>△ Seçenekler</span>
-        <span>B/○ Geri</span>
+        <Hint action="confirm">Detay</Hint>
+        <Hint action="options">Seçenekler</Hint>
+        <Hint action="back">Geri</Hint>
       </div>
     </div>
   )
@@ -301,9 +302,9 @@ export function Screenshots({ gameId, ctx, onClose }: { gameId?: string; ctx: Me
         </div>
       )}
       <div className="x-hints">
-        <span>A/✕ Büyüt</span>
-        <span>△ Sil</span>
-        <span>B/○ Geri</span>
+        <Hint action="confirm">Büyüt</Hint>
+        <Hint action="options">Sil</Hint>
+        <Hint action="back">Geri</Hint>
       </div>
     </div>
   )

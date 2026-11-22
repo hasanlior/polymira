@@ -81,6 +81,14 @@ export interface Settings {
   scanOnStartup: boolean
   pauseOnOverlay: boolean
   overlayHotkey: OverlayHotkey
+  /** Button symbols: follow the controller in use, or always one style. */
+  padStyle: 'auto' | 'xbox' | 'ps' | 'switch' | 'keyboard'
+  /** Remapped buttons: action → standard-mapping button index. */
+  padMap: Record<string, number>
+  /** Short rumble on confirm. */
+  padRumble: boolean
+  /** Show notification cards over a running game. */
+  notifyInGame: boolean
   watchedFolders: WatchedFolder[]
   emulatorPaths: Record<string, string>
   /** Per-platform emulator choice; falls back to the platform's first option. */
@@ -202,6 +210,8 @@ export interface AppState {
   themes: import('./catalog').ThemeDef[]
   /** Store app id → cached icon revision. */
   appIcons: Record<string, number>
+  /** Recent notifications, newest first. */
+  notices: Notice[]
   drm: { widevine: boolean; vmp: boolean; inConsole: boolean; detail: string }
   mods: ModInfo[]
   downloads: DownloadJob[]
@@ -213,6 +223,17 @@ export interface AppState {
   session: SessionInfo | null
   version: string
   scanning: boolean
+}
+
+/** PS3-style notification card (top right), also shown over a running game. */
+export interface Notice {
+  id: number
+  kind: 'download' | 'trophy' | 'update' | 'save' | 'info'
+  title: string
+  text?: string
+  /** Optional image URL (app-media://… or https://…). */
+  icon?: string
+  at: number
 }
 
 export interface Toast {

@@ -69,6 +69,7 @@ export interface MenuCtx {
   run: (fn: () => Promise<unknown>, success?: string | ((r: unknown) => string | null)) => void
   openScreenshots: (gameId?: string) => void
   openScan: () => void
+  openRemap: () => void
   openStore: (tab?: 'featured' | 'apps' | 'emulators' | 'themes' | 'mods' | 'downloads') => void
   setSettings: (patch: Partial<Settings>) => void
 }
@@ -504,12 +505,30 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
         children: ctx.pads.map((name, i) => ({ id: `pad:${i}`, title: `Kontrolcü ${i + 1}`, subtitle: name, icon: 'pad' })),
         emptyText: 'Kontrolcü algılanmadı. Bağladıktan sonra herhangi bir tuşa basın.'
       },
+      choice(
+        'set:pads:style',
+        'Tuş simgeleri',
+        'pad',
+        s.padStyle,
+        [
+          { value: 'auto', label: 'Kullanılan kumandaya göre' },
+          { value: 'xbox', label: 'Xbox (A B X Y)' },
+          { value: 'ps', label: 'PlayStation (✕ ○ □ △)' },
+          { value: 'switch', label: 'Nintendo (B A Y X)' },
+          { value: 'keyboard', label: 'Klavye' }
+        ],
+        (v) => set({ padStyle: v }),
+        ctx,
+        'Ekranın altındaki tuş ipuçları bu simgelerle gösterilir'
+      ),
+      { id: 'set:pads:remap', title: 'Tuş ataması', icon: 'grid', subtitle: 'Her işlemi istediğin tuşa ata', value: Object.keys(s.padMap).length ? 'Özel' : 'Varsayılan', onActivate: () => ctx.openRemap() },
+      toggle('set:pads:rumble', 'Titreşim', 'pad', s.padRumble, (v) => set({ padRumble: v }), 'Seçim yaparken kısa titreşim (destekleyen kumandalarda)'),
       choice('set:hotkey', 'Oyun içi menü tuşu', 'game', s.overlayHotkey, HOTKEYS, (v) => set({ overlayHotkey: v }), ctx, 'Klavye: Ctrl + Shift + Home'),
       {
         id: 'set:pads:map',
         title: 'Tuş düzeni',
         icon: 'info',
-        subtitle: 'A/✕ seç · B/○ geri · Y/△ seçenekler · X/□ galeri · LB/RB kategori · Klavye: oklar, Enter, Esc, T, G, Q/E'
+        subtitle: 'Kumanda: seç, geri, seçenekler, galeri, omuz tuşlarıyla kategori · Klavye: oklar, Enter, Esc, T, G, Q/E'
       }
     ]
   }
@@ -518,6 +537,7 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     title: 'Oyun Modu ve Sistem',
     icon: 'game',
     children: [
+      toggle('set:notify', 'Oyun sırasında bildirimler', 'info', s.notifyInGame, (v) => set({ notifyInGame: v }), 'İndirme, kupa ve yedek bildirimleri oyunun üstünde kısa süre görünür'),
       toggle('set:pause', 'Menü açılınca oyunu duraklat', 'pause', s.pauseOnOverlay, (v) => set({ pauseOnOverlay: v }), 'Oyun içi menü açıkken oyun işlemi askıya alınır'),
       toggle('set:gm:prio', 'Oyuna yüksek işlemci önceliği', 'chip', s.gmPriority, (v) => set({ gmPriority: v }), 'Oyun, arka plandaki programlardan önce işlemci zamanı alır'),
       toggle('set:gm:power', 'Yüksek performans güç planı', 'power', s.gmPowerPlan, (v) => set({ gmPowerPlan: v }), 'Dengeli planda oyun sırasında Yüksek performansa geçer, sonra geri döner'),
@@ -749,6 +769,23 @@ function homeItems(ctx: MenuCtx): XItem[] {
   if (activeDownloads.length) {
     items.push({ id: 'home:downloads', title: 'İndirmeler', icon: 'up', value: String(activeDownloads.length), children: downloadItems(ctx) })
   }
+  if (ctx.state.notices.length) {
+    items.push({
+      id: 'home:notices',
+      title: 'Bildirimler',
+      icon: 'info',
+      value: String(ctx.state.notices.length),
+      children: [
+        ...ctx.state.notices.map((n) => ({
+          id: `notice:${n.id}`,
+          title: n.title,
+          subtitle: [n.text, new Date(n.at).toLocaleString('tr-TR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })].filter(Boolean).join(' · '),
+          icon: (n.kind === 'trophy' ? 'star' : n.kind === 'download' ? 'up' : n.kind === 'update' ? 'refresh' : n.kind === 'save' ? 'storage' : 'info') as IconName
+        })),
+        { id: 'notices:clear', title: 'Bildirimleri temizle', icon: 'trash', onActivate: () => void window.bridge.invoke('notices:clear') }
+      ]
+    })
+  }
   const recent = games.filter((g) => g.lastPlayedAt).sort((a, b) => b.lastPlayedAt! - a.lastPlayedAt!)
   items.push(...recent.slice(0, 4).map((g) => gameItem(g, ctx, 'home:')))
   if (recent.length) {
@@ -761,7 +798,7 @@ function homeItems(ctx: MenuCtx): XItem[] {
     icon: 'star',
     value: String(favs.length),
     children: favs.map((g) => gameItem(g, ctx, 'fav:')),
-    emptyText: 'Bir oyunda △ / Y tuşuna basıp favorilere ekleyin.',
+    emptyText: 'Bir oyunda seçenekler tuşuna basıp favorilere ekleyin.',
     onView: favs.length ? () => ctx.openGallery('Favoriler', favs) : undefined
   })
   const added = [...games].sort((a, b) => b.addedAt - a.addedAt).slice(0, 30)

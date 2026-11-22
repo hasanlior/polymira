@@ -4,6 +4,7 @@ import { PLATFORMS, getEmulator } from '@shared/platforms'
 import type { StoreItem } from '@shared/catalog'
 import { appIconUrl, downloadLine, drmInConsole, formatBytes, formatEta } from '../api'
 import { Badge, Icon, type IconName } from '../icons'
+import { Glyph, Hint } from '../glyphs'
 import { useInput } from '../input'
 import type { MenuCtx } from '../menu'
 import { sfx } from '../sound'
@@ -112,7 +113,7 @@ export function Store({
         description: i.description,
         details: i.app?.drm && !drmInConsole(state)
           ? ['Korumalı (DRM) içerik: Microsoft Edge ile tam ekran açılır, oyun içi menü üstünde çalışır.', `Konsol içi DRM: ${state.drm.detail}`]
-          : [i.app?.drm ? 'Konsolun içinde açılır (Widevine).' : 'Konsolun içinde açılır.', i.app?.kiosk ? 'TV arayüzü: yön tuşları, ✕ seç, ○ geri' : 'Sol çubuk imleç, sağ çubuk kaydırma, sanal klavye'],
+          : [i.app?.drm ? 'Konsolun içinde açılır (Widevine).' : 'Konsolun içinde açılır.', i.app?.kiosk ? 'TV arayüzü: yön tuşları, seç ve geri tuşları' : 'Sol çubuk imleç, sağ çubuk kaydırma, sanal klavye'],
         status: inst ? 'Yüklü' : 'Ücretsiz',
         installed: inst,
         actions: inst
@@ -335,7 +336,7 @@ export function Store({
           <Icon name="bag" /> {BRAND.name} Mağaza
         </div>
         <div className="store-tabs">
-          <span className="store-trigger">L1</span>
+          <span className="store-trigger"><Glyph action="l1" /></span>
           {TABS.map((t) => (
             <div
               key={t.id}
@@ -349,7 +350,7 @@ export function Store({
               {t.id === 'downloads' && state.downloads.some((j) => j.status === 'downloading' || j.status === 'queued') ? ' •' : ''}
             </div>
           ))}
-          <span className="store-trigger">R1</span>
+          <span className="store-trigger"><Glyph action="r1" /></span>
         </div>
       </div>
 
@@ -380,10 +381,10 @@ export function Store({
       </div>
 
       <div className="store-foot">
-        <span>✕ Seç</span>
-        <span>○ {open ? 'Geri' : 'Mağazadan çık'}</span>
-        <span>L1 / R1 Bölüm</span>
-        <span>△ Yenile</span>
+        <Hint action="confirm">Seç</Hint>
+        <Hint action="back">{open ? 'Geri' : 'Mağazadan çık'}</Hint>
+        <span className="hint"><Glyph action="l1" /> <Glyph action="r1" /> Bölüm</span>
+        <Hint action="options">Yenile</Hint>
       </div>
 
       {open && (

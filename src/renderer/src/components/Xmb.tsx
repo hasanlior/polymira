@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type MutableRefObject } from 'react'
 import { Badge, Icon } from '../icons'
-import { useInput } from '../input'
+import { Hint } from '../glyphs'
+import { useInput, type Action } from '../input'
 import type { XCategory, XItem } from '../menu'
 import { sfx } from '../sound'
 
@@ -191,11 +192,11 @@ export function Xmb({ cats, handle, onFocus }: Props) {
   // Vertical position of row `o` (offset from selection) in u.
   const rowY = (o: number) => (o === 0 ? SEL_Y : o < 0 ? BAR_Y - 2 + o * ROW : SEL_Y + 6 + o * ROW)
 
-  const hints: string[] = []
-  if (item?.children || item?.onActivate) hints.push('A/✕ Seç')
-  if (depth > 0) hints.push('B/○ Geri')
-  if (item?.onOptions) hints.push('Y/△ Seçenekler')
-  if (viewTarget()) hints.push('X/□ Galeri')
+  const hints: [Action, string][] = []
+  if (item?.children || item?.onActivate) hints.push(['confirm', 'Seç'])
+  if (depth > 0) hints.push(['back', 'Geri'])
+  if (item?.onOptions) hints.push(['options', 'Seçenekler'])
+  if (viewTarget()) hints.push(['view', 'Galeri'])
 
   return (
     <div className={`xmb depth-${Math.min(depth, 2)}`}>
@@ -257,8 +258,10 @@ export function Xmb({ cats, handle, onFocus }: Props) {
       </div>
 
       <div className="x-hints">
-        {hints.map((h) => (
-          <span key={h}>{h}</span>
+        {hints.map(([a, t]) => (
+          <Hint key={a} action={a}>
+            {t}
+          </Hint>
         ))}
       </div>
     </div>

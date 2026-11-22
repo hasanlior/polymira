@@ -3,7 +3,7 @@
  * ordinary <audio> elements. (A live WebAudio context fails on some audio devices and can take
  * the page down with it; plain media playback does not.)
  */
-type Sfx = 'move' | 'confirm' | 'back' | 'error' | 'category'
+type Sfx = 'move' | 'confirm' | 'back' | 'error' | 'category' | 'notify'
 
 interface Tone {
   freq: number
@@ -72,6 +72,10 @@ const DEFS: Record<Sfx, Tone[]> = {
     { freq: 1320, start: 0.06, dur: 0.14, gain: 0.35 }
   ],
   back: [{ freq: 1100, start: 0, dur: 0.12, gain: 0.35, endFreq: 620 }],
+  notify: [
+    { freq: 1046, start: 0, dur: 0.12, gain: 0.3 },
+    { freq: 1568, start: 0.09, dur: 0.22, gain: 0.26 }
+  ],
   error: [
     { freq: 220, start: 0, dur: 0.2, gain: 0.45, wave: 'triangle' },
     { freq: 180, start: 0.09, dur: 0.22, gain: 0.4, wave: 'triangle' }

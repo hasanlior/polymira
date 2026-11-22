@@ -16,6 +16,8 @@ import { Backdrop, ThemeMusic, Trailer } from './components/Ambience'
 import { Store, type StoreTab } from './components/Store'
 import { WebApp } from './components/WebApp'
 import { OnScreenKeyboard } from './components/Keyboard'
+import { RemapScreen } from './components/Remap'
+import { NoticeStack } from './components/Notices'
 
 type Modal =
   | { type: 'detail'; gameId: string }
@@ -26,6 +28,7 @@ type Modal =
   | { type: 'shots'; gameId?: string }
   | { type: 'scan' }
   | { type: 'store'; tab?: StoreTab }
+  | { type: 'remap' }
   | { type: 'web'; item: StoreItem; gameId?: string }
   | { type: 'keyboard'; title: string; initial: string; onDone: (text: string) => void }
 
@@ -162,6 +165,9 @@ export function App() {
   useEffect(() => {
     if (!state) return
     configureSound(state.settings.menuSounds, state.settings.soundVolume)
+    input.setMap(state.settings.padMap)
+    input.setForcedStyle(state.settings.padStyle === 'auto' ? null : state.settings.padStyle)
+    input.rumble = state.settings.padRumble
     document.documentElement.classList.toggle('no-anim', !state.settings.animations)
     if (bgRef.current) bgRef.current.animate = state.settings.animations
   }, [state?.settings])
@@ -207,6 +213,7 @@ export function App() {
       openScreenshots: (gameId) => openModal({ type: 'shots', gameId }),
       openScan: () => openModal({ type: 'scan' }),
       openStore: (tab) => openModal({ type: 'store', tab }),
+      openRemap: () => openModal({ type: 'remap' }),
       setSettings: (patch) => void call('settings:set', patch),
       run: (fn, success) => {
         fn()
@@ -333,6 +340,8 @@ export function App() {
                     openKeyboard={(title, initial, onDone) => openModal({ type: 'keyboard', title, initial, onDone })}
                   />
                 )
+              case 'remap':
+                return <RemapScreen key={m.key} settings={state.settings} onClose={close} />
               case 'keyboard':
                 return <OnScreenKeyboard key={m.key} title={m.title} initial={m.initial} onDone={m.onDone} onClose={close} />
             }
@@ -343,6 +352,7 @@ export function App() {
       )}
       {!state && <div className="boot">{BRAND.name}</div>}
       <Toasts toasts={toasts} />
+      <NoticeStack />
       {state && playing && !shutdown && <PlayingCurtain game={state.games.find((g) => g.id === state.session?.gameId)} />}
       {shutdown && <ShutdownScreen text={shutdown.text} done={Boolean(shutdown.done)} />}
     </div>
