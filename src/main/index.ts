@@ -18,6 +18,7 @@ import { attachSoundtracks } from './music'
 import { DownloadManager, EMULATOR_SOURCES } from './downloads'
 import { appLaunchPlan, appPath, catalog, findItem, installedThemes, listMods, modsCss, openFolder } from './apps'
 import { addCandidates } from './library'
+import { appIconFile, appIconRevs, fetchAppIcon } from './appIcons'
 import { enterGameMode, exitGameMode, startExplorer } from './gameMode'
 import { getRuntime, initRuntime, readRuntime, runtimeFile, updateRuntime } from './runtime'
 
@@ -75,6 +76,7 @@ downloads.on('changed', () => broadcast())
 function snapshot(): AppState {
   return {
     themes: installedThemes(),
+    appIcons: appIconRevs(),
     mods: listMods(),
     downloads: downloads.jobs,
     downloadable: Object.keys(EMULATOR_SOURCES),
@@ -141,7 +143,9 @@ function windowOptions(mode: WindowMode): Electron.BrowserWindowConstructorOptio
       sandbox: true,
       nodeIntegration: false,
       // Menu sounds, theme music and trailers start without a click, like on a console.
-      autoplayPolicy: 'no-user-gesture-required'
+      autoplayPolicy: 'no-user-gesture-required',
+      // The built-in browser and web apps run in <webview> guests (locked down in will-attach-webview).
+      webviewTag: true
     }
   }
   if (mode === 'fullscreen') return { ...base, fullscreen: true, frame: false }
@@ -160,6 +164,8 @@ function createMainWindow(): void {
     })
   }
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  mainWindow.on('focus', () => send('window:focus', true))
+  mainWindow.on('blur', () => send('window:focus', false))
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
     mainWindow?.focus()
@@ -584,7 +590,11 @@ const handlers: Handlers = {
     broadcast()
     return r
   },
-  'store:catalog': (refresh) => catalog(refresh),
+  'store:catalog': async (refresh) => {
+    const items = await catalog(refresh)
+    void refreshAppIcons(items)
+    return items
+  },
   'store:install': async (id) => {
     const item = findItem(id) ?? (await catalog(true)).find((i) => i.id === id)
     if (!item) throw new Error('Mağazada bulunamadı.')
@@ -617,6 +627,16 @@ const handlers: Handlers = {
     broadcast()
   },
   'folder:open': (which) => openFolder(which),
+  'app:opened': (id) => {
+    const g = store.games.find((x) => x.id === id)
+    if (g) store.updateGame(id, { lastPlayedAt: Date.now(), playCount: g.playCount + 1 })
+    broadcast()
+  },
+  'app:closed': (id, playedSec) => {
+    const g = store.games.find((x) => x.id === id)
+    if (g && playedSec > 0) store.updateGame(id, { playTimeSec: g.playTimeSec + Math.round(playedSec), lastLaunch: { at: Date.now(), result: 'ok' } })
+    broadcast()
+  },
   'app:quit': () => void gracefulQuit()
 }
 
@@ -632,6 +652,7 @@ function registerMediaProtocol(): void {
     const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '')
     let file: string | null = null
     if (url.host === 'covers') file = coverFile(path.basename(rel, '.png'))
+    else if (url.host === 'appicon') file = appIconFile(path.basename(rel, '.png'))
     else if (url.host === 'bg') file = backgroundFile(path.basename(rel, '.jpg'))
     else if (url.host === 'music') {
       // Only files the user (or discovery) attached to a game can be served.
@@ -645,6 +666,67 @@ function registerMediaProtocol(): void {
     return net.fetch(pathToFileURL(file).toString())
   })
 }
+
+// ── Built-in browser (webview guests) ────────────────────────────────
+
+let iconsBusy = false
+async function refreshAppIcons(items?: import('@shared/catalog').StoreItem[]): Promise<void> {
+  if (iconsBusy) return
+  iconsBusy = true
+  try {
+    let changed = false
+    for (const item of (items ?? (await catalog())).filter((i) => i.kind === 'app')) {
+      if (await fetchAppIcon(item)) changed = true
+    }
+    if (changed) broadcast()
+  } finally {
+    iconsBusy = false
+  }
+}
+
+const WEB_PARTITION = /^persist:(web|app-[a-z0-9_-]+)$/i
+const allowedPermissions = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock'])
+const configuredSessions = new WeakSet<Electron.Session>()
+
+function configureWebSession(ses: Electron.Session): void {
+  if (configuredSessions.has(ses)) return
+  configuredSessions.add(ses)
+  ses.setPermissionRequestHandler((_wc, permission, cb) => cb(allowedPermissions.has(permission)))
+  ses.setPermissionCheckHandler((_wc, permission) => allowedPermissions.has(permission))
+  ses.on('will-download', (_e, item) => {
+    item.cancel()
+    toast('warning', 'Konsol tarayıcısı dosya indirmez.')
+  })
+}
+
+app.on('web-contents-created', (_e, contents) => {
+  // Only the console's own pages may embed guests, and every guest is locked down the same way.
+  contents.on('will-attach-webview', (e, prefs, params) => {
+    if (!/^https?:\/\//i.test(params.src) || !WEB_PARTITION.test(params.partition ?? '')) {
+      e.preventDefault()
+      return
+    }
+    delete (prefs as { preloadURL?: string }).preloadURL
+    prefs.preload = path.join(__dirname, '../preload/webview.js')
+    prefs.nodeIntegration = false
+    prefs.nodeIntegrationInSubFrames = false
+    prefs.contextIsolation = true
+    prefs.sandbox = true
+    prefs.webSecurity = true
+    prefs.allowRunningInsecureContent = false
+  })
+  contents.on('did-attach-webview', (_e, guest) => {
+    configureWebSession(guest.session)
+    // Pop-ups open in the same view, like a console browser without tabs.
+    guest.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\//i.test(url)) void guest.loadURL(url)
+      return { action: 'deny' }
+    })
+    guest.on('will-navigate', (ev, url) => {
+      if (!/^(https?|about|blob|data):/i.test(url)) ev.preventDefault()
+    })
+  })
+})
 
 // ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -712,6 +794,7 @@ app.whenReady().then(() => {
     else refreshMissing()
     queueCovers()
     void attachSoundtracks().then((n) => n && broadcast())
+    void refreshAppIcons()
     broadcast()
     if (process.env.APP_RESTARTED) {
       delete process.env.APP_RESTARTED

@@ -15,6 +15,7 @@ export type Action =
   | 'r2'
   | 'start'
   | 'select'
+  | 'home'
 
 type Handler = (a: Action) => boolean | void
 
@@ -29,6 +30,10 @@ class InputManager {
   private held = new Map<string, { since: number; last: number }>()
   private running = false
   onPadChange: ((connected: boolean, name: string) => void) | null = null
+  /** OS focus of the console window (reported by the main process; works while a webview has focus). */
+  windowFocused = document.hasFocus()
+  /** When false the left stick is not turned into directions (the browser uses it as a pointer). */
+  stickAsDpad = true
 
   push(fn: () => Handler | null): () => void {
     const id = this.nextId++
@@ -36,6 +41,15 @@ class InputManager {
     return () => {
       this.stack = this.stack.filter((h) => h.id !== id)
     }
+  }
+
+  /** The handler that would receive input right now (the top of the stack). */
+  current(): Handler | null {
+    for (let i = this.stack.length - 1; i >= 0; i--) {
+      const h = this.stack[i].fn()
+      if (h) return h
+    }
+    return null
   }
 
   dispatch(a: Action): void {
@@ -52,6 +66,9 @@ class InputManager {
     if (this.running) return
     this.running = true
     window.addEventListener('keydown', this.onKey)
+    window.bridge?.on('window:focus', (f) => {
+      this.windowFocused = f
+    })
     window.addEventListener('wheel', this.onWheel, { passive: true })
     window.addEventListener('gamepadconnected', (e) => this.onPadChange?.(true, (e as GamepadEvent).gamepad.id))
     window.addEventListener('gamepaddisconnected', (e) => this.onPadChange?.(false, (e as GamepadEvent).gamepad.id))
@@ -121,7 +138,7 @@ class InputManager {
   }
 
   private pollPads(): void {
-    if (!document.hasFocus()) return
+    if (!this.windowFocused && !document.hasFocus()) return
     const now = performance.now()
     const dirs = { up: false, down: false, left: false, right: false }
     for (const pad of this.connectedPads()) {
@@ -140,8 +157,9 @@ class InputManager {
       if (edge(7)) this.dispatch('r2')
       if (edge(8)) this.dispatch('select')
       if (edge(9)) this.dispatch('options')
-      const ax = pad.axes[0] ?? 0
-      const ay = pad.axes[1] ?? 0
+      if (edge(16)) this.dispatch('home')
+      const ax = this.stickAsDpad ? pad.axes[0] ?? 0 : 0
+      const ay = this.stickAsDpad ? pad.axes[1] ?? 0 : 0
       dirs.up ||= b[12] || ay < -0.55
       dirs.down ||= b[13] || ay > 0.55
       dirs.left ||= b[14] || ax < -0.55

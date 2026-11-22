@@ -41,6 +41,8 @@ export interface IpcContract {
   'mods:css': () => string
   'mods:toggle': (id: string, enabled: boolean) => void
   'folder:open': (which: 'mods' | 'themes') => void
+  'app:opened': (id: string) => void
+  'app:closed': (id: string, playedSec: number) => void
   'app:quit': () => void
 }
 
@@ -85,6 +87,8 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'mods:css',
   'mods:toggle',
   'folder:open',
+  'app:opened',
+  'app:closed',
   'app:quit'
 ]
 
@@ -97,10 +101,12 @@ export interface IpcEvents {
   progress: string
   /** Shutdown sequence: what is happening right now; `done` when the app is about to close. */
   shutdown: { text: string; done?: boolean }
+  /** The console window gained or lost OS focus. */
+  'window:focus': boolean
 }
 
 export type IpcEvent = keyof IpcEvents
-export const IPC_EVENTS: IpcEvent[] = ['state', 'toast', 'overlay:opened', 'progress', 'shutdown']
+export const IPC_EVENTS: IpcEvent[] = ['state', 'toast', 'overlay:opened', 'progress', 'shutdown', 'window:focus']
 
 /** Custom protocol used to serve covers and screenshots to the renderer. */
 export const MEDIA_SCHEME = 'app-media'

@@ -19,7 +19,15 @@ export default defineConfig({
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
-    resolve: { alias: { '@shared': shared } }
+    resolve: { alias: { '@shared': shared } },
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          webview: resolve(__dirname, 'src/preload/webview.ts')
+        }
+      }
+    }
   },
   renderer: {
     root: resolve(__dirname, 'src/renderer'),

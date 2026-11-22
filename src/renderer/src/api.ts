@@ -72,3 +72,7 @@ export function formatDate(ts?: number): string {
   if (!ts) return '—'
   return new Date(ts).toLocaleString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
+
+export function appIconUrl(id: string, rev?: number): string {
+  return `${MEDIA_SCHEME}://appicon/${id.replace(/[^a-z0-9_-]/gi, '_')}.png?v=${rev ?? 0}`
+}

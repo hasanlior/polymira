@@ -198,6 +198,8 @@ export interface ModInfo {
 
 export interface AppState {
   themes: import('./catalog').ThemeDef[]
+  /** Store app id → cached icon revision. */
+  appIcons: Record<string, number>
   mods: ModInfo[]
   downloads: DownloadJob[]
   /** Emulators that can be downloaded automatically. */

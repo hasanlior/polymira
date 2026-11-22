@@ -13,6 +13,9 @@ import { ConfirmDialog, FileBrowser, OptionsPanel, Toasts } from './components/M
 import { GameDetail, Gallery, Screenshots } from './components/GameViews'
 import { Setup } from './components/Setup'
 import { Backdrop, ThemeMusic, Trailer } from './components/Ambience'
+import { Store, type StoreTab } from './components/Store'
+import { WebApp } from './components/WebApp'
+import { OnScreenKeyboard } from './components/Keyboard'
 
 type Modal =
   | { type: 'detail'; gameId: string }
@@ -22,6 +25,9 @@ type Modal =
   | { type: 'confirm'; text: string; onYes: () => void }
   | { type: 'shots'; gameId?: string }
   | { type: 'scan' }
+  | { type: 'store'; tab?: StoreTab }
+  | { type: 'web'; item: StoreItem; gameId?: string }
+  | { type: 'keyboard'; title: string; initial: string; onDone: (text: string) => void }
 
 type ModalEntry = Modal & { key: number }
 
@@ -187,6 +193,7 @@ export function App() {
       confirm: (text, onYes) => openModal({ type: 'confirm', text, onYes }),
       openScreenshots: (gameId) => openModal({ type: 'shots', gameId }),
       openScan: () => openModal({ type: 'scan' }),
+      openStore: (tab) => openModal({ type: 'store', tab }),
       setSettings: (patch) => void call('settings:set', patch),
       run: (fn, success) => {
         fn()
@@ -202,6 +209,15 @@ export function App() {
       launch: (gameId) => {
         const g = state.games.find((x) => x.id === gameId)
         if (!g) return
+        if (g.platformId === 'apps') {
+          // Web apps open inside the console; DRM apps (Netflix…) go through Edge like a game.
+          const item = catalog.find((i) => i.id === g.meta.storeId)
+          if (item?.app && !item.app.drm) {
+            sfx('confirm')
+            openModal({ type: 'web', item, gameId: g.id })
+            return
+          }
+        }
         setLaunching(g)
         call('game:launch', gameId)
           .then(() => {
@@ -220,15 +236,22 @@ export function App() {
 
   const cats = useMemo(() => (ctx ? buildMenu(ctx) : []), [ctx])
 
+  // A full-screen app (store, browser) covers the XMB: hide it and silence the ambience.
+  const inApp = modals.some((m) => m.type === 'web' || m.type === 'store')
+  const inWeb = modals.some((m) => m.type === 'web')
+  useEffect(() => {
+    if (bgRef.current) bgRef.current.animate = !inWeb && (state?.settings.animations ?? true)
+  }, [inWeb, state?.settings.animations])
+
   return (
-    <div className="app">
+    <div className={`app ${inApp ? 'in-app' : ''}`}>
       <canvas ref={canvasRef} className="bg" />
       <style>{themeCss + '\n' + modCss}</style>
       {state && (() => {
         // The detail screen keeps its game's ambience; otherwise follow the XMB focus.
         const detail = [...modals].reverse().find((m) => m.type === 'detail') as { gameId: string } | undefined
         const id = detail?.gameId ?? (state.settings.setupDone ? focusId : null)
-        const g = id ? state.games.find((x) => x.id === id) ?? null : null
+        const g = id && !inApp ? state.games.find((x) => x.id === id) ?? null : null
         return (
           <>
             {state.settings.gameBackgrounds && <Backdrop game={g} />}
@@ -270,6 +293,33 @@ export function App() {
                 return <Screenshots key={m.key} gameId={m.gameId} ctx={ctx} onClose={close} />
               case 'scan':
                 return <Setup key={m.key} mode="scan" ctx={ctx} onClose={close} />
+              case 'store':
+                return (
+                  <Store
+                    key={m.key}
+                    ctx={ctx}
+                    initialTab={m.tab}
+                    onClose={close}
+                    openApp={(item) => {
+                      const g = state.games.find((x) => x.platformId === 'apps' && x.meta.storeId === item.id)
+                      if (g) ctx.launch(g.id)
+                      else if (item.app && !item.app.drm) openModal({ type: 'web', item })
+                    }}
+                  />
+                )
+              case 'web':
+                return (
+                  <WebApp
+                    key={m.key}
+                    item={m.item}
+                    gameId={m.gameId}
+                    ctx={ctx}
+                    onClose={close}
+                    openKeyboard={(title, initial, onDone) => openModal({ type: 'keyboard', title, initial, onDone })}
+                  />
+                )
+              case 'keyboard':
+                return <OnScreenKeyboard key={m.key} title={m.title} initial={m.initial} onDone={m.onDone} onClose={close} />
             }
           })}
           {!state.settings.setupDone && <Setup mode="setup" ctx={ctx} onClose={() => {}} />}

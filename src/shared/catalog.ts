@@ -17,7 +17,10 @@ export interface ThemeDef {
 export interface StoreApp {
   /** Page opened full screen. */
   url: string
-  /** Needs DRM (Widevine/PlayReady): opened in Microsoft Edge, which supports it. */
+  /**
+   * Needs DRM (Widevine/PlayReady). The built-in browser has no DRM module, so these open in
+   * Microsoft Edge full screen, with the in-game menu on top like a game.
+   */
   drm?: boolean
   /** Full-screen kiosk (no address bar). False for the general web browser. */
   kiosk?: boolean
@@ -34,6 +37,10 @@ export interface StoreItem {
   short: string
   hue: number
   author?: string
+  /** Optional icon image URL (PNG/JPEG). Without it the icon is read from the app's website. */
+  icon?: string
+  /** Store section the item is listed in (defaults by kind). */
+  section?: string
   app?: StoreApp
   theme?: ThemeDef
 }
@@ -56,7 +63,7 @@ export const BUILTIN_CATALOG: StoreItem[] = [
     name: 'Netflix',
     short: 'N',
     hue: 357,
-    description: 'Netflix, tam ekran. Korumalı içerik için Microsoft Edge kullanılır.',
+    description: 'Netflix, tam ekran. Korumalı (DRM) içerik için Microsoft Edge ile açılır.',
     app: { url: 'https://www.netflix.com', kiosk: true, drm: true }
   },
   {
@@ -101,8 +108,8 @@ export const BUILTIN_CATALOG: StoreItem[] = [
     name: 'İnternet Tarayıcısı',
     short: 'WEB',
     hue: 205,
-    description: 'Tam ekran web tarayıcısı (Microsoft Edge). Çıkmak için oyun içi menüyü kullanın.',
-    app: { url: 'https://www.google.com', kiosk: false, drm: true }
+    description: 'Konsolun kendi tarayıcısı: kumandayla imleç, sanal klavye, sekmesiz tam ekran.',
+    app: { url: 'https://www.google.com', kiosk: false }
   },
   // ── Themes ──
   { id: 'theme-ocean', kind: 'theme', name: 'Okyanus', short: 'OK', hue: 190, description: 'Turkuaz dalgalar.', theme: { id: 'theme-ocean', name: 'Okyanus', hue: 188 } },

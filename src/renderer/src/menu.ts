@@ -1,7 +1,7 @@
 import { BRAND } from '@shared/brand'
 import { EMULATORS, FAMILIES, PLATFORMS, getEmulator, getPlatform, resolveRunner, runnerKey, runnerLabel, type PlatformDef } from '@shared/platforms'
 import type { AppState, Game, OverlayHotkey, Settings, SupportLevel, WindowMode } from '@shared/types'
-import { coverUrl, downloadLine, formatPlayTime } from './api'
+import { appIconUrl, coverUrl, downloadLine, formatPlayTime } from './api'
 import type { IconName } from './icons'
 import type { StoreItem } from '@shared/catalog'
 
@@ -13,6 +13,8 @@ export interface XItem {
   badge?: { text: string; hue: number }
   cover?: string
   coverIsIcon?: boolean
+  /** App icon shown on a rounded tile. */
+  tile?: string
   value?: string
   checked?: boolean
   game?: Game
@@ -67,6 +69,7 @@ export interface MenuCtx {
   run: (fn: () => Promise<unknown>, success?: string | ((r: unknown) => string | null)) => void
   openScreenshots: (gameId?: string) => void
   openScan: () => void
+  openStore: (tab?: 'featured' | 'apps' | 'emulators' | 'themes' | 'mods' | 'downloads') => void
   setSettings: (patch: Partial<Settings>) => void
 }
 
@@ -97,11 +100,14 @@ export function gameItem(g: Game, ctx: MenuCtx, prefix = ''): XItem {
   const p = getPlatform(g.platformId)
   if (g.platformId === 'apps') {
     const item = ctx.catalog.find((i) => i.id === g.meta.storeId)
+    const iconKey = (g.meta.storeId ?? '').replace(/[^a-z0-9_-]/gi, '_')
+    const rev = ctx.state.appIcons[iconKey]
     return {
       id: `${prefix}app:${g.id}`,
       title: g.title,
       subtitle: item?.description,
       icon: 'apps',
+      tile: rev ? appIconUrl(g.meta.storeId ?? '', rev) : item?.icon,
       badge: { text: item?.short ?? 'APP', hue: item?.hue ?? 200 },
       hue: item?.hue,
       game: g,
@@ -432,77 +438,6 @@ export function allThemes(ctx: { state: AppState }): { value: string; label: str
   return [
     ...THEMES,
     ...ctx.state.themes.map((t) => ({ value: t.id, label: t.name, hue: t.hue, night: t.night, css: t.css }))
-  ]
-}
-
-function storeApps(ctx: MenuCtx): XItem[] {
-  const installed = new Set(platformGames(ctx.state, 'apps').map((g) => g.meta.storeId))
-  return ctx.catalog
-    .filter((i) => i.kind === 'app')
-    .map((i) => ({
-      id: `store:${i.id}`,
-      title: i.name,
-      subtitle: i.description + (i.author ? ` · ${i.author}` : ''),
-      icon: 'apps' as IconName,
-      badge: { text: i.short, hue: i.hue },
-      hue: i.hue,
-      value: installed.has(i.id) ? 'Yüklü' : 'Ekle',
-      onActivate: () =>
-        installed.has(i.id)
-          ? ctx.confirm(`${i.name} kaldırılsın mı?`, () => ctx.run(() => window.bridge.invoke('store:uninstall', i.id), 'Kaldırıldı.'))
-          : ctx.run(() => window.bridge.invoke('store:install', i.id), `${i.name} Uygulamalar'a eklendi.`)
-    }))
-}
-
-function storeCategory(ctx: MenuCtx): XItem[] {
-  const s = ctx.state.settings
-  const installedThemes = new Set(s.installedThemes)
-  const themes: XItem[] = ctx.catalog
-    .filter((i) => i.kind === 'theme')
-    .map((i) => ({
-      id: `store:${i.id}`,
-      title: i.name,
-      subtitle: i.description,
-      icon: 'palette' as IconName,
-      badge: { text: i.short, hue: i.hue },
-      hue: i.theme?.hue ?? i.hue,
-      value: s.theme === i.id ? 'Kullanılıyor' : installedThemes.has(i.id) ? 'Yüklü' : 'Ekle',
-      onActivate: () =>
-        ctx.run(async () => {
-          if (!installedThemes.has(i.id)) await window.bridge.invoke('store:install', i.id)
-          await window.bridge.invoke('settings:set', { theme: i.id })
-        }, `${i.name} teması uygulandı.`)
-    }))
-  return [
-    { id: 'store:apps', title: 'Uygulamalar', subtitle: 'YouTube, Netflix, Disney+, Prime Video, Spotify, Twitch, tarayıcı', icon: 'apps', children: storeApps(ctx) },
-    { id: 'store:themes', title: 'Temalar', subtitle: 'Arka plan ve renk temaları', icon: 'palette', children: themes },
-    {
-      id: 'store:mods',
-      title: 'Modlar ve Özelleştirme',
-      subtitle: 'Görünümü değiştiren CSS modları ve kendi tema dosyaların',
-      icon: 'brush',
-      children: [
-        ...ctx.state.mods.map((m) =>
-          toggle(`mod:${m.id}`, m.name, 'brush', m.enabled, (v) => ctx.run(() => window.bridge.invoke('mods:toggle', m.id, v)), m.description)
-        ),
-        {
-          id: 'mods:folder',
-          title: 'Mod klasörünü aç',
-          subtitle: 'Her mod bir klasör: mod.json ({ "name", "description" }) ve style.css',
-          icon: 'folder',
-          onActivate: () => void window.bridge.invoke('folder:open', 'mods')
-        },
-        {
-          id: 'themes:folder',
-          title: 'Tema klasörünü aç',
-          subtitle: 'Tema dosyası: { "name": "…", "hue": 210, "night": false, "css": "…" }',
-          icon: 'folder',
-          onActivate: () => void window.bridge.invoke('folder:open', 'themes')
-        },
-        { id: 'mods:reload', title: 'Modları ve temaları yeniden yükle', icon: 'refresh', onActivate: () => ctx.run(() => window.bridge.invoke('state:get'), 'Yenilendi.') }
-      ]
-    },
-    { id: 'store:refresh', title: 'Mağazayı yenile', icon: 'refresh', onActivate: () => ctx.refreshCatalog() }
   ]
 }
 
@@ -883,10 +818,20 @@ export function buildMenu(ctx: MenuCtx): XCategory[] {
     } else if (def.id === 'apps') {
       items = [
         ...platformGames(ctx.state, 'apps').map((g) => gameItem(g, ctx)),
-        { id: 'apps:store', title: 'Mağazadan uygulama ekle', icon: 'bag', subtitle: 'YouTube, Netflix, Disney+, Spotify, Twitch…', children: storeApps(ctx) }
+        { id: 'apps:store', title: 'Mağazadan uygulama ekle', icon: 'bag', subtitle: 'YouTube, Netflix, Disney+, Spotify, Twitch…', onActivate: () => ctx.openStore('apps') }
       ]
     } else if (def.id === 'store') {
-      items = storeCategory(ctx)
+      items = [
+        { id: 'store:open', title: `${BRAND.name} Mağaza`, subtitle: 'Uygulamalar, emülatörler, temalar ve modlar', icon: 'bag', onActivate: () => ctx.openStore() },
+        {
+          id: 'store:downloads',
+          title: 'İndirmeler',
+          subtitle: 'İndirmeler arka planda sürer; bu sırada gezinip oyun oynayabilirsin.',
+          icon: 'up',
+          value: String(ctx.state.downloads.filter((j) => j.status === 'queued' || j.status === 'downloading' || j.status === 'extracting').length || ''),
+          onActivate: () => ctx.openStore('downloads')
+        }
+      ]
     } else if (def.id === 'pc') {
       const pc = getPlatform('pc')!
       items = platformItem(pc, ctx).children!

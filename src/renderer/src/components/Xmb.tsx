@@ -20,6 +20,13 @@ const SEL_Y = 37 // selected item row (u)
 const WINDOW = 9 // rows rendered above/below the selection
 
 function ItemIcon({ item, big }: { item: XItem; big?: boolean }) {
+  if (item.tile) {
+    return (
+      <div className={`x-icon app-tile ${big ? 'big' : ''}`} style={{ ['--h' as string]: item.hue ?? 210 }}>
+        <img src={item.tile} alt="" draggable={false} />
+      </div>
+    )
+  }
   if (item.cover) {
     return (
       <div className={`x-icon cover ${big ? 'big' : ''} ${item.coverIsIcon ? 'icon-only' : ''}`}>
