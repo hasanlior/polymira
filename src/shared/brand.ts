@@ -9,7 +9,7 @@ export const BRAND = {
   /** Used for internal identifiers. Keep it filesystem-safe. */
   slug: 'polymira',
   /** GitHub repository ("owner/name") used for updates and the community store. Empty = disabled. */
-  repo: '' as string,
+  repo: 'hasanlior/polymira' as string,
   /** Data folder names of earlier product names, migrated on first start. */
   legacyNames: ['XPORT'] as string[]
 }
