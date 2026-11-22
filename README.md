@@ -1,185 +1,136 @@
-# POLYMIRA
+<p align="center">
+  <img src="build/icon.png" width="128" alt="POLYMIRA logo" />
+</p>
 
-**One PC. Every Console. One Gaming Experience.**
+<h1 align="center">POLYMIRA</h1>
 
-POLYMIRA, bilgisayarı oyun konsoluna çeviren, tamamen kontrolcüyle kullanılan bir oyun arayüzüdür. Klasik konsol menülerinden (XMB tarzı yatay/dikey menü) ilham alır; farklı platformlardaki oyunlarını tek yerde toplar ve uygun emülatörle başlatır. Oyun sırasında kontrolcünün **Guide (Xbox / PS) tuşuna** basınca konsoldaki gibi bir oyun içi menü açılır.
+<p align="center"><b>Every console. One universe.</b></p>
 
-> POLYMIRA oyun, BIOS, firmware veya anahtar **içermez ve dağıtmaz**. Yalnızca sahip olduğunuz yazılımların yedeklerini kullanın.
+<p align="center">
+  A controller-first, PS3-style console frontend that turns your Windows PC into a game console.<br/>
+  All your games — Steam, Epic, Xbox app, emulators — in one place, played from the couch.
+</p>
 
-## Özellikler
+<p align="center">
+  <a href="https://github.com/hasanlior/polymira/releases/latest"><img src="https://img.shields.io/github/v/release/hasanlior/polymira?style=for-the-badge&color=7a5cff" alt="Latest release" /></a>
+  <a href="https://github.com/hasanlior/polymira/releases"><img src="https://img.shields.io/github/downloads/hasanlior/polymira/total?style=for-the-badge&color=36d6ff" alt="Downloads" /></a>
+  <a href="https://github.com/hasanlior/polymira/stargazers"><img src="https://img.shields.io/github/stars/hasanlior/polymira?style=for-the-badge&color=ff4fb3" alt="Stars" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6?style=for-the-badge&logo=windows" alt="Windows 10 | 11" />
+</p>
 
-- **XMB tarzı arayüz:** yatay kategori çubuğu, dikey alt menüler, iç içe klasörler, hareketli dalga arka planı (WebGL), seçili öğede büyüme ve parlama, menü sesleri.
-- **Tam kontrolcü desteği:** Xbox, DualShock 4, DualSense ve standart gamepad'ler. Kontrolcü takılınca / çıkınca bildirim. Klavye ve fare tekerleği de çalışır.
-- **Oyun kütüphanesi:** platforma göre listeler, kapak galerisi görünümü, oyun detay ekranı, favoriler, son oynananlar, son eklenenler, "Keşfet".
-- **Oyun ekleme:** klasör tarama (platform seçerek ya da otomatik algılayarak), tek dosya ekleme, tekrar eklemeyi engelleme, yanlış platformdaki oyunu taşıma, `.cue/.bin` ve `.m3u` çoklu disk birleştirme. Dosyalar yerinde kalır, kopyalanmaz.
-- **PS3 / PS4 / Vita oyun klasörleri:** `PARAM.SFO` okunarak gerçek oyun adı ve Title ID alınır.
-- **İlk açılış kurulumu:** tam ekran bir karşılama sihirbazı. Kontrolcü kontrolü, bilgisayarı tarama, bulunanları seçerek ekleme ve oyun modu ayarlarından oluşur.
-- **Bilgisayarı tarama:** kurulu oyunlar, oyunun hangi klasöre ya da sürücüye kurulduğuna bakmadan bulunur:
-  - **Steam:** tüm kütüphane klasörleri (`libraryfolders.vdf`)
-  - **Epic Games:** eski ve yeni launcher kayıtları ve her sürücüdeki `.egstore` klasörleri
-  - **Xbox uygulaması / PC Game Pass:** sürücülerdeki `.GamingRoot` kayıtları
-  - **GOG**, **Riot Games** (LoL, TFT, VALORANT) ve **Ubisoft Connect**
-  - **EA app, Battle.net, Rockstar ve diğer tüm kurulu oyunlar:** Windows'un yüklü uygulamalar listesi, oyun yayıncısı ve oyun motoru izleriyle (Unity, Unreal, Steamworks, EOS…) taranır
-  - Kurulu emülatörler, ROM/ISO klasörleri (Masaüstü, İndirilenler, Belgeler ve tüm sürücülerde adı oyun/ROM/emülatör/platform içeren klasörler)
-- **Mağaza oyunlarının takibi:** launcher üzerinden açılan oyunun işlemi kurulum klasöründen bulunur. Böylece oyun içi menü, duraklatma, oyun modu ve süre takibi bu oyunlarda da çalışır.
-- **Otomatik görseller:** kapak ve tam ekran arka plan.
-  - Konsol oyunlarında kendi dosyalarından (PS3 `ICON0/PIC1`, PS4/Vita `sce_sys`)
-  - Steam oyunlarında Steam'den, diğer PC oyunlarında Steam'de isim eşleşmesiyle
-  - Epic oyunlarında launcher'ın kendi görsel önbelleğinden
-  - Retro oyunlarda [libretro-thumbnails](https://github.com/libretro-thumbnails) arşivinden (kapak ve oyun içi görüntü)
-  - API anahtarı gerekmez. Elle kapak veya arka plan seçmek de mümkün.
-- **PS3 tarzı oyun atmosferi:** bir oyunun üstüne gelince görseli arka plana yumuşak geçişle gelir. Biraz beklenince oyunun **resmi fragmanı** (Steam) sesiyle arka planda oynar. Steam'den alınmış **soundtrack**'ler tema müziği olarak otomatik bağlanır, her oyuna elle müzik de atanabilir.
-- **Emülatör motoru:** her platform için çalıştırma profili, emülatörleri otomatik bulma, RetroArch çekirdeği kontrolü, başlamadan önce eksikleri gösterme.
-- **Oyun içi menü:** Guide tuşu, Back + Start ya da `Ctrl + Shift + Home` ile açılır.
-  - Oyuna devam et / gerçek duraklatma (oyun işlemi askıya alınır, emülatörden bağımsız)
-  - Ekran görüntüsü al
-  - Ana menüye dön (oyun duraklatılmış halde XMB'ye dönülür, "Oyuna dön" ile geri gelinir)
-  - Oyunu kapat
-  - Performans: oyunun CPU / RAM kullanımı, sistem CPU / RAM, NVIDIA kartlarda GPU / VRAM
-- **Gerçek uyumluluk durumu:** platform seviyesi (Kararlı / Deneysel / Desteklenmiyor) ve oyunun son açılış sonucu. Çalışmayan platformlar çalışıyormuş gibi gösterilmez.
-- **Oynama süresi takibi**, açılma sayısı, son oynama tarihi.
-- **Otomatik emülatör indirme:** kurulum sihirbazında veya Ayarlar → Emülasyon'da istenen emülatörler resmi kaynaklarından indirilip kurulur. RetroArch için gerekli çekirdekler de iner. İndirme arka planda sürer; yüzde, hız ve kalan süre üst köşede görünür, bu sırada gezinilebilir ve oyun oynanabilir. BIOS/firmware indirilmez.
-- **Uygulamalar ve Mağaza:**
-  - Uygulamalar: YouTube (TV arayüzü), Netflix, Disney+, Prime Video, Spotify, Twitch ve konsolun kendi tarayıcısı
-  - Tarayıcı, YouTube ve Twitch konsolun içinde açılır. Tarayıcıda sol çubuk imleç, sağ çubuk kaydırma, ✕ tıklama, ○ geri; sanal klavye (□ / Start) ile adres ve metin girilir. Her uygulamanın oturumu kalıcıdır.
-  - DRM korumalı servisler (Netflix, Disney+, Prime Video, Spotify) de konsolun içinde açılır: POLYMIRA, Widevine içeren castlabs Electron sürümünü kullanır. Yayın servisleri uygulamanın VMP imzalı olmasını ister; kurulum paketi `electron-builder` sırasında imzalanır (bkz. *VMP imzası*). İmza yoksa bu uygulamalar Microsoft Edge'de tam ekran açılır. Ayarlar → Oyun Modu ve Sistem → *Korumalı uygulamalar* ile seçilebilir.
-  - Uygulama ikonları her uygulamanın kendi sitesinden çalışma anında alınır; kaynak kodda üçüncü taraf logosu yoktur.
-  - Mağaza tam ekran bir uygulama olarak açılır: Öne Çıkanlar, Uygulamalar, Emülatörler, Temalar, Modlar ve İndirmeler bölümleri (L1/R1). Uzaktan katalog adresi (`storeCatalogUrl`) ile yeni içerik uygulama güncellemesi gerekmeden yayınlanabilir.
-- **Temalar ve modlar:** `themes/*.json` tema dosyaları ve `mods/<ad>/` CSS görünüm modları (`mod.json` + `style.css`). Modlar yalnızca görünümü değiştirir, kod çalıştıramaz.
-- **Konsol tarzı kapanış:** "Çık" ya da Alt+F4 ile ekran kararır. Ortada yapılan işlemler yazar (oyun kapatılıyor, Windows masaüstü açılıyor…), iş bitince uygulama kapanır.
-- **Oyun modu:** oyun başlayınca uygulanır, oyun bitince her şey eski haline döner:
-  - oyuna yüksek işlemci önceliği
-  - Dengeli / Güç tasarrufu planındaysan Yüksek performans güç planı (zaten performans planındaysan dokunulmaz)
-  - isteğe bağlı olarak Windows masaüstünü (görev çubuğu, `explorer.exe`) kapatma
-- **Kumanda simgeleri ve tuş ataması:** alttaki tuş ipuçları kullanılan kumandaya göre Xbox (A B X Y), PlayStation (✕ ○ □ △), Nintendo ya da klavye simgeleriyle gösterilir. Her işlem istenen tuşa atanabilir, titreşim açılıp kapatılabilir.
-- **Emülatörlerde otomatik kol ayarı:** oyun başlamadan önce DuckStation, PCSX2, Dolphin (GameCube) ve RPCS3'ün kol ayarları yazılır; RetroArch, PPSSPP, Vita3K, shadPS4, xemu, Xenia ve Flycast kolu kendisi tanır. Oyuncunun emülatörü açıp ayar yapmasına gerek kalmaz. (Cemu, Ryujinx, melonDS ve Azahar şimdilik elle ayarlanır.)
-- **Kayıt yönetimi:** tüm emülatörlerin kayıt klasörleri bulunur, zip olarak yedeklenir (her oyundan sonra otomatik, son 10 yedek), tek tuşla geri yüklenir; istenirse OneDrive / Google Drive / USB klasörüne de kopyalanır.
-- **Bildirimler:** PS3 tarzı kartlar sağ üstten kayar (indirme bitti, kupa kazanıldı, yedek alındı, güncelleme hazır). Oyun oynarken de oyunun üstünde görünür. Geçmiş Ana Sayfa → Bildirimler'de.
-- **Kupalar:** Steam başarımları Steam'in kendi dosyalarından okunur (anahtar gerekmez); emülatör oyunları için RetroAchievements hesabı bağlanabilir. Oyun sırasında açılan kupalar bildirim olarak gelir.
-- **Oyun bilgi sayfası:** açıklama, çıkış yılı, tür, geliştirici ve ekran görüntüleri; PC oyunları için Steam mağazasından, konsol oyunları için libretro veritabanı ve Wikipedia'dan otomatik.
-- **Oyun başına emülatör ayarı:** her oyun için emülatör seçimi, RetroArch'ta görüntü filtresi (CRT, LCD, keskin) ve ek komut satırı.
-- **Hızlı kayıt:** RetroArch oyunlarında oyun içi menüden durum kaydetme / yükleme.
-- **Oynama istatistikleri:** son 7 günün grafiği, haftalık ve toplam süre, en çok oynanan oyunlar.
-- **Otomatik güncelleme:** yeni sürümler GitHub Releases'ten indirilir, SHA-256 ile doğrulanır ve sessizce kurulur (`src/shared/brand.ts` → `repo`).
-- **Topluluk mağazası:** `community/catalog.json` üzerinden tema, mod ve uygulama yayınlanır; herkes pull request ile ekleyebilir (bkz. `community/README.md`).
-- **Dil:** Türkçe ve İngilizce arayüz (Ayarlar → Arayüz Kişiselleştirme → Dil / Language).
-- **Masaüstü kısayolu:** her `npm run build` ve `npm run dist` sonrasında masaüstüne POLYMIRA kısayolu konur (`NO_SHORTCUT=1` ile kapatılır).
-- **Çökmeye dayanıklılık:** küçük bir bekçi süreci uygulamayı izler. Uygulama beklenmedik şekilde kapanırsa masaüstünü ve güç planını geri getirir, uygulamayı yeniden açar. Üst üste çökmelerde döngüye girmez. Arayüz süreci çökerse kendini yeniden yükler.
-- **Windows ile başlatma** (kurulu sürümde): bilgisayar açılınca doğrudan konsol arayüzü gelir.
-- **Ayarlar:** tam ekran / kenarlıksız / pencere, temalar, animasyon kapatma, menü sesleri, oyun arka planları / fragmanları / müzikleri, kategori gizleme, emülatör yolları, platform başına emülatör seçimi.
+<p align="center">
+  <a href="https://github.com/hasanlior/polymira/releases/latest"><b>⬇ Download</b></a> ·
+  <a href="#features">Features</a> ·
+  <a href="#supported-platforms">Platforms</a> ·
+  <a href="#controls">Controls</a> ·
+  <a href="README.tr.md">Türkçe</a>
+</p>
 
-## Desteklenen platformlar
+> POLYMIRA does **not** include or distribute games, BIOS, firmware or keys. Only use backups of software you own.
 
-| Aile | Platformlar | Emülatör |
+## Download
+
+1. Grab **`POLYMIRA-Setup-x.y.z.exe`** from the [latest release](https://github.com/hasanlior/polymira/releases/latest) (or the portable `.exe` if you don't want to install).
+2. Run it. Windows SmartScreen may warn because the app is not code-signed yet: click **More info → Run anyway**.
+3. The first-run wizard scans your PC for games and emulators and can download emulators for you.
+
+POLYMIRA updates itself from GitHub Releases.
+
+## Features
+
+**Console experience**
+- **XMB-style interface** — horizontal categories, vertical lists, animated wave background, menu sounds, smooth transitions.
+- **Full controller support** — Xbox, DualShock 4, DualSense, Switch Pro and generic pads, plus keyboard. Button hints show the right symbols for the controller in use (A B X Y, ✕ ○ □ △, Nintendo layout). Every button can be remapped.
+- **In-game menu** on the controller's Guide button (or Back + Start, or `Ctrl + Shift + Home`): resume, real pause (the game process is suspended), screenshot, quick save / load (RetroArch), back to home, quit game, live CPU / RAM / GPU stats.
+- **PS3-style ambience** — focusing a game fades in its artwork, plays its official trailer (Steam) and theme music.
+- **Notifications** — PS3-style cards for downloads, trophies, backups and updates, also shown over running games.
+- **Console-style shutdown** — the screen fades out, cleanup steps are shown, then the app closes (also on Alt+F4).
+
+**Your whole library in one place**
+- **PC scan** finds installed games wherever they are: **Steam**, **Epic Games**, **Xbox app / PC Game Pass**, **GOG**, **Riot Games**, **Ubisoft Connect**, **EA app**, **Battle.net**, Rockstar and other installs, plus emulators and ROM folders.
+- Store games launched through their launchers are still tracked, so the in-game menu and play time work for them too.
+- **Automatic artwork** — covers and backgrounds from the games themselves, Steam, the Epic launcher cache and libretro-thumbnails. No API keys.
+- **Game info pages** — description, year, genre, developer and screenshots (Steam store, libretro database, Wikipedia).
+- **Trophies** — Steam achievements read from Steam's own files; RetroAchievements for emulated games. Unlocks pop up while you play.
+- **Play statistics** — last 7 days chart, weekly and total time, most played games.
+
+**Emulation that just works**
+- **One-click emulator downloads** from official sources (RetroArch with cores, DuckStation, PCSX2, PPSSPP, RPCS3, Vita3K, shadPS4, xemu, Xenia, Cemu, melonDS, Azahar, Flycast) — in the background, with progress and time left.
+- **Automatic controller setup** — controller settings are written into the emulator before the game starts, so nobody has to open the emulator.
+- **Save data management** for every emulator — automatic backups after each session, one-click restore, optional sync folder (OneDrive, Google Drive, USB).
+- **Per-game settings** — emulator choice, RetroArch video filters (CRT, LCD, sharp) and extra arguments.
+- **Honest compatibility** — every platform is marked Stable / Experimental / Unsupported, and each game shows its last launch result.
+
+**Apps, store and customization**
+- **Built-in browser, YouTube (TV UI) and Twitch** run inside the console, with a controller pointer and on-screen keyboard. Netflix, Disney+, Prime Video and Spotify are supported too (Widevine).
+- **Full-screen store** for apps, emulators, themes and mods; a [community catalog](community/README.md) lets anyone publish themes and mods.
+- **Themes and CSS mods**, English and Turkish interface.
+
+**Game mode and reliability**
+- While you play: high CPU priority, High performance power plan (only when you are on Balanced / Power saver), optionally closes the Windows desktop shell — everything is restored afterwards.
+- The console stays behind the game, so the desktop never flashes between game and menu.
+- A small watchdog restores the desktop and restarts the app after a crash.
+
+## Supported platforms
+
+| Family | Platforms | Emulators |
 | --- | --- | --- |
-| PlayStation | PS1, PS2, PSP · PS3, Vita, PS4 (deneysel) · PS5 (yok) | DuckStation, PCSX2, PPSSPP, RPCS3, Vita3K, shadPS4 |
-| Xbox | Xbox, Xbox 360 (deneysel) · One, Series (yok) | xemu, Xenia Canary |
+| PlayStation | PS1, PS2, PSP · PS3, Vita, PS4 (experimental) | DuckStation, PCSX2, PPSSPP, RPCS3, Vita3K, shadPS4 |
+| Xbox | Xbox, Xbox 360 (experimental) | xemu, Xenia Canary |
 | Nintendo | NES, SNES, N64, GB, GBC, GBA, DS, 3DS, GameCube, Wii, Wii U, Switch | RetroArch, melonDS, Azahar, Dolphin, Cemu, Ryujinx |
 | Sega | Master System, Mega Drive, Saturn, Dreamcast, Game Gear | RetroArch, Flycast |
-| Diğer | Arcade, Neo Geo, Atari 2600/7800/Lynx, MSX, Commodore 64 | RetroArch |
-| PC | Steam, Epic, Xbox uygulaması, GOG, Riot, Ubisoft, `.exe`, `.lnk`, `.url` | — |
+| Other | Arcade, Neo Geo, Atari 2600 / 7800 / Lynx, MSX, Commodore 64 | RetroArch |
+| PC | Steam, Epic, Xbox app, GOG, Riot, Ubisoft, EA, Battle.net, `.exe`, `.lnk`, `.url` | — |
 
-Emülatörleri kendiniz kurmanız gerekir. POLYMIRA onları **Ayarlar → Emülasyon Ayarları → Emülatörleri otomatik bul** ile bulmaya çalışır ya da yolunu elle seçebilirsiniz.
+Platforms without a working emulator (PS5, Xbox One / Series) are shown as unsupported, never faked.
 
-## Kontroller
+## Controls
 
-| Tuş | İşlev |
+| Button | Action |
 | --- | --- |
-| D-Pad / sol analog | Gezinme |
-| A / ✕ | Seç |
-| B / ○ | Geri |
-| Y / △ | Seçenekler |
-| X / □ | Galeri görünümü |
-| LB / RB | Kategori değiştir |
-| LT / RT | Hızlı kaydır |
-| Guide veya Back + Start | Oyun içi menü |
+| D-pad / left stick | Navigate |
+| A / ✕ | Select |
+| B / ○ | Back |
+| Y / △ | Options |
+| X / □ | Gallery view |
+| LB / RB | Switch category |
+| Guide, or Back + Start | In-game menu |
 
-Klavye: oklar, `Enter`, `Esc`, `T` (seçenekler), `G` (galeri), `Q` / `E` (kategori), oyun içinde `Ctrl + Shift + Home`.
+Keyboard: arrows, `Enter`, `Esc`, `T` (options), `G` (gallery), `Q` / `E` (category), `Ctrl + Shift + Home` in game.
 
-## Geliştirme
+## Building from source
 
-Gereksinimler: Windows 10/11, Node.js 20+.
+Requirements: Windows 10/11, Node.js 20+.
 
 ```bash
 npm install
-npm run dev        # geliştirme modu
-npm run typecheck  # tip kontrolü
-npm run build      # derleme
-npm run dist       # Windows kurulum dosyası (release/ klasörüne)
+npm run dev        # development
+npm run typecheck  # type check
+npm run dist       # installer + portable exe in release/
 ```
 
-Geliştirirken pencere modunda açmak için: `npm run dev -- -- --windowed`
+Built with Electron (castlabs build with Widevine), React and TypeScript.
 
-### Proje yapısı
+## Known limitations
 
-```
-src/
-  shared/         Tipler, platform/emülatör kayıtları, IPC sözleşmesi, marka adı
-  main/           Electron ana süreç
-    index.ts        Pencereler, oyun içi menü, IPC
-    scanner.ts      Klasör tarama ve platform tahmini
-    library.ts      Kütüphane işlemleri
-    emulators.ts    Emülatör bulma ve komut satırı oluşturma
-    session.ts      Çalışan oyun, duraklatma, performans
-    covers.ts       Otomatik kapak indirme
-    gamepadWatcher.ts  Oyun sırasında Guide tuşunu dinleme (XInput)
-    native/win32.ts    Win32 bağlamaları (koffi)
-  preload/        Güvenli köprü (contextBridge)
-  renderer/       Arayüz (React)
-    src/components/  XMB, detay, galeri, dosya seçici, diyaloglar
-    src/overlay/     Oyun içi menü
-```
+- The in-game menu appears over games running in **borderless full screen**; exclusive full screen games may hide it.
+- Netflix and other DRM services play inside the console only in VMP-signed builds; otherwise they open full screen in Microsoft Edge.
+- Cemu, Ryujinx, melonDS and Azahar need their controller set up once in the emulator.
+- Dolphin and Ryujinx have no stable download link and must be installed manually (they are detected automatically).
 
-### Yeni platform / emülatör eklemek
+## License
 
-Sadece `src/shared/platforms.ts` dosyasını düzenleyin: `EMULATORS` listesine emülatörü (exe adları ve komut satırı şablonu), `PLATFORMS` listesine platformu (uzantılar, çalıştırıcılar) ekleyin. Arayüz ve tarama otomatik güncellenir.
+POLYMIRA is **source-available** under the [PolyForm Strict License 1.0.0](LICENSE):
 
-### VMP imzası (Netflix vb. için)
+- ✅ Download and use POLYMIRA for noncommercial purposes.
+- ✅ Read the code, report bugs, suggest features, contribute to the community store.
+- ❌ Redistributing the app or the code, or publishing modified versions or projects based on it, is not allowed.
+- ❌ Commercial use requires permission.
 
-Yayın servisleri Widevine'in yanında uygulamanın castlabs EVS ile imzalanmasını ister. Ücretsiz bir EVS hesabı bir kez açılır:
+Contributions are accepted under the same license.
 
-```bash
-pip install --upgrade castlabs-evs
-python -m castlabs_evs.account signup
-```
+POLYMIRA is not affiliated with Sony, Microsoft, Nintendo, Sega or Valve. Platform names are trademarks of their owners and are used only to describe compatibility.
 
-Sonra `npm run dist` paketlenen uygulamayı otomatik imzalar (`scripts/vmp-sign.cjs`). Geliştirme ortamındaki Electron'u imzalamak için `npm run vmp:sign`.
+---
 
-### Uygulamanın adını değiştirmek
-
-`src/shared/brand.ts` içindeki değerleri ve `package.json` içindeki `name`, `productName`, `build.productName`, `build.appId` alanlarını değiştirin.
-
-## Bilinen sınırlamalar
-
-- Oyun içi menü, oyun **kenarlıksız tam ekran** çalışırken görünür. Özel (exclusive) tam ekran modundaki oyunların üstünde görünmeyebilir; emülatörde kenarlıksız tam ekranı seçin.
-- Oyun sırasında Guide tuşu XInput üzerinden okunur. PlayStation kontrolcüleri için şimdilik Steam Input veya DS4Windows gerekir ya da `Ctrl + Shift + Home` kullanılabilir.
-- Elle eklenen `.url` kısayollarında oynama süresi takip edilemez (taranarak bulunan mağaza oyunlarında edilir).
-- Fragmanlar ve Steam isim eşleşmesi yalnızca Steam mağazasında bulunan oyunlar için çalışır. Her oyunun soundtrack'ini internetten yasal olarak çekebilecek açık bir kaynak yok; tema müziği Steam soundtrack'lerinden veya elle seçilen dosyadan gelir.
-- Dolphin ve Ryujinx'in sabit bir indirme adresi olmadığı için otomatik indirilemiyor; elle kurulup otomatik algılanabilir.
-- Netflix gibi DRM korumalı uygulamalar konsolun içinde yalnızca VMP imzalı kurulumda oynatılır; geliştirme sürümünde (`npm run dev`) Edge kullanılır.
-- PC oyunları ve emülatörler kendi pencerelerinde tam ekran çalışır; konsol arkada bekler ve oyun içi menü üstlerinde açılır.
-- Oyun bilgileri (yıl, tür, geliştirici) için çevrimiçi veritabanı henüz bağlı değil.
-
-## Yol haritası
-
-- Kayıt dosyası / save state yönetimi ve yedekleme
-- Kontrolcü tuş özelleştirme, PlayStation kontrolcüleri için doğrudan HID desteği
-- Kullanıcı profilleri, ilk açılış kurulum sihirbazı
-- Çevrimiçi oyun bilgisi (açıklama, yıl, tür)
-- Medya merkezi (fotoğraf, video, müzik)
-- Steam / diğer mağaza kütüphanelerini içe aktarma
-
-## Lisans
-
-**PolyForm Strict 1.0.0** — bkz. [LICENSE](LICENSE). Kaynak kodu herkes görebilir (source-available), ama bu klasik bir "açık kaynak" lisansı değildir:
-
-- ✅ POLYMIRA'yı indirip ticari olmayan amaçlarla **kullanabilirsin**.
-- ✅ Kodu okuyabilir, hata bildirebilir, öneride bulunabilirsin.
-- ❌ Kodu veya uygulamayı **kopyalayıp dağıtamaz**, değiştirilmiş sürümünü ya da kodundan türetilmiş yeni bir proje yayınlayamazsın.
-- ❌ Ticari kullanım için izin gerekir.
-
-Katkılar (pull request, mağaza öğeleri) projeye, bu lisans altında yayımlanmak üzere verilmiş sayılır.
-
-*English:* source-available under the PolyForm Strict License 1.0.0. You may use POLYMIRA for noncommercial purposes; you may not redistribute it or publish modified versions or works based on its code.
-
-Bu proje Sony, Microsoft, Nintendo veya Sega ile bağlantılı değildir. Platform adları sahiplerinin ticari markalarıdır ve yalnızca uyumluluğu belirtmek için kullanılır.
+<p align="center">⭐ If POLYMIRA is useful to you, a star helps a lot!</p>

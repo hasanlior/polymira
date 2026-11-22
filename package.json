@@ -51,7 +51,8 @@
         "nsis",
         "portable"
       ],
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "artifactName": "${productName}-${version}-${arch}-${os}.${ext}"
     },
     "electronDownload": {
       "mirror": "https://github.com/castlabs/electron-releases/releases/download/v"
@@ -63,9 +64,15 @@
       "createDesktopShortcut": true,
       "shortcutName": "POLYMIRA",
       "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico"
+      "uninstallerIcon": "build/icon.ico",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
     },
-    "copyright": "Copyright (c) 2026 hasanlior"
+    "copyright": "Copyright (c) 2026 hasanlior",
+    "electronDist": "node_modules/electron/dist",
+    "electronVersion": "45.2.1",
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
+    }
   },
   "author": "hasanlior",
   "repository": {
