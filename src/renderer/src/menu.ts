@@ -1,3 +1,4 @@
+import { locale } from './i18n'
 import { BRAND } from '@shared/brand'
 import { EMULATORS, FAMILIES, PLATFORMS, getEmulator, getPlatform, resolveRunner, runnerKey, runnerLabel, type PlatformDef } from '@shared/platforms'
 import type { AppState, Game, OverlayHotkey, Settings, SupportLevel, WindowMode } from '@shared/types'
@@ -491,7 +492,7 @@ export function allThemes(ctx: { state: AppState }): { value: string; label: str
 function savesSection(ctx: MenuCtx): XItem {
   const s = ctx.state.settings
   const set = ctx.setSettings
-  const when = (t: number) => new Date(t).toLocaleString('tr-TR', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  const when = (t: number) => new Date(t).toLocaleString(locale(), { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
   const perEmu: XItem[] = ctx.state.saves.map((sv) => ({
     id: `saves:${sv.emuId}`,
     title: sv.name,
@@ -970,7 +971,7 @@ function homeItems(ctx: MenuCtx): XItem[] {
         ...ctx.state.notices.map((n) => ({
           id: `notice:${n.id}`,
           title: n.title,
-          subtitle: [n.text, new Date(n.at).toLocaleString('tr-TR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })].filter(Boolean).join(' · '),
+          subtitle: [n.text, new Date(n.at).toLocaleString(locale(), { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })].filter(Boolean).join(' · '),
           icon: (n.kind === 'trophy' ? 'star' : n.kind === 'download' ? 'up' : n.kind === 'update' ? 'refresh' : n.kind === 'save' ? 'storage' : 'info') as IconName
         })),
         { id: 'notices:clear', title: 'Bildirimleri temizle', icon: 'trash', onActivate: () => void window.bridge.invoke('notices:clear') }

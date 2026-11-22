@@ -216,7 +216,7 @@ export function Setup({ ctx, mode, onClose }: Props) {
                 <div key={`${p}-${i}`} className="setup-row on">
                   <Icon name="check" />
                   <span>
-                    Kontrolcü {i + 1}: {p}
+                    {`Kontrolcü ${i + 1}: ${p}`}
                   </span>
                 </div>
               ))}
@@ -256,7 +256,7 @@ export function Setup({ ctx, mode, onClose }: Props) {
               ))}
             </div>
             <div className={`btn primary ${idx === groups.length ? 'sel' : ''}`}>{groups.length ? 'Seçilenleri ekle' : 'Devam'}</div>
-            {result && <div className="setup-foot">Tarama {Math.max(1, Math.round(result.durationMs / 1000))} sn sürdü · {result.romRoots.length} klasör tarandı</div>}
+            {result && <div className="setup-foot">{`Tarama ${Math.max(1, Math.round(result.durationMs / 1000))} sn sürdü · ${result.romRoots.length} klasör tarandı`}</div>}
           </div>
         )}
 

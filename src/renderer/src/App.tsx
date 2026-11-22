@@ -20,7 +20,7 @@ import { RemapScreen } from './components/Remap'
 import { NoticeStack } from './components/Notices'
 import { StatsScreen } from './components/Stats'
 import { TrophyScreen } from './components/Trophies'
-import { applyLanguage } from './i18n'
+import { applyLanguage, locale } from './i18n'
 
 type Modal =
   | { type: 'detail'; gameId: string }
@@ -67,15 +67,15 @@ function Clock({ state, pads }: { state: AppState; pads: number }) {
       })()}
       {state.session && (
         <span className="status-chip">
-          <Icon name="play" /> Oyun {state.session.paused ? 'duraklatıldı' : 'çalışıyor'}
+          <Icon name="play" /> {state.session.paused ? 'Oyun duraklatıldı' : 'Oyun çalışıyor'}
         </span>
       )}
       <span className="status-chip" title="Bağlı kontrolcüler">
         <Icon name="pad" /> {pads}
       </span>
       <span className="status-time">
-        {now.toLocaleDateString('tr-TR', { day: 'numeric', month: 'numeric' })}{' '}
-        <b>{now.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}</b>
+        {now.toLocaleDateString(locale(), { day: 'numeric', month: 'numeric' })}{' '}
+        <b>{now.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })}</b>
       </span>
     </div>
   )

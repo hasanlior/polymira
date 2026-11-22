@@ -212,7 +212,6 @@ const EN: Record<string, string> = {
   // Launch / session / in-game menu
   'Oyuna devam et': 'Resume game',
   'Oyunu duraklat': 'Pause game',
-  'Oyunu sürdür': 'Resume game',
   'Ana menüye dön': 'Return to home menu',
   'Oyunu kapat': 'Quit game',
   'Çalışan oyun kapatılsın mı? Kaydedilmemiş ilerleme kaybolur.': 'Quit the running game? Unsaved progress will be lost.',
@@ -475,11 +474,68 @@ const EN: Record<string, string> = {
 
   // Updates / notifications / misc
   'Ayarlar → Hakkında → Güncellemeyi kur': 'Settings → About → Install update',
-  'Kupa kazanıldı': 'Trophy unlocked'
+  'Kupa kazanıldı': 'Trophy unlocked',
+  'Oyunu sürdür': 'Unpause game',
+  'Taranıyor': 'Scanning',
+  'Oyun çalışıyor': 'Game running',
+  'Oyun duraklatıldı': 'Game paused',
+  'Kuruluyor…': 'Installing…',
+  'Silindi.': 'Deleted.',
+  Bulunanlar: 'Found',
+  Devam: 'Continue',
+  Atla: 'Skip',
+  Uygula: 'Apply',
+  'Bağlantı hatası': 'Connection error',
+  'Son 7 günün oynama süresi': 'Play time over the last 7 days',
+  'Henüz oynama kaydı yok.': 'No play sessions yet.',
+  'Henüz ekran görüntüsü yok. Oyun oynarken menü tuşuna basıp “Ekran görüntüsü al”ı seçin.': 'No screenshots yet. While playing, press the menu button and choose “Take screenshot”.',
+  'Birkaç adımda bilgisayarındaki oyunları bulup hepsini tek bir konsol arayüzünde toplayacağız. Her şeyi kontrolcüyle yapabilirsin.': "In a few steps we'll find the games on this PC and bring them into one console interface. You can do everything with a controller.",
+  'Eklemek istediklerini seç; seç tuşuyla işaretini kaldırabilirsin.': 'Choose what to add; press select to untick an item.',
+  'İstersen emülatörleri resmi kaynaklarından otomatik indirip kurabilirim. İndirme arka planda sürer; bu sırada konsolda gezinebilir, oyun oynayabilirsin. BIOS ve sistem dosyaları indirilmez, onları kendi cihazından sağlaman gerekir.': 'POLYMIRA can download and install emulators from their official sources. Downloads run in the background, so you can keep browsing and playing. BIOS and system files are not downloaded; they must come from your own devices.',
+  'Henüz kupa bulunamadı. Steam oyunlarının başarımları otomatik okunur; emülatör oyunları için Ayarlar → Oyun Modu ve Sistem → RetroAchievements hesabı.': 'No trophies yet. Steam achievements are read automatically; for emulated games add your account in Settings → Game Mode & System → RetroAchievements account.',
+  'Windows sürümü bulunamadı.': 'No Windows build found.',
+  'Bu Windows sürümü .7z arşivini açamıyor. 7-Zip ile elle açabilirsiniz.': 'This version of Windows cannot open .7z archives. Extract it with 7-Zip.',
+  'Arşivde çalıştırılabilir dosya bulunamadı.': 'No executable found in the archive.',
+  'Bu Electron sürümünde Widevine yok.': 'This Electron build has no Widevine.',
+  'Widevine hazır, uygulama VMP imzalı.': 'Widevine ready, the app is VMP-signed.',
+  'Widevine hazır, ancak uygulama VMP imzalı değil.': 'Widevine ready, but the app is not VMP-signed.',
+  'Widevine hazır. Geliştirme imzası: Netflix gibi servisler üretim imzası ister (kurulu sürüm imzalanır).': 'Widevine ready. Development signature: services like Netflix need a production signature (installed builds are signed).',
+  'Ses dosyası bulunamadı.': 'Audio file not found.',
+  'Sürümde Windows kurulum dosyası yok.': 'The release has no Windows installer.',
+  'Xbox uygulaması': 'Xbox app',
+  'Dosya bulunamadı': 'File not found',
+  'libretro-thumbnails arşivinden': 'from the libretro-thumbnails archive',
+  'Çekirdekler RetroArch → Online Updater → Core Downloader üzerinden yüklenir.': 'Cores are installed through RetroArch → Online Updater → Core Downloader.',
+  'Kendi konsolunuzdan alınmış bir PS1 BIOS gerektirir.': 'Requires a PS1 BIOS dumped from your own console.',
+  'Kendi konsolunuzdan alınmış bir PS2 BIOS gerektirir.': 'Requires a PS2 BIOS dumped from your own console.',
+  'Kendi konsolunuzdan alınmış bir Saturn BIOS gerektirir.': 'Requires a Saturn BIOS dumped from your own console.',
+  'Kendi konsolunuzdan alınmış MCPX boot ROM, BIOS ve HDD imajı gerektirir.': 'Requires an MCPX boot ROM, BIOS and HDD image dumped from your own console.',
+  'Kendi konsolunuzdan alınmış anahtar ve sistem yazılımı gerektirir.': 'Requires keys and system software dumped from your own console.',
+  'Şifreli oyunlar için kendi konsolunuzdan alınmış anahtarlar gerekir.': 'Encrypted games need keys dumped from your own console.',
+  'Önce resmi PS3 sistem yazılımını RPCS3 içine kurun. Uyumluluk oyuna göre değişir.': 'Install the official PS3 system software in RPCS3 first. Compatibility varies by game.',
+  'Oyunlar Vita3K içine kurulmalıdır. Title ID ile başlatılır.': 'Games must be installed in Vita3K. They are started by Title ID.',
+  'Tarayıcıyı Vita3K ux0/app klasörüne yönlendirin. Oyunlar Title ID ile başlatılır.': 'Point the browser to the Vita3K ux0/app folder. Games are started by Title ID.',
+  'Erken aşamada bir emülatör. Yalnızca az sayıda oyun oynanabilir.': 'An early-stage emulator. Only a few games are playable.',
+  'Emülasyon erken aşamada. Oyunların çoğu henüz çalışmıyor.': 'Emulation is at an early stage. Most games do not run yet.',
+  'Çalışan bir PS5 emülatörü yok. PC sürümleri PC Oyunları altına eklenebilir.': 'There is no working PS5 emulator. PC versions can be added under PC Games.',
+  'ROM setleri çekirdek sürümüyle eşleşmelidir.': 'ROM sets must match the core version.',
+  'Oyunların yanında neogeo.zip BIOS dosyası gerekir.': 'Needs the neogeo.zip BIOS file next to the games.',
+  'yüksek öncelik': 'high priority',
+  'yüksek performans güç planı': 'high performance power plan',
+  'masaüstü kapatıldı': 'desktop closed',
+  'Geçersiz dosya.': 'Invalid file.',
+  Türkçe: 'Türkçe',
+  '<1 dk': '<1 min',
+  'Bulunamadı.': 'Not found.'
 }
 
 /** Texts with names or numbers inside. */
 const PATTERNS: [RegExp, string][] = [
+  [/^%(\d+)$/, '$1%'],
+  [/^(\d+) sa$/, '$1 h'],
+  [/^Kontrolcü (\d+): (.+)$/, 'Controller $1: $2'],
+  [/^Tarama (\d+) sn sürdü · (\d+) klasör tarandı$/, 'Scan took $1 s · $2 folders scanned'],
+  [/^Simgeler: (.+) · Değiştirmek istediğin işlemi seç, sonra yeni tuşa bas\.$/, 'Symbols: $1 · Pick an action, then press the new button.'],
   [/^(.+) indirildi ve kuruldu\.$/, '$1 was downloaded and installed.'],
   [/^(.+) hazır$/, '$1 is ready'],
   [/^(.+) Mağaza$/, '$1 Store'],
@@ -503,6 +559,8 @@ const PATTERNS: [RegExp, string][] = [
   [/^(\d+) emülatörün kayıtları yedeklendi\.$/, 'Saves of $1 emulators backed up.'],
   [/^(.+) oturumundan sonra otomatik yedek alındı\.$/, 'Automatic backup taken after playing $1.'],
   [/^(\d+) yedek$/, '$1 backups'],
+  [/^1 oyun$/, '1 game'],
+  [/^1 oyun · (.+)$/, '1 game · $1'],
   [/^(\d+) oyun$/, '$1 games'],
   [/^(\d+) oyun · (.+)$/, '$1 games · $2'],
   [/^(\d+) yeni oyun eklendi\.$/, '$1 new games added.'],
@@ -560,17 +618,32 @@ const PATTERNS: [RegExp, string][] = [
 
 export function translate(text: string, lang: string): string {
   if (lang !== 'en' || !text) return text
-  const trimmed = text.trim()
+  const trimmed = text.trim().replace(/\s+/g, ' ')
   if (!trimmed) return text
   const exact = EN[trimmed]
-  if (exact !== undefined) return text.replace(trimmed, exact)
+  if (exact !== undefined) return text.replace(text.trim(), exact)
   for (const [re, out] of PATTERNS) {
-    if (re.test(trimmed)) return text.replace(trimmed, trimmed.replace(re, out))
+    if (re.test(trimmed)) {
+      // Captured parts are translated too (e.g. "3 oyun · Kararlı" → "3 games · Stable").
+      const done = trimmed.replace(re, (...m: string[]) => out.replace(/\$(\d)/g, (_, n: string) => translate(m[Number(n)] ?? '', lang)))
+      return text.replace(text.trim(), done)
+    }
+  }
+  // Lines built from parts ("PlayStation 2 · 6 sa 0 dk"): translate each part.
+  if (trimmed.includes(' · ')) {
+    const parts = trimmed.split(' · ')
+    const done = parts.map((p) => translate(p, lang))
+    if (done.some((p, i) => p !== parts[i])) return text.replace(text.trim(), done.join(' · '))
   }
   return text
 }
 
 let current = 'tr'
+
+/** Locale for dates and numbers in the current interface language. */
+export function locale(): string {
+  return current === 'en' ? 'en-GB' : 'tr-TR'
+}
 let observer: MutationObserver | null = null
 const ATTRS = ['placeholder', 'title', 'aria-label']
 

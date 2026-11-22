@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Save data · POLYMIRA Docs</title>
+  <meta name="description" content="Backups and restores for every emulator." />
+  <meta name="theme-color" content="#05060f" />
+  <link rel="icon" href="../assets/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../assets/site.css" />
+</head>
+<body>
+  <nav class="top">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/icon.svg" alt="" />POLYMIRA</a>
+      <div class="navlinks">
+        <a href="../#tour">Tour</a>
+        <a href="../#features">Features</a>
+        <a href="./" class="on">Docs</a>
+        <a href="https://github.com/hasanlior/polymira/releases">Releases</a>
+      </div>
+      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+    </div>
+  </nav>
+  <div class="docs">
+    <div>
+      <button class="side-toggle" type="button">☰ Documentation menu</button>
+      <aside class="side"><h5>Getting started</h5><a href="index.html">Introduction</a><a href="install.html">Installation</a><a href="first-run.html">First run</a><h5>Using POLYMIRA</h5><a href="library.html">Library</a><a href="controllers.html">Controllers</a><a href="in-game-menu.html">In-game menu</a><a href="apps.html">Apps and browser</a><a href="store.html">Store, themes and mods</a><h5>Emulation</h5><a href="emulators.html">Emulators</a><a href="saves.html" class="on">Save data</a><a href="trophies.html">Trophies and statistics</a><h5>Reference</h5><a href="settings.html">Settings</a><a href="troubleshooting.html">Troubleshooting</a><a href="building.html">Building from source</a></aside>
+    </div>
+    <main class="doc">
+      <div class="crumbs">Docs / Emulation</div>
+      <h1 class="display">Save data</h1>
+      <p class="intro">Backups and restores for every emulator.</p>
+<p><b>Settings → Save Data Management</b> lists every configured emulator with the folders where it keeps saves and save states. POLYMIRA finds them in the emulator's portable folder or in Documents / AppData.</p>
+<h2 id="backup">Backups</h2>
+<ul>
+<li>With <b>Back up automatically after playing</b> on, the emulator's saves are zipped when a play session ends.</li>
+<li>The last 10 backups per emulator are kept.</li>
+<li><b>Back up all saves now</b> backs up every emulator at once.</li>
+</ul>
+<h2 id="restore">Restore</h2>
+<p>Pick an emulator, <b>Restore from backup</b>, then a date. Your current saves are backed up before the restore, so it can always be undone.</p>
+<h2 id="sync">Sync folder</h2>
+<p>Choose a folder inside OneDrive, Google Drive or on a USB drive. Every backup is copied there as well, and backups found there appear in the restore list on other PCs.</p>
+<div class="note"><p>melonDS stores saves next to the game file; those <code>.sav</code> files are included in its backups.</p></div>
+      <div class="pager"><a class="prev" href="emulators.html"><small>Previous</small>Emulators</a><a class="next" href="trophies.html"><small>Next</small>Trophies and statistics</a></div>
+      <p class="crumbs" style="margin-top:28px"><a href="https://github.com/hasanlior/polymira/blob/main/docs/gendocs.py" style="color:var(--faint)">Edit this page on GitHub</a></p>
+    </main>
+    <aside class="toc"><b>On this page</b><a href="#backup">Backups</a><a href="#restore">Restore</a><a href="#sync">Sync folder</a></aside>
+  </div>
+  <footer>
+    <div class="wrap">
+      <span>© 2026 POLYMIRA · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
+      <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
+    </div>
+  </footer>
+  <script src="../assets/site.js"></script>
+</body>
+</html>

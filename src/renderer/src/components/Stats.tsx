@@ -1,3 +1,4 @@
+import { locale } from '../i18n'
 import { useEffect, useState } from 'react'
 import type { PlayStats } from '@shared/types'
 import { call, formatPlayTime } from '../api'
@@ -61,7 +62,7 @@ export function StatsScreen({ onClose }: { onClose: () => void }) {
                   <div className="stats-bar-wrap">
                     <div className="stats-bar" style={{ height: `${(d.sec / max) * 100}%` }} />
                   </div>
-                  <div className="stats-day">{new Date(d.day).toLocaleDateString('tr-TR', { weekday: 'short' })}</div>
+                  <div className="stats-day">{new Date(d.day).toLocaleDateString(locale(), { weekday: 'short' })}</div>
                 </div>
               ))}
             </div>

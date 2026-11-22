@@ -79,7 +79,7 @@ export function RemapScreen({ settings, onClose }: { settings: Settings; onClose
     <div className="modal-layer center">
       <div className="dialog remap">
         <div className="dialog-text">Tuş ataması</div>
-        <div className="remap-sub">Simgeler: {STYLE_NAMES[shown]} · Değiştirmek istediğin işlemi seç, sonra yeni tuşa bas.</div>
+        <div className="remap-sub">{`Simgeler: ${STYLE_NAMES[shown]} · Değiştirmek istediğin işlemi seç, sonra yeni tuşa bas.`}</div>
         <div className="remap-list">
           {rows.map((r, i) => (
             <div key={r} className={`remap-row ${i === idx ? 'sel' : ''}`}>

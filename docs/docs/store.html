@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Store, themes and mods · POLYMIRA Docs</title>
+  <meta name="description" content="Install apps, emulators, themes and community mods." />
+  <meta name="theme-color" content="#05060f" />
+  <link rel="icon" href="../assets/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../assets/site.css" />
+</head>
+<body>
+  <nav class="top">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/icon.svg" alt="" />POLYMIRA</a>
+      <div class="navlinks">
+        <a href="../#tour">Tour</a>
+        <a href="../#features">Features</a>
+        <a href="./" class="on">Docs</a>
+        <a href="https://github.com/hasanlior/polymira/releases">Releases</a>
+      </div>
+      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+    </div>
+  </nav>
+  <div class="docs">
+    <div>
+      <button class="side-toggle" type="button">☰ Documentation menu</button>
+      <aside class="side"><h5>Getting started</h5><a href="index.html">Introduction</a><a href="install.html">Installation</a><a href="first-run.html">First run</a><h5>Using POLYMIRA</h5><a href="library.html">Library</a><a href="controllers.html">Controllers</a><a href="in-game-menu.html">In-game menu</a><a href="apps.html">Apps and browser</a><a href="store.html" class="on">Store, themes and mods</a><h5>Emulation</h5><a href="emulators.html">Emulators</a><a href="saves.html">Save data</a><a href="trophies.html">Trophies and statistics</a><h5>Reference</h5><a href="settings.html">Settings</a><a href="troubleshooting.html">Troubleshooting</a><a href="building.html">Building from source</a></aside>
+    </div>
+    <main class="doc">
+      <div class="crumbs">Docs / Using POLYMIRA</div>
+      <h1 class="display">Store, themes and mods</h1>
+      <p class="intro">Install apps, emulators, themes and community mods.</p>
+<figure><img src="../assets/shots/store.jpg" alt="Store, Emulators tab" /></figure>
+<p>Open the store from the <b>Store</b> category. Switch sections with <kbd>LB</kbd> / <kbd>RB</kbd>: Featured, Apps, Emulators, Themes, Mods and Downloads.</p>
+<h2 id="themes">Themes</h2>
+<p>Themes change the background colour and can add CSS. Apply one from the store, or drop a <code>.json</code> file into the themes folder (<b>Store → Mods → Theme folder</b>):</p>
+<pre><code>{ "name": "My theme", "hue": 210, "night": false, "css": ":root { }" }</code></pre>
+<h2 id="mods">Mods</h2>
+<p>A mod is a folder in the mods folder with a <code>mod.json</code> (<code>name</code>, <code>description</code>) and a <code>style.css</code>. Mods change how the interface looks; they cannot run code. Turn them on and off in <b>Store → Mods</b>.</p>
+<h2 id="community">Community catalog</h2>
+<p>The store also reads <code>community/catalog.json</code> from the GitHub repository. Anyone can add a theme, mod or app with a pull request; the format is described in <a href="https://github.com/hasanlior/polymira/tree/main/community">community/README.md</a>.</p>
+      <div class="pager"><a class="prev" href="apps.html"><small>Previous</small>Apps and browser</a><a class="next" href="emulators.html"><small>Next</small>Emulators</a></div>
+      <p class="crumbs" style="margin-top:28px"><a href="https://github.com/hasanlior/polymira/blob/main/docs/gendocs.py" style="color:var(--faint)">Edit this page on GitHub</a></p>
+    </main>
+    <aside class="toc"><b>On this page</b><a href="#themes">Themes</a><a href="#mods">Mods</a><a href="#community">Community catalog</a></aside>
+  </div>
+  <footer>
+    <div class="wrap">
+      <span>© 2026 POLYMIRA · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
+      <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
+    </div>
+  </footer>
+  <script src="../assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Troubleshooting · POLYMIRA Docs</title>
+  <meta name="description" content="Common problems and how to solve them." />
+  <meta name="theme-color" content="#05060f" />
+  <link rel="icon" href="../assets/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../assets/site.css" />
+</head>
+<body>
+  <nav class="top">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/icon.svg" alt="" />POLYMIRA</a>
+      <div class="navlinks">
+        <a href="../#tour">Tour</a>
+        <a href="../#features">Features</a>
+        <a href="./" class="on">Docs</a>
+        <a href="https://github.com/hasanlior/polymira/releases">Releases</a>
+      </div>
+      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+    </div>
+  </nav>
+  <div class="docs">
+    <div>
+      <button class="side-toggle" type="button">☰ Documentation menu</button>
+      <aside class="side"><h5>Getting started</h5><a href="index.html">Introduction</a><a href="install.html">Installation</a><a href="first-run.html">First run</a><h5>Using POLYMIRA</h5><a href="library.html">Library</a><a href="controllers.html">Controllers</a><a href="in-game-menu.html">In-game menu</a><a href="apps.html">Apps and browser</a><a href="store.html">Store, themes and mods</a><h5>Emulation</h5><a href="emulators.html">Emulators</a><a href="saves.html">Save data</a><a href="trophies.html">Trophies and statistics</a><h5>Reference</h5><a href="settings.html">Settings</a><a href="troubleshooting.html" class="on">Troubleshooting</a><a href="building.html">Building from source</a></aside>
+    </div>
+    <main class="doc">
+      <div class="crumbs">Docs / Reference</div>
+      <h1 class="display">Troubleshooting</h1>
+      <p class="intro">Common problems and how to solve them.</p>
+<h3 id="t-smartscreen">Windows blocks the installer</h3>
+<p>Choose <b>More info → Run anyway</b>. The installer is not code-signed yet.</p>
+<h3 id="t-menu">The in-game menu does not appear</h3>
+<p>Switch the game or emulator to borderless full screen. With a PlayStation controller, the PS button is not visible to Windows' Xbox controller interface: use Steam Input or DS4Windows, Back + Start, or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Home</kbd>.</p>
+<h3 id="t-emu">“Emulator not set”</h3>
+<p>Download it from the store, or use <b>Settings → Emulation Settings → Find emulators automatically</b> or <b>Scan emulator folder</b>.</p>
+<h3 id="t-bios">A game starts and closes immediately</h3>
+<p>The emulator is usually missing a BIOS or system files. Check the platform note in the app and the emulator's own documentation.</p>
+<h3 id="t-core">“RetroArch core missing”</h3>
+<p>Cores are downloaded with RetroArch. For other cores use RetroArch's <b>Online Updater → Core Downloader</b>.</p>
+<h3 id="t-store">A store game opens but play time is not counted</h3>
+<p>POLYMIRA finds the game's process from its install folder. Games added only as a <code>.url</code> shortcut have no folder to look in; add them through the PC scan instead.</p>
+<h3 id="t-netflix">Netflix opens in Edge</h3>
+<p>Expected in builds without a VMP signature. See <a href="apps.html#drm">Apps → Netflix</a>.</p>
+<h3 id="t-desktop">The taskbar is missing after a crash</h3>
+<p>The watchdog restores it automatically. If it does not, press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Esc</kbd>, choose <b>Run new task</b> and start <code>explorer.exe</code>.</p>
+<h3 id="t-reset">Start over</h3>
+<p>Quit POLYMIRA and delete <code>%APPDATA%\POLYMIRA</code>. The next start runs the welcome wizard again.</p>
+<h3 id="t-report">Report a problem</h3>
+<p>Open an issue on <a href="https://github.com/hasanlior/polymira/issues">GitHub</a> with your Windows version, the game's platform and what happened.</p>
+      <div class="pager"><a class="prev" href="settings.html"><small>Previous</small>Settings</a><a class="next" href="building.html"><small>Next</small>Building from source</a></div>
+      <p class="crumbs" style="margin-top:28px"><a href="https://github.com/hasanlior/polymira/blob/main/docs/gendocs.py" style="color:var(--faint)">Edit this page on GitHub</a></p>
+    </main>
+    <aside class="toc"><b>On this page</b><a href="#t-smartscreen">Windows blocks the installer</a><a href="#t-menu">The in-game menu does not appear</a><a href="#t-emu">“Emulator not set”</a><a href="#t-bios">A game starts and closes immediately</a><a href="#t-core">“RetroArch core missing”</a><a href="#t-store">A store game opens but play time is not counted</a><a href="#t-netflix">Netflix opens in Edge</a><a href="#t-desktop">The taskbar is missing after a crash</a><a href="#t-reset">Start over</a><a href="#t-report">Report a problem</a></aside>
+  </div>
+  <footer>
+    <div class="wrap">
+      <span>© 2026 POLYMIRA · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
+      <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
+    </div>
+  </footer>
+  <script src="../assets/site.js"></script>
+</body>
+</html>

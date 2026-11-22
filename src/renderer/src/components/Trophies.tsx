@@ -1,3 +1,4 @@
+import { locale } from '../i18n'
 import { useEffect, useRef, useState } from 'react'
 import type { Trophy, TrophyGame } from '@shared/types'
 import { call } from '../api'
@@ -110,7 +111,7 @@ export function TrophyScreen({ initialKey, onClose }: { initialKey?: string; onC
                   <div className="trophy-desc">{t.hidden && !t.unlocked ? 'Açıldığında görünecek.' : t.description}</div>
                 </div>
                 <div className="trophy-side">
-                  {t.unlocked ? (t.unlockedAt ? new Date(t.unlockedAt).toLocaleDateString('tr-TR') : 'Açıldı') : 'Kilitli'}
+                  {t.unlocked ? (t.unlockedAt ? new Date(t.unlockedAt).toLocaleDateString(locale()) : 'Açıldı') : 'Kilitli'}
                 </div>
               </div>
             ))}

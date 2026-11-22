@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Apps and browser · POLYMIRA Docs</title>
+  <meta name="description" content="YouTube, Twitch, streaming services and the built-in browser." />
+  <meta name="theme-color" content="#05060f" />
+  <link rel="icon" href="../assets/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../assets/site.css" />
+</head>
+<body>
+  <nav class="top">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/icon.svg" alt="" />POLYMIRA</a>
+      <div class="navlinks">
+        <a href="../#tour">Tour</a>
+        <a href="../#features">Features</a>
+        <a href="./" class="on">Docs</a>
+        <a href="https://github.com/hasanlior/polymira/releases">Releases</a>
+      </div>
+      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+    </div>
+  </nav>
+  <div class="docs">
+    <div>
+      <button class="side-toggle" type="button">☰ Documentation menu</button>
+      <aside class="side"><h5>Getting started</h5><a href="index.html">Introduction</a><a href="install.html">Installation</a><a href="first-run.html">First run</a><h5>Using POLYMIRA</h5><a href="library.html">Library</a><a href="controllers.html">Controllers</a><a href="in-game-menu.html">In-game menu</a><a href="apps.html" class="on">Apps and browser</a><a href="store.html">Store, themes and mods</a><h5>Emulation</h5><a href="emulators.html">Emulators</a><a href="saves.html">Save data</a><a href="trophies.html">Trophies and statistics</a><h5>Reference</h5><a href="settings.html">Settings</a><a href="troubleshooting.html">Troubleshooting</a><a href="building.html">Building from source</a></aside>
+    </div>
+    <main class="doc">
+      <div class="crumbs">Docs / Using POLYMIRA</div>
+      <h1 class="display">Apps and browser</h1>
+      <p class="intro">YouTube, Twitch, streaming services and the built-in browser.</p>
+<h2 id="inside">Apps that run inside the console</h2>
+<p>The built-in browser, YouTube (TV interface) and Twitch open inside POLYMIRA. Each app keeps its own login.</p>
+<table><tr><th>Control</th><th>Browser</th><th>YouTube / Twitch</th></tr>
+<tr><td>Left stick</td><td>Pointer</td><td>Move</td></tr>
+<tr><td>Right stick</td><td>Scroll</td><td>—</td></tr>
+<tr><td>A / ✕</td><td>Click</td><td>Select</td></tr>
+<tr><td>B / ○</td><td>Back a page</td><td>Back</td></tr>
+<tr><td>X / □</td><td>On-screen keyboard</td><td>On-screen keyboard</td></tr>
+<tr><td>Start</td><td>Address or search</td><td>On-screen keyboard</td></tr>
+<tr><td>Y / △</td><td>App menu</td><td>App menu</td></tr></table>
+<p>The app menu has back, forward, reload, start page, zoom and close. With a keyboard, <kbd>F1</kbd> opens it.</p>
+<h2 id="drm">Netflix, Disney+, Prime Video, Spotify</h2>
+<p>These services require Widevine DRM and a signed app binary. In builds that are not VMP-signed they open full screen in Microsoft Edge, with the in-game menu available on top. Choose the behaviour in <b>Settings → Game Mode &amp; System → Protected apps</b>.</p>
+<h2 id="add">Adding apps</h2>
+<p>Use <b>Apps → Add apps from the store</b>, or the store's Apps tab. App icons are loaded from each service's own website.</p>
+      <div class="pager"><a class="prev" href="in-game-menu.html"><small>Previous</small>In-game menu</a><a class="next" href="store.html"><small>Next</small>Store, themes and mods</a></div>
+      <p class="crumbs" style="margin-top:28px"><a href="https://github.com/hasanlior/polymira/blob/main/docs/gendocs.py" style="color:var(--faint)">Edit this page on GitHub</a></p>
+    </main>
+    <aside class="toc"><b>On this page</b><a href="#inside">Apps that run inside the console</a><a href="#drm">Netflix, Disney+, Prime Video, Spotify</a><a href="#add">Adding apps</a></aside>
+  </div>
+  <footer>
+    <div class="wrap">
+      <span>© 2026 POLYMIRA · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
+      <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
+    </div>
+  </footer>
+  <script src="../assets/site.js"></script>
+</body>
+</html>

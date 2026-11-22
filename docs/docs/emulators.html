@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Emulators · POLYMIRA Docs</title>
+  <meta name="description" content="Downloading, configuring and choosing emulators." />
+  <meta name="theme-color" content="#05060f" />
+  <link rel="icon" href="../assets/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../assets/site.css" />
+</head>
+<body>
+  <nav class="top">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/icon.svg" alt="" />POLYMIRA</a>
+      <div class="navlinks">
+        <a href="../#tour">Tour</a>
+        <a href="../#features">Features</a>
+        <a href="./" class="on">Docs</a>
+        <a href="https://github.com/hasanlior/polymira/releases">Releases</a>
+      </div>
+      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+    </div>
+  </nav>
+  <div class="docs">
+    <div>
+      <button class="side-toggle" type="button">☰ Documentation menu</button>
+      <aside class="side"><h5>Getting started</h5><a href="index.html">Introduction</a><a href="install.html">Installation</a><a href="first-run.html">First run</a><h5>Using POLYMIRA</h5><a href="library.html">Library</a><a href="controllers.html">Controllers</a><a href="in-game-menu.html">In-game menu</a><a href="apps.html">Apps and browser</a><a href="store.html">Store, themes and mods</a><h5>Emulation</h5><a href="emulators.html" class="on">Emulators</a><a href="saves.html">Save data</a><a href="trophies.html">Trophies and statistics</a><h5>Reference</h5><a href="settings.html">Settings</a><a href="troubleshooting.html">Troubleshooting</a><a href="building.html">Building from source</a></aside>
+    </div>
+    <main class="doc">
+      <div class="crumbs">Docs / Emulation</div>
+      <h1 class="display">Emulators</h1>
+      <p class="intro">Downloading, configuring and choosing emulators.</p>
+<h2 id="download">Downloading</h2>
+<p>From the store's Emulators tab or <b>Settings → Emulation Settings → Download emulators</b>. Downloads come from each project's official releases and run in the background with progress, speed and time left in the top corner.</p>
+<table><tr><th>Emulator</th><th>Systems</th></tr>
+<tr><td>RetroArch (with the cores your games need)</td><td>NES, SNES, N64, Game Boy family, Sega, arcade and more</td></tr>
+<tr><td>DuckStation</td><td>PlayStation</td></tr>
+<tr><td>PCSX2</td><td>PlayStation 2</td></tr>
+<tr><td>PPSSPP</td><td>PSP</td></tr>
+<tr><td>RPCS3, Vita3K, shadPS4</td><td>PS3, Vita, PS4 (experimental)</td></tr>
+<tr><td>xemu, Xenia Canary</td><td>Xbox, Xbox 360 (experimental)</td></tr>
+<tr><td>Cemu, melonDS, Azahar, Flycast</td><td>Wii U, DS, 3DS, Dreamcast</td></tr></table>
+<p>Dolphin and Ryujinx have no stable download link; install them yourself and use <b>Find emulators automatically</b>.</p>
+<h2 id="bios">BIOS and system files</h2>
+<p>Some systems need files from your own console: a PS1 or PS2 BIOS, PS3 system software, Switch keys, a Saturn BIOS. POLYMIRA does not provide them. Place them where the emulator expects them; the platform's note in the app says what is needed.</p>
+<h2 id="controllers">Controller setup</h2>
+<p>With <b>Automatic controller setup in emulators</b> on (the default), POLYMIRA writes controller settings before a game starts:</p>
+<table><tr><th>Emulator</th><th>Setup</th></tr>
+<tr><td>DuckStation, PCSX2, Dolphin (GameCube), RPCS3</td><td>Written by POLYMIRA the first time, then left alone</td></tr>
+<tr><td>RetroArch, PPSSPP, Vita3K, shadPS4, xemu, Xenia, Flycast</td><td>Detect controllers on their own</td></tr>
+<tr><td>Cemu, Ryujinx, melonDS, Azahar</td><td>Set up once in the emulator</td></tr></table>
+<p>If you change controls inside an emulator, POLYMIRA keeps your changes. <b>Re-apply controller settings</b> writes the defaults again.</p>
+<h2 id="per-game">Per-game settings</h2>
+<p>A game's options contain <b>Emulator settings (this game)</b>: the emulator to use, a video filter for RetroArch games (CRT, LCD grid, sharp smoothing) and extra command line arguments.</p>
+      <div class="pager"><a class="prev" href="store.html"><small>Previous</small>Store, themes and mods</a><a class="next" href="saves.html"><small>Next</small>Save data</a></div>
+      <p class="crumbs" style="margin-top:28px"><a href="https://github.com/hasanlior/polymira/blob/main/docs/gendocs.py" style="color:var(--faint)">Edit this page on GitHub</a></p>
+    </main>
+    <aside class="toc"><b>On this page</b><a href="#download">Downloading</a><a href="#bios">BIOS and system files</a><a href="#controllers">Controller setup</a><a href="#per-game">Per-game settings</a></aside>
+  </div>
+  <footer>
+    <div class="wrap">
+      <span>© 2026 POLYMIRA · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
+      <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
+    </div>
+  </footer>
+  <script src="../assets/site.js"></script>
+</body>
+</html>

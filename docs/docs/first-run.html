@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>First run · POLYMIRA Docs</title>
+  <meta name="description" content="The welcome wizard, step by step." />
+  <meta name="theme-color" content="#05060f" />
+  <link rel="icon" href="../assets/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../assets/site.css" />
+</head>
+<body>
+  <nav class="top">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/icon.svg" alt="" />POLYMIRA</a>
+      <div class="navlinks">
+        <a href="../#tour">Tour</a>
+        <a href="../#features">Features</a>
+        <a href="./" class="on">Docs</a>
+        <a href="https://github.com/hasanlior/polymira/releases">Releases</a>
+      </div>
+      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+    </div>
+  </nav>
+  <div class="docs">
+    <div>
+      <button class="side-toggle" type="button">☰ Documentation menu</button>
+      <aside class="side"><h5>Getting started</h5><a href="index.html">Introduction</a><a href="install.html">Installation</a><a href="first-run.html" class="on">First run</a><h5>Using POLYMIRA</h5><a href="library.html">Library</a><a href="controllers.html">Controllers</a><a href="in-game-menu.html">In-game menu</a><a href="apps.html">Apps and browser</a><a href="store.html">Store, themes and mods</a><h5>Emulation</h5><a href="emulators.html">Emulators</a><a href="saves.html">Save data</a><a href="trophies.html">Trophies and statistics</a><h5>Reference</h5><a href="settings.html">Settings</a><a href="troubleshooting.html">Troubleshooting</a><a href="building.html">Building from source</a></aside>
+    </div>
+    <main class="doc">
+      <div class="crumbs">Docs / Getting started</div>
+      <h1 class="display">First run</h1>
+      <p class="intro">The welcome wizard, step by step.</p>
+<figure><img src="../assets/shots/setup.jpg" alt="Welcome screen" /><figcaption>The first screen of the welcome wizard.</figcaption></figure>
+<p>The wizard runs full screen the first time you open POLYMIRA. You can run it again later from <b>Settings → Game Mode &amp; System → Run the setup wizard again</b>.</p>
+<ol>
+<li><b>Controller.</b> Connect a controller and press any button. A keyboard works too (<kbd>Enter</kbd>).</li>
+<li><b>Scan.</b> POLYMIRA reads the Steam, Epic, GOG, Xbox app, Riot and Ubisoft libraries, looks through installed programs for other games, finds installed emulators and scans folders whose names suggest games or ROMs on every drive.</li>
+<li><b>Results.</b> Found games are grouped by source. Untick anything you don't want and choose <b>Add selected</b>.</li>
+<li><b>Emulators.</b> Emulators needed for the games you added are preselected for download. Downloads run in the background.</li>
+<li><b>Game mode.</b> Choose what happens while you play: higher CPU priority, a performance power plan, and optionally closing the Windows desktop.</li>
+</ol>
+<div class="note"><p>Nothing is copied or moved during the scan. Games stay where they are; POLYMIRA only remembers their paths.</p></div>
+      <div class="pager"><a class="prev" href="install.html"><small>Previous</small>Installation</a><a class="next" href="library.html"><small>Next</small>Library</a></div>
+      <p class="crumbs" style="margin-top:28px"><a href="https://github.com/hasanlior/polymira/blob/main/docs/gendocs.py" style="color:var(--faint)">Edit this page on GitHub</a></p>
+    </main>
+    <aside class="toc"></aside>
+  </div>
+  <footer>
+    <div class="wrap">
+      <span>© 2026 POLYMIRA · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
+      <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
+    </div>
+  </footer>
+  <script src="../assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>In-game menu · POLYMIRA Docs</title>
+  <meta name="description" content="The menu you open on top of a running game." />
+  <meta name="theme-color" content="#05060f" />
+  <link rel="icon" href="../assets/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../assets/site.css" />
+</head>
+<body>
+  <nav class="top">
+    <div class="wrap">
+      <a class="brand" href="../"><img src="../assets/icon.svg" alt="" />POLYMIRA</a>
+      <div class="navlinks">
+        <a href="../#tour">Tour</a>
+        <a href="../#features">Features</a>
+        <a href="./" class="on">Docs</a>
+        <a href="https://github.com/hasanlior/polymira/releases">Releases</a>
+      </div>
+      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+    </div>
+  </nav>
+  <div class="docs">
+    <div>
+      <button class="side-toggle" type="button">☰ Documentation menu</button>
+      <aside class="side"><h5>Getting started</h5><a href="index.html">Introduction</a><a href="install.html">Installation</a><a href="first-run.html">First run</a><h5>Using POLYMIRA</h5><a href="library.html">Library</a><a href="controllers.html">Controllers</a><a href="in-game-menu.html" class="on">In-game menu</a><a href="apps.html">Apps and browser</a><a href="store.html">Store, themes and mods</a><h5>Emulation</h5><a href="emulators.html">Emulators</a><a href="saves.html">Save data</a><a href="trophies.html">Trophies and statistics</a><h5>Reference</h5><a href="settings.html">Settings</a><a href="troubleshooting.html">Troubleshooting</a><a href="building.html">Building from source</a></aside>
+    </div>
+    <main class="doc">
+      <div class="crumbs">Docs / Using POLYMIRA</div>
+      <h1 class="display">In-game menu</h1>
+      <p class="intro">The menu you open on top of a running game.</p>
+<figure><img src="../assets/shots/ingame.jpg" alt="In-game menu" /></figure>
+<p>While a game runs, press the controller's <b>Guide</b> button (or <b>Back + Start</b>, or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Home</kbd>). Which of these opens the menu is set in <b>Settings → Controller Settings → In-game menu button</b>.</p>
+<table><tr><th>Item</th><th>What it does</th></tr>
+<tr><td>Resume game</td><td>Closes the menu and returns to the game.</td></tr>
+<tr><td>Pause / Unpause game</td><td>Suspends the game process itself, independent of the emulator.</td></tr>
+<tr><td>Take screenshot</td><td>Saves the screen; screenshots are listed under <b>Media → Screenshots</b>.</td></tr>
+<tr><td>Quick save / Quick load</td><td>Save and load a state in RetroArch games.</td></tr>
+<tr><td>Return to home menu</td><td>Shows the POLYMIRA home screen with the game paused in the background.</td></tr>
+<tr><td>Quit game</td><td>Closes the game and everything it started.</td></tr></table>
+<p>The performance panel shows the game's CPU and RAM use, system CPU and RAM, and GPU usage on NVIDIA cards.</p>
+<h2 id="borderless">Exclusive full screen</h2>
+<div class="note warn"><p>The menu draws over games running in <b>borderless</b> full screen. Games in <b>exclusive</b> full screen may hide it. Choose borderless or windowed full screen in the game's display settings.</p></div>
+<h2 id="behind">While you play</h2>
+<p>POLYMIRA stays open behind the game on a black screen and stops its own animation, so it does not use GPU time. When the game exits, you are back on the home screen.</p>
+      <div class="pager"><a class="prev" href="controllers.html"><small>Previous</small>Controllers</a><a class="next" href="apps.html"><small>Next</small>Apps and browser</a></div>
+      <p class="crumbs" style="margin-top:28px"><a href="https://github.com/hasanlior/polymira/blob/main/docs/gendocs.py" style="color:var(--faint)">Edit this page on GitHub</a></p>
+    </main>
+    <aside class="toc"><b>On this page</b><a href="#borderless">Exclusive full screen</a><a href="#behind">While you play</a></aside>
+  </div>
+  <footer>
+    <div class="wrap">
+      <span>© 2026 POLYMIRA · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
+      <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
+    </div>
+  </footer>
+  <script src="../assets/site.js"></script>
+</body>
+</html>
