@@ -862,6 +862,21 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     icon: 'palette',
     children: [
       choice(
+        'set:ui:style',
+        'Arayüz stili',
+        'grid',
+        ctx.state.settings.uiStyle ?? 'xmb',
+        [
+          { value: 'xmb', label: 'Klasik XMB' },
+          { value: 'aurora', label: 'Aurora (kartlar)' },
+          { value: 'tiles', label: 'Tiles (döşemeler)' },
+          { value: 'shelf', label: 'Shelf (raf)' }
+        ],
+        (v) => ctx.setSettings({ uiStyle: v }),
+        ctx,
+        'Ana ekranın düzeni. Mağaza → Temalar bölümünde de seçilebilir.'
+      ),
+      choice(
         'set:ui:lang',
         'Dil / Language',
         'info',

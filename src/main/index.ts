@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, ipcMain, net, protocol, screen, shell } from 'electron'
+import { app, BrowserWindow, session as electronSession, desktopCapturer, dialog, globalShortcut, ipcMain, net, protocol, screen, shell } from 'electron'
 import fs from 'fs'
 import path from 'path'
 import { pathToFileURL } from 'url'
@@ -13,7 +13,7 @@ import { SessionManager } from './session'
 import { GamepadWatcher } from './gamepadWatcher'
 import { spawn } from 'child_process'
 import { applyDiscovery, runDiscovery } from './discover'
-import { riotClientPath } from './launchers'
+import { riotClientPath, steamExePath } from './launchers'
 import { attachSoundtracks } from './music'
 import { DownloadManager, EMULATOR_SOURCES } from './downloads'
 import { appLaunchPlan, appPath, catalog, findItem, installMod, installedThemes, listMods, modsCss, openFolder, removeMod } from './apps'
@@ -23,6 +23,7 @@ import { appIconFile, appIconRevs, fetchAppIcon } from './appIcons'
 import { drmStatus, initDrm } from './drm'
 import { recordSession, playStats } from './stats'
 import { fetchGameInfo } from './gameinfo'
+import { fetchCompat } from './compat'
 import { trophyGames, trophyList, watchTrophies } from './achievements'
 import { createSocket } from 'dgram'
 import { RETROARCH_CMD_PORT } from './emulators'
@@ -315,6 +316,26 @@ function ensureOverlay(): BrowserWindow {
 // ── In-game menu ──────────────────────────────────────────────────────
 
 let overlayMenuOpen = false
+let launchCancelled = false
+let frontTimer: NodeJS.Timeout | null = null
+
+/**
+ * While a launcher (Steam, Ubisoft, EA…) starts a game, its own windows try to come to the front.
+ * The console stays on top with its "starting" screen until the game's process appears.
+ */
+function holdFront(on: boolean): void {
+  if (frontTimer) clearInterval(frontTimer)
+  frontTimer = null
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (on) {
+    launchCancelled = false
+    mainWindow.setAlwaysOnTop(true, 'pop-up-menu')
+    mainWindow.moveTop()
+    frontTimer = setInterval(() => mainWindow && !mainWindow.isDestroyed() && mainWindow.moveTop(), 1500)
+  } else {
+    mainWindow.setAlwaysOnTop(false)
+  }
+}
 let stopTrophyWatch: (() => void) | null = null
 
 function hideOverlay(): void {
@@ -619,6 +640,11 @@ const handlers: Handlers = {
         const client = riotClientPath()
         if (!client) throw new Error('Riot Client bulunamadı.')
         spawn(client, [`--launch-product=${riot[1]}`, `--launch-patchline=${riot[2]}`], { detached: true, stdio: 'ignore' }).unref()
+      } else if (/^steam:\/\//i.test(plan.url)) {
+        // -silent: if Steam is not running yet it starts in the tray instead of showing its window.
+        const steam = await steamExePath()
+        if (steam) spawn(steam, ['-silent', plan.url], { detached: true, stdio: 'ignore' }).unref()
+        else await shell.openExternal(plan.url)
       } else if (/^shell:/i.test(plan.url)) {
         // Xbox app / Microsoft Store games are started through their app id.
         spawn('explorer.exe', [plan.url], { detached: true, stdio: 'ignore' }).unref()
@@ -627,12 +653,16 @@ const handlers: Handlers = {
       }
       const dir = game.meta.installDir
       if (dir && fs.existsSync(dir)) {
-        toast('info', `${game.title} başlatıcı üzerinden açılıyor…`)
+        // Keep the console in front of launcher windows until the game itself is running.
+        holdFront(true)
         void session.attachByFolder(game, dir).then((info) => {
-          if (!info) toast('warning', `${game.title} işlemi bulunamadı; süre ve oyun içi menü bu oturumda kullanılamaz.`)
+          holdFront(false)
+          if (!info && !launchCancelled) toast('warning', `${game.title} işlemi bulunamadı; süre ve oyun içi menü bu oturumda kullanılamaz.`)
+          if (!info) send('launch:ended', game.id)
         })
       } else {
         toast('info', `${game.title} başlatıcı üzerinden açılıyor. Bu oyunun süresi takip edilemez.`)
+        send('launch:ended', game.id)
       }
       broadcast()
       return
@@ -641,6 +671,16 @@ const handlers: Handlers = {
     broadcast()
   },
 
+  'pad:psMenu': (how) => {
+    if (!session.info) return
+    const hk = store.settings.overlayHotkey
+    if ((how === 'guide' && hk !== 'back-start') || (how === 'combo' && hk !== 'guide')) toggleOverlay()
+  },
+  'session:cancelLaunch': () => {
+    launchCancelled = true
+    session.cancelAttach()
+    holdFront(false)
+  },
   'session:pause': (paused) => session.setPaused(paused),
   'session:stop': async () => {
     hideOverlay()
@@ -785,6 +825,16 @@ const handlers: Handlers = {
     store.updateGame(id, { meta, infoCheckedAt: Date.now(), onlineShots: info.screenshots.length ? info.screenshots : g.onlineShots })
     broadcast()
     return store.games.find((x) => x.id === id) ?? null
+  },
+  'game:compat': async (id) => {
+    const g = store.games.find((x) => x.id === id)
+    if (!g) return null
+    const c = await fetchCompat(g)
+    if (c && c !== g.compat) {
+      store.updateGame(id, { compat: c })
+      broadcast()
+    }
+    return c
   },
   'trophies:games': () => trophyGames(),
   'trophies:list': (key) => trophyList(key),
@@ -942,8 +992,19 @@ function startWatchdog(): void {
   child.unref()
 }
 
+/** Lets the console page read Sony controllers over WebHID (for the PS button during games). */
+function allowSonyHid(): void {
+  const ses = electronSession.defaultSession
+  ses.setDevicePermissionHandler((d) => d.deviceType === 'hid' && (d.device as { vendorId?: number }).vendorId === 0x054c)
+  ses.on('select-hid-device', (event, details, callback) => {
+    event.preventDefault()
+    callback(details.deviceList.find((d) => d.vendorId === 0x054c)?.deviceId ?? '')
+  })
+}
+
 app.whenReady().then(() => {
   initStores()
+  allowSonyHid()
   recoverPreviousRun()
   initRuntime({
     pid: process.pid,

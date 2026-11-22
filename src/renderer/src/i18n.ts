@@ -528,6 +528,47 @@ const EN: Record<string, string> = {
   '<1 dk': '<1 min',
   'Bulunamadı.': 'Not found.',
   'Oyun ara': 'Search games',
+  Oynanabilir: 'Playable',
+  'Oyun içi (sorunlu)': 'In-game (with issues)',
+  'Menülere kadar': 'Menus only',
+  'Açılıyor, oynanmıyor': 'Boots, not playable',
+  Açılmıyor: 'Does not boot',
+  'İndirilen güncelleme doğrulanamadı (SHA-256 uyuşmuyor).': 'The downloaded update could not be verified (SHA-256 mismatch).',
+  'Resmi sürümleri indirip kurar. İndirme arka planda sürer; bu sırada gezinebilir, oyun oynayabilirsin.': 'Downloads and installs the official builds. Downloads run in the background while you browse and play.',
+  'İndirmeler arka planda sürer; bu sırada gezinip oyun oynayabilirsin.': 'Downloads run in the background while you browse and play.',
+  'Oyun klasörleri (PS3_GAME/USRDIR/EBOOT.BIN) veya kurulu oyunlar (dev_hdd0/game). Her oyun çalışmaz.': 'Game folders (PS3_GAME/USRDIR/EBOOT.BIN) or installed games (dev_hdd0/game). Not every game runs.',
+  'Xbox One emülatörü yok. Birçok oyunun PC sürümü var; PC Oyunları altına ekleyin.': 'There is no Xbox One emulator. Many games have PC versions; add them under PC Games.',
+  'Xbox Series emülatörü yok. Birçok oyunun PC sürümü var; PC Oyunları altına ekleyin.': 'There is no Xbox Series emulator. Many games have PC versions; add them under PC Games.',
+  'eşitleme klasöründe de var': 'also in the sync folder',
+  '· eşitleme klasöründe de var': '· also in the sync folder',
+  'Kontrolcü bağlandı': 'Controller connected',
+  'Kontrolcü bağlantısı kesildi': 'Controller disconnected',
+  KĞ: 'PA',
+  'Kompakt menü': 'Compact menu',
+  'XMB satırlarını sıklaştırır, daha çok oyun görünür.': 'Tighter XMB rows so more games fit on screen.',
+  'Parlamasız yazı': 'No glow',
+  'Seçili yazıların parlama efektini kapatır.': 'Turns off the glow on selected text.',
+  'Büyük yazı': 'Large text',
+  'Başlıklar ve açıklamalar büyür; odanın öbür ucundaki TV için.': 'Larger titles and descriptions, for a TV across the room.',
+  'Temiz ekran': 'Clean screen',
+  'Saati, kumanda sayacını ve tuş ipuçlarını gizler.': 'Hides the clock, the controller counter and the button hints.',
+  'Kuzey ışıkları yeşili.': 'Northern lights green.',
+  'Arayüz stili': 'Interface style',
+  'Klasik XMB': 'Classic XMB',
+  'Aurora (kartlar)': 'Aurora (cards)',
+  'Tiles (döşemeler)': 'Tiles (grid)',
+  'Shelf (raf)': 'Shelf',
+  'Ana ekranın düzeni. Mağaza → Temalar bölümünde de seçilebilir.': 'The layout of the home screen. Also available in Store → Themes.',
+  'Arayüz stili: ana ekranın düzenini değiştirir': 'Interface style: changes the layout of the home screen',
+  'Görünüm teması: renkleri ve yazı stilini değiştirir': 'Look theme: changes colours and type',
+  "Yatay kategori çubuğu ve dikey listeler; POLYMIRA'nın varsayılan arayüzü.": "Horizontal category bar and vertical lists; POLYMIRA's default interface.",
+  'Modern konsol arayüzü: üstte sekmeler, yatay kare kartlar, odaktaki oyun büyük ve arka planda.': 'A modern console layout: tabs on top, a row of square cards, the focused game large and in the background.',
+  'Büyük döşemelerden oluşan ızgara, üstte bölümler. Tek bakışta çok oyun.': 'A grid of large tiles with sections on top. Many games at a glance.',
+  'Solda kategori menüsü, sağda dikey kapaklardan bir raf. El konsolu ve TV için.': 'Categories in a left rail and a shelf of portrait covers. Made for handhelds and TVs.',
+  'Yeşil fosforlu tüp monitör: tarama çizgileri, hafif titreşim, daktilo yazısı.': 'A green phosphor tube monitor: scanlines, a slight flicker, typewriter type.',
+  Kağıt: 'Paper',
+  'Açık renkli, kâğıt gibi sakin bir tema. Gündüz ve aydınlık odalar için.': 'A calm, light theme like paper. For daytime and bright rooms.',
+  "Pembe ve turkuaz, 80'ler bilgisayar estetiği, eğik yazılar.": 'Pink and cyan, 80s computer aesthetics, slanted type.',
   Yenilikler: "What's new",
   'Bu sürümdeki değişiklikler': 'Changes in this version',
   'Sürüm notları alınamadı. İnternet bağlantını kontrol et.': 'Could not load the release notes. Check your internet connection.',
@@ -545,6 +586,8 @@ const EN: Record<string, string> = {
 const PATTERNS: [RegExp, string][] = [
   [/^%(\d+)$/, '$1%'],
   [/^Arama: (.+)$/, 'Search: $1'],
+  [/^(\S+) uyumluluğu: (.+)$/, '$1 compatibility: $2'],
+  [/^(.+) üzerinden başlatılıyor…$/, 'Starting through $1…'],
   [/^Yenilikler · v(.+)$/, "What's new · v$1"],
   [/^(.+) (\d+\.\d+\.\d+) yüklendi$/, '$1 $2 installed'],
   [/^"(.+)" için oyun bulunamadı\.$/, 'No games found for "$1".'],
@@ -632,11 +675,18 @@ const PATTERNS: [RegExp, string][] = [
   [/^(.+) · eşitleme klasöründe de var$/, '$1 · also in the sync folder']
 ]
 
+let flat: Record<string, string> | null = null
+/** Dictionary keyed by whitespace-collapsed text (for keys that contain line breaks). */
+function EN_FLAT(): Record<string, string> {
+  if (!flat) flat = Object.fromEntries(Object.entries(EN).map(([k, v]) => [k.replace(/\s+/g, ' '), v]))
+  return flat
+}
+
 export function translate(text: string, lang: string): string {
   if (lang !== 'en' || !text) return text
   const trimmed = text.trim().replace(/\s+/g, ' ')
   if (!trimmed) return text
-  const exact = EN[trimmed]
+  const exact = EN[trimmed] ?? EN_FLAT()[trimmed]
   if (exact !== undefined) return text.replace(text.trim(), exact)
   for (const [re, out] of PATTERNS) {
     if (re.test(trimmed)) {

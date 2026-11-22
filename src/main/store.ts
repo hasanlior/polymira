@@ -27,6 +27,7 @@ export const DEFAULT_SETTINGS: Settings = {
   emuBorderless: true,
   displayConfigured: {},
   lastSeenVersion: '',
+  uiStyle: 'xmb',
   autoUpdate: true,
   watchedFolders: [],
   emulatorPaths: {},

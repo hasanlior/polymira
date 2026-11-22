@@ -12,6 +12,8 @@ export interface ThemeDef {
   night?: boolean
   /** Optional extra CSS (custom properties etc.) applied while the theme is active. */
   css?: string
+  /** Home screen layout this theme switches to. */
+  uiStyle?: 'xmb' | 'aurora' | 'tiles' | 'shelf'
 }
 
 export interface StoreApp {
@@ -118,6 +120,65 @@ export const BUILTIN_CATALOG: StoreItem[] = [
     hue: 205,
     description: 'Konsolun kendi tarayıcısı: kumandayla imleç, sanal klavye, sekmesiz tam ekran.',
     app: { url: 'https://www.google.com', kiosk: false }
+  },
+  // ── Interface styles: change the whole home screen ──
+  { id: 'style-classic', kind: 'theme', name: 'Klasik XMB', short: 'XMB', hue: 220, description: 'Yatay kategori çubuğu ve dikey listeler; POLYMIRA\'nın varsayılan arayüzü.', theme: { id: 'style-classic', name: 'Klasik XMB', hue: null, uiStyle: 'xmb' } },
+  { id: 'style-aurora', kind: 'theme', name: 'Aurora', short: 'AU', hue: 230, description: 'Modern konsol arayüzü: üstte sekmeler, yatay kare kartlar, odaktaki oyun büyük ve arka planda.', theme: { id: 'style-aurora', name: 'Aurora', hue: 232, night: true, uiStyle: 'aurora' } },
+  { id: 'style-tiles', kind: 'theme', name: 'Tiles', short: 'TL', hue: 130, description: 'Büyük döşemelerden oluşan ızgara, üstte bölümler. Tek bakışta çok oyun.', theme: { id: 'style-tiles', name: 'Tiles', hue: 140, night: true, uiStyle: 'tiles' } },
+  { id: 'style-shelf', kind: 'theme', name: 'Shelf', short: 'SH', hue: 205, description: 'Solda kategori menüsü, sağda dikey kapaklardan bir raf. El konsolu ve TV için.', theme: { id: 'style-shelf', name: 'Shelf', hue: 210, night: true, uiStyle: 'shelf' } },
+  // ── Unusual themes ──
+  {
+    id: 'theme-crt',
+    kind: 'theme',
+    name: 'CRT Terminal',
+    short: 'CRT',
+    hue: 120,
+    description: 'Yeşil fosforlu tüp monitör: tarama çizgileri, hafif titreşim, daktilo yazısı.',
+    theme: {
+      id: 'theme-crt',
+      name: 'CRT Terminal',
+      hue: 120,
+      night: true,
+      css: `.app { filter: grayscale(1) sepia(1) hue-rotate(65deg) saturate(4) brightness(.95) contrast(1.15); }
+.app * { font-family: 'Cascadia Mono', Consolas, 'Courier New', monospace !important; letter-spacing: .02em; }
+.app::after { content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 999;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.28) 0 1px, transparent 1px 3px), radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,.55));
+  animation: crt-flicker 3s steps(2) infinite; }
+@keyframes crt-flicker { 50% { opacity: .92; } }`
+    }
+  },
+  {
+    id: 'theme-paper',
+    kind: 'theme',
+    name: 'Kağıt',
+    short: 'KĞ',
+    hue: 40,
+    description: 'Açık renkli, kâğıt gibi sakin bir tema. Gündüz ve aydınlık odalar için.',
+    theme: {
+      id: 'theme-paper',
+      name: 'Kağıt',
+      hue: 40,
+      css: `.app { filter: invert(.92) hue-rotate(180deg) sepia(.15); }
+.app img, .app video, .app .backdrop, .app .launch-cover { filter: invert(1) hue-rotate(180deg); }`
+    }
+  },
+  {
+    id: 'theme-vapor',
+    kind: 'theme',
+    name: 'Vaporwave',
+    short: 'VW',
+    hue: 300,
+    description: 'Pembe ve turkuaz, 80\'ler bilgisayar estetiği, eğik yazılar.',
+    theme: {
+      id: 'theme-vapor',
+      name: 'Vaporwave',
+      hue: 300,
+      css: `.app { filter: saturate(1.4) hue-rotate(-10deg); }
+.x-title, .shell-title, .x-cat-label { font-style: italic; text-shadow: 2px 2px 0 #00e5ff, -1px -1px 0 #ff2bd6 !important; }
+.app::after { content: ''; position: fixed; left: 0; right: 0; bottom: 0; height: 38vh; pointer-events: none; z-index: 1; opacity: .35;
+  background: linear-gradient(transparent, rgba(255,43,214,.25)), repeating-linear-gradient(90deg, rgba(0,229,255,.5) 0 1px, transparent 1px 6vw), repeating-linear-gradient(0deg, rgba(0,229,255,.5) 0 1px, transparent 1px 5vh);
+  transform: perspective(40vh) rotateX(55deg); transform-origin: bottom; }`
+    }
   },
   // ── Themes ──
   { id: 'theme-ocean', kind: 'theme', name: 'Okyanus', short: 'OK', hue: 190, description: 'Turkuaz dalgalar.', theme: { id: 'theme-ocean', name: 'Okyanus', hue: 188 } },

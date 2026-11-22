@@ -60,6 +60,8 @@ export interface Game {
   missing?: boolean
   meta: GameMeta
   lastLaunch?: { at: number; result: LaunchResult; message?: string }
+  /** Compatibility from the emulator's list (PS3 / PS4). */
+  compat?: GameCompat
   /** When game information was last looked up online. */
   infoCheckedAt?: number
   /** Screenshot URLs from the store page (PC games). */
@@ -116,6 +118,8 @@ export interface Settings {
   displayConfigured: Record<string, string>
   /** Last app version the user has seen the "What's new" notes for. */
   lastSeenVersion: string
+  /** Home screen layout. */
+  uiStyle: 'xmb' | 'aurora' | 'tiles' | 'shelf'
   /** Check GitHub Releases for a new version on start. */
   autoUpdate: boolean
   watchedFolders: WatchedFolder[]
@@ -261,6 +265,16 @@ export interface GameEmuOptions {
   shader?: 'none' | 'crt' | 'lcd' | 'smooth'
   /** Extra command line arguments appended for this game. */
   extraArgs?: string
+}
+
+/** Compatibility of a game in its emulator, from the emulator project's own list. */
+export interface GameCompat {
+  level: 'playable' | 'ingame' | 'menus' | 'boots' | 'nothing' | 'unknown'
+  label: string
+  source: string
+  url?: string
+  updated?: string
+  checkedAt: number
 }
 
 export interface UpdateState {

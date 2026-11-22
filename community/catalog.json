@@ -7,7 +7,11 @@
     "hue": 160,
     "author": "POLYMIRA community",
     "description": "Kuzey ışıkları yeşili.",
-    "theme": { "id": "community-aurora", "name": "Aurora", "hue": 158 }
+    "theme": {
+      "id": "community-aurora",
+      "name": "Aurora",
+      "hue": 158
+    }
   },
   {
     "id": "compact-menu",
@@ -17,7 +21,10 @@
     "hue": 30,
     "author": "POLYMIRA community",
     "description": "XMB satırlarını sıklaştırır, daha çok oyun görünür.",
-    "mod": { "css": "mods/compact-menu/style.css", "version": "1.0.0" }
+    "mod": {
+      "css": "mods/compact-menu/style.css",
+      "version": "1.0.0"
+    }
   },
   {
     "id": "no-glow",
@@ -27,6 +34,35 @@
     "hue": 220,
     "author": "POLYMIRA community",
     "description": "Seçili yazıların parlama efektini kapatır.",
-    "mod": { "css": "mods/no-glow/style.css", "version": "1.0.0" }
+    "mod": {
+      "css": "mods/no-glow/style.css",
+      "version": "1.0.0"
+    }
+  },
+  {
+    "id": "large-text",
+    "kind": "mod",
+    "name": "Büyük yazı",
+    "short": "BY",
+    "hue": 45,
+    "author": "POLYMIRA community",
+    "description": "Başlıklar ve açıklamalar büyür; odanın öbür ucundaki TV için.",
+    "mod": {
+      "css": "mods/large-text/style.css",
+      "version": "1.0.0"
+    }
+  },
+  {
+    "id": "clean-screen",
+    "kind": "mod",
+    "name": "Temiz ekran",
+    "short": "TE",
+    "hue": 190,
+    "author": "POLYMIRA community",
+    "description": "Saati, kumanda sayacını ve tuş ipuçlarını gizler.",
+    "mod": {
+      "css": "mods/clean-screen/style.css",
+      "version": "1.0.0"
+    }
   }
 ]

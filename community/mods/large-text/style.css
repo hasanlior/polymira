@@ -1,0 +1,6 @@
+/* Large text: bigger titles and descriptions everywhere, for TVs across the room. */
+.x-item .x-title { font-size: calc(2.8 * var(--u)) !important; }
+.x-item.sel .x-title { font-size: calc(3.6 * var(--u)) !important; }
+.x-sub, .shell-sub, .detail-desc { font-size: calc(2.1 * var(--u)) !important; }
+.x-cat-label, .tab, .rail-item { font-size: calc(2.2 * var(--u)) !important; }
+.x-hints { font-size: calc(1.9 * var(--u)) !important; }

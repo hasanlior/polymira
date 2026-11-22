@@ -139,7 +139,7 @@ export function Store({
         glyph: 'palette',
         author: i.author,
         description: i.description,
-        details: ['Arka plan ve renk teması'],
+        details: [i.theme?.uiStyle ? 'Arayüz stili: ana ekranın düzenini değiştirir' : i.theme?.css ? 'Görünüm teması: renkleri ve yazı stilini değiştirir' : 'Arka plan ve renk teması'],
         status: active ? 'Kullanılıyor' : inst ? 'Yüklü' : 'Ücretsiz',
         installed: inst,
         actions: [
@@ -149,7 +149,7 @@ export function Store({
             run: () =>
               ctx.run(async () => {
                 if (!inst) await window.bridge.invoke('store:install', i.id)
-                await window.bridge.invoke('settings:set', { theme: i.id })
+                await window.bridge.invoke('settings:set', i.theme?.uiStyle ? { theme: i.id, uiStyle: i.theme.uiStyle } : { theme: i.id })
               }, `${i.name} teması uygulandı.`)
           },
           ...(inst ? [{ label: 'Kaldır', icon: 'trash' as IconName, danger: true, run: () => ctx.run(() => window.bridge.invoke('store:uninstall', i.id), 'Tema kaldırıldı.') }] : [])

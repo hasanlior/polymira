@@ -25,6 +25,9 @@ export interface IpcContract {
   'emu:cancelDownload': (id: string) => void
   'game:launch': (id: string) => void
   'session:pause': (paused: boolean) => boolean
+  'session:cancelLaunch': () => void
+  /** PS button (guide) or Share + Options (combo) on a PlayStation controller. */
+  'pad:psMenu': (how: 'guide' | 'combo') => void
   'session:stop': () => void
   'session:screenshot': () => Screenshot | null
   'session:home': () => void
@@ -49,6 +52,7 @@ export interface IpcContract {
   'update:install': () => void
   'app:notes': () => { version: string; body: string }
   'game:info': (id: string, force?: boolean) => Game | null
+  'game:compat': (id: string) => import('./types').GameCompat | null
   'trophies:games': () => import('./types').TrophyGame[]
   'trophies:list': (key: string) => import('./types').Trophy[]
   'library:setEmulator': (id: string, runner: string | null, options?: import('./types').GameEmuOptions) => void
@@ -86,6 +90,8 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'emu:cancelDownload',
   'game:launch',
   'session:pause',
+  'session:cancelLaunch',
+  'pad:psMenu',
   'session:stop',
   'session:screenshot',
   'session:home',
@@ -110,6 +116,7 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'update:install',
   'app:notes',
   'game:info',
+  'game:compat',
   'trophies:games',
   'trophies:list',
   'library:setEmulator',
@@ -132,12 +139,14 @@ export interface IpcEvents {
   /** Shutdown sequence: what is happening right now; `done` when the app is about to close. */
   shutdown: { text: string; done?: boolean }
   notice: import('./types').Notice
+  /** A launcher-started game could not be followed (or has no install folder). */
+  'launch:ended': string
   /** The console window gained or lost OS focus. */
   'window:focus': boolean
 }
 
 export type IpcEvent = keyof IpcEvents
-export const IPC_EVENTS: IpcEvent[] = ['state', 'toast', 'overlay:opened', 'progress', 'shutdown', 'window:focus', 'notice']
+export const IPC_EVENTS: IpcEvent[] = ['state', 'toast', 'overlay:opened', 'progress', 'shutdown', 'window:focus', 'notice', 'launch:ended']
 
 /** Custom protocol used to serve covers and screenshots to the renderer. */
 export const MEDIA_SCHEME = 'app-media'

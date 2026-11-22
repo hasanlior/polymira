@@ -1,0 +1,2 @@
+/* Clean screen: hides the clock, the controller counter and the button hints. */
+.status, .x-hints { display: none !important; }

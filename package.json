@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "dist": "electron-vite build && electron-builder --win && node scripts/shortcut.cjs dist",
     "vmp:sign": "python -m castlabs_evs.vmp sign-pkg node_modules/electron/dist",
-    "postbuild": "node scripts/shortcut.cjs"
+    "postbuild": "node scripts/shortcut.cjs",
+    "i18n:check": "node scripts/i18n-check.cjs"
   },
   "dependencies": {
     "koffi": "2.9.2"

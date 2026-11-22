@@ -20,7 +20,7 @@ const BAR_Y = 24 // category row top (u)
 const SEL_Y = 37 // selected item row (u)
 const WINDOW = 9 // rows rendered above/below the selection
 
-function ItemIcon({ item, big }: { item: XItem; big?: boolean }) {
+export function ItemIcon({ item, big }: { item: XItem; big?: boolean }) {
   if (item.tile) {
     return (
       <div className={`x-icon app-tile ${big ? 'big' : ''}`} style={{ ['--h' as string]: item.hue ?? 210 }}>

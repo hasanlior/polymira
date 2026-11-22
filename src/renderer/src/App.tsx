@@ -4,11 +4,13 @@ import type { AppState, Game, Toast } from '@shared/types'
 import { call, coverUrl, downloadLine, drmInConsole, formatEta, useAppState } from './api'
 import { WaveBackground } from './background'
 import { Icon } from './icons'
+import { Hint } from './glyphs'
 import { input, useInput } from './input'
 import { allThemes, buildMenu, type BrowseRequest, type MenuCtx, type OptItem } from './menu'
 import { BUILTIN_CATALOG, type StoreItem } from '@shared/catalog'
 import { configureSound, sfx } from './sound'
 import { Xmb, type XmbHandle } from './components/Xmb'
+import { CardShell } from './components/CardShell'
 import { ConfirmDialog, FileBrowser, OptionsPanel, Toasts } from './components/Modals'
 import { GameDetail, Gallery, Screenshots } from './components/GameViews'
 import { Setup } from './components/Setup'
@@ -22,6 +24,7 @@ import { StatsScreen } from './components/Stats'
 import { TrophyScreen } from './components/Trophies'
 import { WhatsNew } from './components/WhatsNew'
 import { applyLanguage, locale } from './i18n'
+import { startPsHid } from './psHid'
 
 type Modal =
   | { type: 'detail'; gameId: string }
@@ -107,13 +110,26 @@ function PlayingCurtain({ game }: { game: Game | undefined }) {
   )
 }
 
-function LaunchSplash({ game }: { game: Game }) {
-  useInput(() => true) // swallow input while the game starts
+const VIA: Record<string, string> = { steam: 'Steam', epic: 'Epic Games', ubisoft: 'Ubisoft Connect', ea: 'EA app', battlenet: 'Battle.net', riot: 'Riot Client', xbox: 'Xbox' }
+
+function LaunchSplash({ game, onCancel }: { game: Game; onCancel: () => void }) {
+  // Back cancels waiting for a launcher; everything else is swallowed while the game starts.
+  useInput((a) => {
+    if (a === 'back') onCancel()
+    return true
+  })
+  const via = game.kind === 'uri' ? VIA[game.meta.source ?? ''] : undefined
   return (
     <div className="modal-layer center launch">
       {game.hasCover && <img className="launch-cover" src={coverUrl(game.id, game.coverRev)} alt="" />}
       <div className="launch-title">{game.title}</div>
       <div className="launch-spinner" />
+      {via && <div className="launch-via">{`${via} üzerinden başlatılıyor…`}</div>}
+      {via && (
+        <div className="launch-hint">
+          <Hint action="back">İptal</Hint>
+        </div>
+      )}
     </div>
   )
 }
@@ -139,6 +155,7 @@ export function App() {
   const keyRef = useRef(1)
   const [focused, setFocused] = useState(() => document.hasFocus())
   useEffect(() => window.bridge.on('window:focus', setFocused), [])
+  useEffect(() => window.bridge.on('launch:ended', (id) => setLaunching((cur) => (cur?.id === id ? null : cur))), [])
 
   // Background
   useEffect(() => {
@@ -156,6 +173,9 @@ export function App() {
   }, [])
 
   // Input + controller notifications
+  // PS button over HID: works while a game has focus (XInput cannot see Sony controllers).
+  useEffect(() => startPsHid((how) => void call('pad:psMenu', how)), [])
+
   useEffect(() => {
     input.start()
     const refresh = () => setPads(input.connectedPads().map((p) => p.id))
@@ -253,8 +273,9 @@ export function App() {
         setLaunching(g)
         call('game:launch', gameId)
           .then(() => {
-            // Window is hidden by the main process; keep the splash until then.
-            setTimeout(() => setLaunching(null), 1500)
+            // Launcher games keep the splash until their process is found (or the wait ends).
+            if (g.kind === 'uri') setTimeout(() => setLaunching((cur) => (cur?.id === g.id ? null : cur)), 125000)
+            else setTimeout(() => setLaunching(null), 1500)
           })
           .catch((err: Error) => {
             setLaunching(null)
@@ -307,7 +328,11 @@ export function App() {
           {state.settings.setupDone && (
             <>
               <Clock state={state} pads={pads.length} />
-              <Xmb cats={cats} handle={xmbHandle} onFocus={onFocusHue} />
+              {state.settings.uiStyle && state.settings.uiStyle !== 'xmb' ? (
+                <CardShell key={state.settings.uiStyle} variant={state.settings.uiStyle} cats={cats} handle={xmbHandle} onFocus={onFocusHue} />
+              ) : (
+                <Xmb cats={cats} handle={xmbHandle} onFocus={onFocusHue} />
+              )}
             </>
           )}
           {modals.map((m) => {
@@ -365,7 +390,16 @@ export function App() {
             }
           })}
           {!state.settings.setupDone && <Setup mode="setup" ctx={ctx} onClose={() => {}} />}
-          {launching && <LaunchSplash game={launching} />}
+          {launching && (
+            <LaunchSplash
+              game={launching}
+              onCancel={() => {
+                sfx('back')
+                setLaunching(null)
+                void call('session:cancelLaunch')
+              }}
+            />
+          )}
         </>
       )}
       {!state && <div className="boot">{BRAND.name}</div>}

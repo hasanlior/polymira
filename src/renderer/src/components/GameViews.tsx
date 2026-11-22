@@ -41,6 +41,14 @@ function compatibility(game: Game, ctx: MenuCtx): { text: string; tone: 'ok' | '
   return { text: `Henüz denenmedi · Platform: ${SUPPORT_LABEL[p.support]}`, tone: p.support === 'stable' ? 'ok' : 'warn' }
 }
 
+const COMPAT_LABEL: Record<string, string> = {
+  playable: 'Oynanabilir',
+  ingame: 'Oyun içi (sorunlu)',
+  menus: 'Menülere kadar',
+  boots: 'Açılıyor, oynanmıyor',
+  nothing: 'Açılmıyor'
+}
+
 // ── Game detail screen ───────────────────────────────────────────────
 
 export function GameDetail({ gameId, ctx, onClose }: { gameId: string; ctx: MenuCtx; onClose: () => void }) {
@@ -64,6 +72,7 @@ export function GameDetail({ gameId, ctx, onClose }: { gameId: string; ctx: Menu
     void call('game:info', gameId)
       .catch(() => null)
       .finally(() => setLoadingInfo(false))
+    void call('game:compat', gameId).catch(() => null)
     void call('trophies:games')
       .then((list) => setTrophy(list.find((t) => t.gameId === gameId) ?? null))
       .catch(() => {})
@@ -134,6 +143,12 @@ export function GameDetail({ gameId, ctx, onClose }: { gameId: string; ctx: Menu
             <span className="dot" />
             {compat.text}
           </div>
+          {game.compat && (
+            <div className={`compat ${game.compat.level === 'playable' ? 'ok' : game.compat.level === 'ingame' ? 'warn' : 'bad'}`}>
+              <span className="dot" />
+              {`${game.compat.source} uyumluluğu: ${COMPAT_LABEL[game.compat.level] ?? game.compat.label}${game.compat.updated ? ` · ${game.compat.updated}` : ''}`}
+            </div>
+          )}
           {m.description ? <p className="detail-desc">{m.description}</p> : loadingInfo ? <p className="detail-desc dim">Oyun bilgisi aranıyor…</p> : null}
           <div className="facts">
             {facts

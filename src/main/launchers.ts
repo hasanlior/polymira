@@ -464,6 +464,13 @@ export async function findRiotGames(): Promise<Candidate[]> {
 }
 
 /** Path of the Riot Client, used to start Riot games. */
+/** Steam client executable (to start Steam minimised instead of showing its window). */
+export async function steamExePath(): Promise<string | null> {
+  const reg = await regQuery('HKCU\\Software\\Valve\\Steam')
+  const exe = regValue(reg, 'SteamExe')?.replace(/\//g, '\\')
+  return exe && fs.existsSync(exe) ? exe : null
+}
+
 export function riotClientPath(): string | null {
   const programData = process.env.ProgramData ?? 'C:\\ProgramData'
   const cfg = readJson<{ rc_default?: string; rc_live?: string }>(path.join(programData, 'Riot Games', 'RiotClientInstalls.json'))

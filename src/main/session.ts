@@ -80,11 +80,18 @@ export class SessionManager extends EventEmitter {
    * running from the game's install folder and track that one, so the in-game menu,
    * pausing, game mode and play time work for them too.
    */
+  private attachCancelled = false
+  /** Stops waiting for a launcher-started game (the user went back). */
+  cancelAttach(): void {
+    this.attachCancelled = true
+  }
+
   async attachByFolder(game: Game, installDir: string, timeoutMs = 120000): Promise<SessionInfo | null> {
     if (this.cur) throw new Error('Zaten çalışan bir oyun var.')
+    this.attachCancelled = false
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      if (this.cur) return null
+      if (this.cur || this.attachCancelled) return null
       const pid = findGameProcess(installDir)
       if (pid) {
         const info: SessionInfo = { gameId: game.id, pid, startedAt: Date.now(), paused: false, pausedMs: 0 }
