@@ -54,6 +54,10 @@ POLYMIRA updates itself from GitHub Releases.
 - **Trophies** — Steam achievements read from Steam's own files; RetroAchievements for emulated games. Unlocks pop up while you play.
 - **Play statistics** — last 7 days chart, weekly and total time, most played games.
 
+**POLYMIRA Orbis — our own PS4 core (experimental)**
+- Orbis reads PS4 executables, lists the system functions a game needs and shows how many of them it already implements (**Orbis analysis** on PS4 / PS5 games).
+- It loads and starts PS4-format executables, binding system calls to its own native implementations. Commercial games do not run yet; see [emu/orbis](emu/orbis/README.md) for the roadmap.
+
 **Emulation that just works**
 - **One-click emulator downloads** from official sources (RetroArch with cores, DuckStation, PCSX2, PPSSPP, RPCS3, Vita3K, shadPS4, xemu, Xenia, Cemu, melonDS, Azahar, Flycast) — in the background, with progress and time left.
 - **Automatic controller setup** — controller settings are written into the emulator before the game starts, so nobody has to open the emulator.
@@ -109,7 +113,7 @@ npm run typecheck  # type check
 npm run dist       # installer + portable exe in release/
 ```
 
-Built with Electron (castlabs build with Widevine), React and TypeScript.
+Built with Electron (castlabs build with Widevine), React and TypeScript. POLYMIRA Orbis is written in Rust (`emu/orbis`); `npm run dist` builds it when Rust is installed.
 
 ## Known limitations
 

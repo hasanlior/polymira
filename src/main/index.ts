@@ -24,6 +24,7 @@ import { drmStatus, initDrm } from './drm'
 import { recordSession, playStats } from './stats'
 import { fetchGameInfo } from './gameinfo'
 import { fetchCompat } from './compat'
+import { analyzeGame, orbisSelftest, tryRunGame } from './orbis'
 import { trophyGames, trophyList, watchTrophies } from './achievements'
 import { createSocket } from 'dgram'
 import { RETROARCH_CMD_PORT } from './emulators'
@@ -836,6 +837,17 @@ const handlers: Handlers = {
     }
     return c
   },
+  'orbis:analyze': (id) => {
+    const g = store.games.find((x) => x.id === id)
+    if (!g) throw new Error('Oyun bulunamadı.')
+    return analyzeGame(g)
+  },
+  'orbis:run': (id) => {
+    const g = store.games.find((x) => x.id === id)
+    if (!g) throw new Error('Oyun bulunamadı.')
+    return tryRunGame(g)
+  },
+  'orbis:selftest': () => orbisSelftest(),
   'trophies:games': () => trophyGames(),
   'trophies:list': (key) => trophyList(key),
   'library:setEmulator': (id, runner, options) => {

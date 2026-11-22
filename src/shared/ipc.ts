@@ -53,6 +53,9 @@ export interface IpcContract {
   'app:notes': () => { version: string; body: string }
   'game:info': (id: string, force?: boolean) => Game | null
   'game:compat': (id: string) => import('./types').GameCompat | null
+  'orbis:analyze': (id: string) => import('./types').OrbisReport
+  'orbis:run': (id: string) => { code: number; log: string }
+  'orbis:selftest': () => { code: number; log: string }
   'trophies:games': () => import('./types').TrophyGame[]
   'trophies:list': (key: string) => import('./types').Trophy[]
   'library:setEmulator': (id: string, runner: string | null, options?: import('./types').GameEmuOptions) => void
@@ -117,6 +120,9 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'app:notes',
   'game:info',
   'game:compat',
+  'orbis:analyze',
+  'orbis:run',
+  'orbis:selftest',
   'trophies:games',
   'trophies:list',
   'library:setEmulator',

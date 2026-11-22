@@ -277,6 +277,23 @@ export interface GameCompat {
   checkedAt: number
 }
 
+/** Output of `orbis analyze --json`. */
+export interface OrbisReport {
+  file: string
+  container: string
+  kind: string
+  entry: string
+  segments: number
+  uses_tls: boolean
+  has_procparam: boolean
+  modules: string[]
+  libraries: { name: string; functions: number; implemented: number }[]
+  imports: number
+  implemented: number
+  readiness: number
+  missing_examples: string[]
+}
+
 export interface UpdateState {
   status: 'idle' | 'disabled' | 'checking' | 'none' | 'downloading' | 'ready' | 'error'
   version?: string

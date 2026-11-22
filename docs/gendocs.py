@@ -5,7 +5,7 @@ ROOT = 'docs/docs'
 GROUPS = [
     ('Getting started', ['index', 'install', 'first-run']),
     ('Using POLYMIRA', ['library', 'controllers', 'in-game-menu', 'apps', 'store']),
-    ('Emulation', ['emulators', 'saves', 'trophies']),
+    ('Emulation', ['emulators', 'orbis', 'saves', 'trophies']),
     ('Reference', ['settings', 'troubleshooting', 'building']),
 ]
 
@@ -180,6 +180,21 @@ P['emulators'] = ('Emulators', 'Downloading, configuring and choosing emulators.
 <p>If you change controls inside an emulator, POLYMIRA keeps your changes. <b>Re-apply controller settings</b> writes the defaults again.</p>
 <h2 id="per-game">Per-game settings</h2>
 <p>A game's options contain <b>Emulator settings (this game)</b>: the emulator to use, a video filter for RetroArch games (CRT, LCD grid, sharp smoothing) and extra command line arguments.</p>
+""")
+
+P['orbis'] = ('POLYMIRA Orbis', 'Our own experimental PS4 core.', """
+<div class="note warn"><p>Orbis is at an early stage and does not run commercial games yet. Use shadPS4 to play PS4 games today.</p></div>
+<p>PS4 and PC share the x86-64 instruction set, so a game's own code can run directly on the PC. What has to be emulated is the system around it: the PS4 kernel and libraries for files, threads, memory, video, audio and controllers. Orbis loads a game's executable and connects each system call to its own implementation.</p>
+<h2 id="analysis">Orbis analysis</h2>
+<p>For a PS4 or PS5 game, open its options and choose <b>Orbis analysis</b>. Orbis reads the game's <code>eboot.bin</code> and lists the system libraries and functions it uses, with how many Orbis already implements. This shows exactly what has to be built for that game.</p>
+<h2 id="try">Try with Orbis</h2>
+<p><b>Try with Orbis</b> loads and starts the executable and shows what it printed, including every system function it reached that is not implemented yet.</p>
+<h2 id="selftest">Self-test</h2>
+<p><b>Settings → Emulation Settings → POLYMIRA Orbis</b> runs a small program built in the PS4 format: it prints a line through a PS4 system call, reaches one unimplemented function and exits normally.</p>
+<h2 id="files">Your files</h2>
+<p>Orbis runs only files you provide. It contains no Sony code, keys or firmware and cannot decrypt retail games; executables must be decrypted on your own console.</p>
+<h2 id="roadmap">Roadmap</h2>
+<ol><li>Thread-local storage, memory and threads: PS4 homebrew reaches <code>main</code>.</li><li>Video out, controllers, audio: homebrew samples run.</li><li>GPU commands on Vulkan.</li><li>Commercial games, one system library at a time.</li></ol>
 """)
 
 P['saves'] = ('Save data', 'Backups and restores for every emulator.', """

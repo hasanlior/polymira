@@ -73,6 +73,7 @@ export interface MenuCtx {
   openRemap: () => void
   openStats: () => void
   openWhatsNew: () => void
+  openOrbis: (mode: 'analyze' | 'run' | 'selftest', gameId?: string) => void
   openTrophies: (key?: string) => void
   keyboard: (title: string, initial: string, onDone: (text: string) => void) => void
   openStore: (tab?: 'featured' | 'apps' | 'emulators' | 'themes' | 'mods' | 'downloads') => void
@@ -204,6 +205,12 @@ export function gameOptions(g: Game, ctx: MenuCtx): OptItem[] {
     },
     { label: 'Ekran görüntüleri', icon: 'camera', onSelect: () => ctx.openScreenshots(g.id) },
     ...(current && current.runners.length ? [emulatorOptions(g, ctx)] : []),
+    ...(g.platformId === 'ps4' || g.platformId === 'ps5'
+      ? [
+          { label: 'Orbis analizi (deneysel)', icon: 'chip' as IconName, onSelect: () => ctx.openOrbis('analyze', g.id) },
+          { label: 'Orbis ile dene (deneysel)', icon: 'play' as IconName, onSelect: () => ctx.openOrbis('run', g.id) }
+        ]
+      : []),
     {
       label: 'Kapak görseli seç',
       icon: 'photo',
@@ -754,6 +761,13 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     icon: 'chip',
     value: `${configured}/${EMULATORS.length}`,
     children: [
+      {
+        id: 'set:emu:orbis',
+        title: 'POLYMIRA Orbis (deneysel)',
+        icon: 'chip',
+        subtitle: 'Kendi PS4 çekirdeğimiz: oyun dosyalarını okur, sistem çağrılarını bağlar. Kendi testini çalıştır.',
+        onActivate: () => ctx.openOrbis('selftest')
+      },
       {
         id: 'set:emu:detect',
         title: 'Emülatörleri otomatik bul',

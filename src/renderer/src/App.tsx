@@ -23,6 +23,7 @@ import { NoticeStack } from './components/Notices'
 import { StatsScreen } from './components/Stats'
 import { TrophyScreen } from './components/Trophies'
 import { WhatsNew } from './components/WhatsNew'
+import { OrbisView } from './components/OrbisView'
 import { applyLanguage, locale } from './i18n'
 import { startPsHid } from './psHid'
 
@@ -38,6 +39,7 @@ type Modal =
   | { type: 'remap' }
   | { type: 'stats' }
   | { type: 'whatsnew' }
+  | { type: 'orbis'; mode: 'analyze' | 'run' | 'selftest'; gameId?: string }
   | { type: 'trophies'; key2?: string }
   | { type: 'web'; item: StoreItem; gameId?: string }
   | { type: 'keyboard'; title: string; initial: string; onDone: (text: string) => void }
@@ -244,6 +246,7 @@ export function App() {
       openRemap: () => openModal({ type: 'remap' }),
       openStats: () => openModal({ type: 'stats' }),
       openWhatsNew: () => openModal({ type: 'whatsnew' }),
+      openOrbis: (mode, gameId) => openModal({ type: 'orbis', mode, gameId }),
       openTrophies: (key) => openModal({ type: 'trophies', key2: key }),
       keyboard: (title, initial, onDone) => openModal({ type: 'keyboard', title, initial, onDone }),
       setSettings: (patch) => void call('settings:set', patch),
@@ -379,6 +382,8 @@ export function App() {
                 )
               case 'trophies':
                 return <TrophyScreen key={m.key} initialKey={m.key2} onClose={close} />
+              case 'orbis':
+                return <OrbisView key={m.key} mode={m.mode} gameId={m.gameId} onClose={close} />
               case 'whatsnew':
                 return <WhatsNew key={m.key} onClose={close} />
               case 'stats':
