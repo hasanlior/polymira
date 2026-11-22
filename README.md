@@ -171,6 +171,15 @@ Sonra `npm run dist` paketlenen uygulamayı otomatik imzalar (`scripts/vmp-sign.
 
 ## Lisans
 
-MIT — bkz. [LICENSE](LICENSE).
+**PolyForm Strict 1.0.0** — bkz. [LICENSE](LICENSE). Kaynak kodu herkes görebilir (source-available), ama bu klasik bir "açık kaynak" lisansı değildir:
+
+- ✅ POLYMIRA'yı indirip ticari olmayan amaçlarla **kullanabilirsin**.
+- ✅ Kodu okuyabilir, hata bildirebilir, öneride bulunabilirsin.
+- ❌ Kodu veya uygulamayı **kopyalayıp dağıtamaz**, değiştirilmiş sürümünü ya da kodundan türetilmiş yeni bir proje yayınlayamazsın.
+- ❌ Ticari kullanım için izin gerekir.
+
+Katkılar (pull request, mağaza öğeleri) projeye, bu lisans altında yayımlanmak üzere verilmiş sayılır.
+
+*English:* source-available under the PolyForm Strict License 1.0.0. You may use POLYMIRA for noncommercial purposes; you may not redistribute it or publish modified versions or works based on its code.
 
 Bu proje Sony, Microsoft, Nintendo veya Sega ile bağlantılı değildir. Platform adları sahiplerinin ticari markalarıdır ve yalnızca uyumluluğu belirtmek için kullanılır.

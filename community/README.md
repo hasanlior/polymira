@@ -30,3 +30,9 @@ Herkes pull request ile tema, mod veya uygulama ekleyebilir.
 - Modlar yalnızca CSS'tir, kod çalıştıramaz. 512 KB'ı geçmesin.
 - Mod CSS yolu `catalog.json`'a göre görelidir (`mods/<id>/` klasörüne koy) ya da tam bir `https://` adresidir.
 - Telifli logo, oyun, BIOS veya firmware eklenmez.
+
+## License of contributions / Katkıların lisansı
+
+By sending a pull request you agree that your contribution is published as part of POLYMIRA under its license (PolyForm Strict 1.0.0).
+
+Pull request gönderen herkes katkısının POLYMIRA'nın bir parçası olarak, projenin lisansıyla (PolyForm Strict 1.0.0) yayımlanmasını kabul eder.

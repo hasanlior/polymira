@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Universal gaming console experience for PC: a controller-first, XMB-style frontend that organizes and launches games across platforms.",
   "main": "./out/main/index.js",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "scripts": {
     "dev": "electron-vite dev",
@@ -64,6 +64,12 @@
       "shortcutName": "POLYMIRA",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico"
-    }
+    },
+    "copyright": "Copyright (c) 2026 hasanlior"
+  },
+  "author": "hasanlior",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hasanlior/polymira.git"
   }
 }
