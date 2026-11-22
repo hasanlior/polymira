@@ -4,277 +4,546 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>POLYMIRA — Every console. One universe.</title>
-  <meta name="description" content="A controller-first, PS3-style console frontend that turns your Windows PC into a game console. Steam, Epic, Xbox app and emulators in one place." />
+  <meta name="description" content="POLYMIRA turns a Windows PC into a game console. Steam, Epic, Xbox app and emulator games in one controller-first, PS3-style interface." />
   <meta property="og:title" content="POLYMIRA — Every console. One universe." />
   <meta property="og:description" content="Turn your Windows PC into a game console you control from the couch." />
   <meta property="og:image" content="https://hasanlior.github.io/polymira/assets/icon.png" />
-  <meta name="theme-color" content="#0b0e26" />
+  <meta name="theme-color" content="#05060f" />
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: #070a1f;
-      --bg2: #0e1336;
-      --card: rgba(255, 255, 255, 0.045);
-      --line: rgba(255, 255, 255, 0.1);
-      --fg: #eef0ff;
-      --dim: #a6abd0;
+      --bg: #05060f;
+      --panel: #0b0d1c;
+      --line: rgba(255, 255, 255, 0.08);
+      --line2: rgba(255, 255, 255, 0.14);
+      --fg: #f3f4fb;
+      --dim: #9a9db4;
+      --faint: #62657c;
+      --accent: #8b7bff;
       --cyan: #36d6ff;
-      --violet: #7a5cff;
       --pink: #ff4fb3;
-      --grad: linear-gradient(120deg, var(--cyan), var(--violet) 55%, var(--pink));
+      --radius: 18px;
     }
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
     body {
       margin: 0;
-      font-family: Inter, 'Segoe UI', system-ui, sans-serif;
       background: var(--bg);
       color: var(--fg);
-      line-height: 1.6;
+      font: 400 16px/1.65 Inter, 'Segoe UI', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
       overflow-x: hidden;
     }
-    a { color: inherit; }
-    .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
+    a { color: inherit; text-decoration: none; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+    .display { font-family: 'Space Grotesk', Inter, sans-serif; letter-spacing: -0.02em; }
 
-    /* Background glow */
-    .glow {
-      position: fixed; inset: -20vmax; z-index: -1; pointer-events: none;
-      background:
-        radial-gradient(40vmax 30vmax at 20% 10%, rgba(122, 92, 255, 0.28), transparent 70%),
-        radial-gradient(35vmax 25vmax at 85% 30%, rgba(54, 214, 255, 0.18), transparent 70%),
-        radial-gradient(40vmax 30vmax at 60% 100%, rgba(255, 79, 179, 0.16), transparent 70%);
+    /* ── Nav ─────────────────────────────── */
+    nav {
+      position: sticky; top: 0; z-index: 50;
+      backdrop-filter: saturate(140%) blur(14px);
+      background: rgba(5, 6, 15, 0.72);
+      border-bottom: 1px solid var(--line);
     }
+    nav .wrap { display: flex; align-items: center; height: 64px; gap: 28px; }
+    .brand { display: flex; align-items: center; gap: 10px; font: 600 17px 'Space Grotesk', sans-serif; letter-spacing: 0.12em; }
+    .brand img { width: 28px; height: 28px; }
+    .navlinks { display: flex; gap: 26px; margin-left: auto; margin-right: 4px; font-size: 14px; color: var(--dim); }
+    .navlinks a:hover { color: var(--fg); }
+    .navstar { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 6px 0 14px; border: 1px solid var(--line2); border-radius: 999px; font-size: 14px; color: var(--fg); }
+    .navstar:hover { border-color: rgba(255, 210, 90, .6); }
+    .navstar svg { width: 15px; height: 15px; color: #ffd25a; }
+    .navstar b { font-weight: 600; font-size: 13px; padding: 3px 9px; border-radius: 999px; background: rgba(255, 255, 255, .08); }
+    .count { font-weight: 600; font-size: 13px; padding: 3px 10px; border-radius: 999px; background: rgba(255, 255, 255, .1); margin-left: 2px; }
+    .btn-secondary svg { color: #ffd25a; }
+    .navcta { font-size: 14px; font-weight: 600; padding: 8px 16px; border-radius: 999px; background: var(--fg); color: #0a0b14; }
 
-    nav { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
-    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: 0.08em; text-decoration: none; }
-    .brand img { width: 34px; height: 34px; }
-    .links { display: flex; gap: 22px; font-size: 15px; }
-    .links a { color: var(--dim); text-decoration: none; }
-    .links a:hover { color: var(--fg); }
-
-    .hero { text-align: center; padding: 70px 0 60px; }
-    .hero img.logo { width: 132px; height: 132px; filter: drop-shadow(0 20px 50px rgba(122, 92, 255, 0.45)); }
-    h1 { font-size: clamp(44px, 9vw, 88px); line-height: 1; margin: 26px 0 10px; font-weight: 800; letter-spacing: 0.04em; }
-    .tag {
-      font-size: clamp(20px, 3.2vw, 28px); font-weight: 600; margin: 0;
-      background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+    /* ── Hero ────────────────────────────── */
+    .hero { position: relative; padding: 96px 0 40px; text-align: center; }
+    .hero::before {
+      content: ''; position: absolute; left: 50%; top: -120px; width: 1100px; height: 700px; transform: translateX(-50%); z-index: -1;
+      background: radial-gradient(closest-side, rgba(139, 123, 255, 0.28), transparent 70%);
+      filter: blur(10px);
     }
-    .lead { color: var(--dim); font-size: 18px; max-width: 640px; margin: 18px auto 34px; }
-    .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim);
+      padding: 6px 14px 6px 8px; border: 1px solid var(--line2); border-radius: 999px; background: rgba(255, 255, 255, 0.03);
+    }
+    .eyebrow b { font-weight: 600; color: var(--fg); background: rgba(139, 123, 255, 0.25); padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+    h1 { font-size: clamp(44px, 7.4vw, 84px); line-height: 1.02; margin: 26px auto 22px; font-weight: 700; max-width: 900px; }
+    .grad { background: linear-gradient(100deg, #b9e9ff 0%, #a99bff 45%, #ff9fd6 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .lede { font-size: clamp(17px, 2vw, 20px); color: var(--dim); max-width: 660px; margin: 0 auto 36px; }
+    .ctas { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
     .btn {
-      display: inline-flex; align-items: center; gap: 10px; padding: 15px 26px; border-radius: 999px;
-      font-weight: 600; text-decoration: none; font-size: 16px; transition: transform 0.15s ease, box-shadow 0.15s ease;
+      display: inline-flex; align-items: center; gap: 10px; height: 52px; padding: 0 26px; border-radius: 999px;
+      font-weight: 600; font-size: 15px; transition: transform 0.15s, background 0.15s, border-color 0.15s;
     }
-    .btn:hover { transform: translateY(-2px); }
-    .btn.primary { background: var(--grad); color: #fff; box-shadow: 0 10px 40px rgba(122, 92, 255, 0.45); }
-    .btn.ghost { border: 1px solid var(--line); background: var(--card); }
-    .btn svg { width: 20px; height: 20px; }
-    .meta { color: var(--dim); font-size: 14px; margin-top: 16px; }
+    .btn:hover { transform: translateY(-1px); }
+    .btn svg { width: 18px; height: 18px; }
+    .btn-primary { background: var(--fg); color: #0a0b14; }
+    .btn-primary:hover { background: #fff; }
+    .btn-secondary { border: 1px solid var(--line2); color: var(--fg); }
+    .btn-secondary:hover { border-color: rgba(255, 255, 255, 0.35); }
+    .fine { margin-top: 16px; font-size: 13px; color: var(--faint); }
 
-    section { padding: 70px 0; }
-    h2 { font-size: clamp(28px, 4.5vw, 40px); margin: 0 0 10px; text-align: center; }
-    .sub { color: var(--dim); text-align: center; margin: 0 auto 44px; max-width: 620px; }
-
-    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
-    .card {
-      background: var(--card); border: 1px solid var(--line); border-radius: 20px; padding: 26px;
-      transition: border-color 0.2s ease, transform 0.2s ease;
+    /* ── Product frame + XMB mock ────────── */
+    .stage { margin: 64px auto 0; max-width: 1080px; perspective: 1600px; }
+    .tv {
+      border-radius: 22px; padding: 10px; background: linear-gradient(180deg, #23263a, #0f1020);
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 60px 120px -30px rgba(80, 60, 220, 0.45), 0 30px 60px -20px rgba(0, 0, 0, 0.8);
     }
-    .card:hover { border-color: rgba(122, 92, 255, 0.55); transform: translateY(-3px); }
-    .card .ic {
-      width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; margin-bottom: 14px;
-      background: linear-gradient(140deg, rgba(54, 214, 255, 0.25), rgba(255, 79, 179, 0.25));
+    .screen {
+      position: relative; aspect-ratio: 16 / 9; border-radius: 14px; overflow: hidden; container-type: inline-size;
+      background: radial-gradient(120% 90% at 50% 120%, #2a5aa8 0%, #12306a 38%, #08122e 70%, #040815 100%);
     }
-    .card .ic svg { width: 24px; height: 24px; stroke: #fff; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-    .card h3 { margin: 0 0 6px; font-size: 18px; }
-    .card p { margin: 0; color: var(--dim); font-size: 15px; }
+    .screen .waves { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .x-status { position: absolute; top: 5cqw; right: 5cqw; display: flex; gap: 2.2cqw; align-items: baseline; font-size: 1.5cqw; color: rgba(255,255,255,.75); }
+    .x-status b { font-size: 2.2cqw; color: #fff; font-weight: 500; }
+    .x-cats { position: absolute; top: 15cqw; left: 0; right: 0; height: 9cqw; }
+    .x-cat { position: absolute; top: 0; width: 7cqw; text-align: center; color: rgba(255,255,255,.55); }
+    .x-cat svg { width: 4.4cqw; height: 4.4cqw; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+    .x-cat.sel { color: #fff; filter: drop-shadow(0 0 0.8cqw rgba(255,255,255,.6)); }
+    .x-cat.sel svg { width: 5.6cqw; height: 5.6cqw; }
+    .x-cat span { display: block; font-size: 1.55cqw; margin-top: .3cqw; white-space: nowrap; }
+    .x-list { position: absolute; left: 24.5cqw; top: 26cqw; right: 6cqw; }
+    .x-item { display: flex; align-items: center; gap: 2cqw; height: 6.4cqw; color: rgba(255,255,255,.62); font-size: 1.9cqw; }
+    .x-item.sel { height: 10.5cqw; color: #fff; font-size: 2.6cqw; }
+    .x-item .cover { width: 4.6cqw; height: 4.6cqw; border-radius: .6cqw; flex-shrink: 0; box-shadow: 0 .4cqw 1.2cqw rgba(0,0,0,.4); display: grid; place-items: center; font: 700 1.4cqw 'Space Grotesk'; color: rgba(255,255,255,.9); }
+    .x-item.sel .cover { width: 8cqw; height: 8cqw; font-size: 2.4cqw; box-shadow: 0 0 0 .2cqw rgba(255,255,255,.7), 0 .8cqw 2.4cqw rgba(0,0,0,.5); }
+    .x-item small { display: block; font-size: 1.35cqw; color: rgba(255,255,255,.65); margin-top: .2cqw; }
+    .x-item.sel .title { text-shadow: 0 0 1.2cqw rgba(255,255,255,.35); }
+    .x-hints { position: absolute; right: 5cqw; bottom: 3.5cqw; display: flex; gap: 2.4cqw; font-size: 1.35cqw; color: rgba(255,255,255,.75); }
+    .x-hints i { display: inline-grid; place-items: center; width: 2.1cqw; height: 2.1cqw; border-radius: 50%; font: 700 1.1cqw Inter; font-style: normal; margin-right: .6cqw; vertical-align: -.35cqw; }
+    .c1 { background: linear-gradient(145deg, #ff8a3d, #c2185b); }
+    .c2 { background: linear-gradient(145deg, #40c4ff, #3949ab); }
+    .c3 { background: linear-gradient(145deg, #66bb6a, #00695c); }
+    .c4 { background: linear-gradient(145deg, #ab47bc, #4527a0); }
+    .c5 { background: linear-gradient(145deg, #ffd54f, #f57c00); }
+    .trophy-toast {
+      position: absolute; top: 9.5cqw; right: 5cqw; display: flex; gap: 1.2cqw; align-items: center; padding: 1cqw 1.4cqw; width: 30cqw;
+      border-radius: 1cqw; background: linear-gradient(160deg, rgba(36,42,78,.95), rgba(14,16,32,.95)); border: 1px solid rgba(255,255,255,.16);
+      box-shadow: 0 1cqw 3cqw rgba(0,0,0,.45); animation: toast 7s ease-in-out infinite;
+    }
+    .trophy-toast .ti { width: 4cqw; height: 4cqw; border-radius: .7cqw; background: linear-gradient(160deg, #ffd479, #c98a1a); display: grid; place-items: center; }
+    .trophy-toast .ti svg { width: 2.4cqw; height: 2.4cqw; fill: #2a1800; }
+    .trophy-toast b { display: block; font-size: 1.5cqw; font-weight: 500; }
+    .trophy-toast span { font-size: 1.2cqw; color: rgba(255,255,255,.65); }
+    @keyframes toast { 0%, 12% { opacity: 0; transform: translateX(4cqw); } 18%, 62% { opacity: 1; transform: none; } 70%, 100% { opacity: 0; transform: translateX(3cqw); } }
 
-    .stores { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 6px; }
-    .pill { padding: 9px 16px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); font-size: 14px; color: var(--fg); }
+    /* ── Logos strip ─────────────────────── */
+    .strip { padding: 56px 0 24px; text-align: center; }
+    .strip p { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); margin: 0 0 22px; }
+    .strip ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 14px 40px; font: 600 18px 'Space Grotesk', sans-serif; color: #c9cbe0; opacity: .8; }
 
-    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 18px; overflow: hidden; }
-    th, td { text-align: left; padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 15px; vertical-align: top; }
-    th { color: var(--dim); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; }
-    tr:last-child td { border-bottom: 0; }
-    td:first-child { font-weight: 600; white-space: nowrap; }
-    .tbl { overflow-x: auto; }
+    /* ── Sections ────────────────────────── */
+    section { padding: 110px 0; }
+    .kicker { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); font-weight: 600; margin: 0 0 14px; }
+    h2 { font-size: clamp(32px, 4.4vw, 52px); line-height: 1.08; margin: 0 0 18px; font-weight: 700; }
+    .section-lede { color: var(--dim); font-size: 18px; max-width: 620px; margin: 0; }
+    .head { margin-bottom: 56px; }
 
-    .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; counter-reset: s; }
-    .step { position: relative; padding-top: 54px; }
-    .step::before {
-      counter-increment: s; content: counter(s); position: absolute; top: 22px; left: 26px;
-      font-weight: 800; font-size: 14px; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
-      background: var(--grad);
+    .row { display: grid; grid-template-columns: 1fr 1.15fr; gap: 64px; align-items: center; }
+    .row + .row { margin-top: 110px; }
+    .row.flip > :first-child { order: 2; }
+    .row h3 { font-size: clamp(26px, 3vw, 34px); line-height: 1.15; margin: 0 0 14px; font-weight: 700; }
+    .row p { color: var(--dim); margin: 0 0 22px; font-size: 17px; }
+    .ticks { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+    .ticks li { display: flex; gap: 12px; color: #cfd1e4; font-size: 15px; }
+    .ticks li::before { content: ''; flex-shrink: 0; width: 18px; height: 18px; margin-top: 3px; border-radius: 50%; background: rgba(139,123,255,.18) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b4a9ff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 12.5 4 4 8-9'/%3E%3C/svg%3E") center/12px no-repeat; }
+
+    .shot {
+      position: relative; border-radius: var(--radius); overflow: hidden; aspect-ratio: 4 / 3; container-type: inline-size;
+      border: 1px solid var(--line2); box-shadow: 0 40px 80px -40px rgba(0,0,0,.9);
     }
 
-    .note { color: var(--dim); font-size: 14px; text-align: center; margin-top: 26px; }
-    footer { border-top: 1px solid var(--line); padding: 34px 0 50px; color: var(--dim); font-size: 14px; text-align: center; }
-    footer a { color: var(--fg); }
+    /* In-game menu mock */
+    .game-bg { position: absolute; inset: 0; background:
+      linear-gradient(180deg, rgba(0,0,0,0) 40%, rgba(0,0,0,.55)),
+      radial-gradient(80% 60% at 30% 70%, #ff7a3c 0%, transparent 60%),
+      radial-gradient(60% 50% at 70% 30%, #6a3cff 0%, transparent 60%),
+      linear-gradient(160deg, #1b0f3a, #3a1450 50%, #120a25); filter: blur(1.6cqw) saturate(1.2); transform: scale(1.1); }
+    .ov { position: absolute; top: 0; bottom: 0; left: 0; width: 46cqw; background: rgba(8, 10, 22, .78); backdrop-filter: blur(8px); border-right: 1px solid rgba(255,255,255,.1); padding: 6cqw 4cqw; }
+    .ov .g { display: flex; gap: 2.4cqw; align-items: center; margin-bottom: 5cqw; }
+    .ov .g .cover { width: 9cqw; height: 9cqw; border-radius: 1.2cqw; }
+    .ov .g b { display: block; font-size: 3.2cqw; font-weight: 600; }
+    .ov .g span { font-size: 2.3cqw; color: rgba(255,255,255,.6); }
+    .ov .it { font-size: 2.8cqw; padding: 1.8cqw 2.4cqw; border-radius: 1.4cqw; color: rgba(255,255,255,.75); }
+    .ov .it.sel { background: rgba(255,255,255,.14); color: #fff; }
+    .perf { position: absolute; right: 5cqw; top: 6cqw; width: 36cqw; padding: 3cqw; border-radius: 2cqw; background: rgba(8,10,22,.72); border: 1px solid rgba(255,255,255,.1); }
+    .perf b { display: block; font-size: 2.6cqw; font-weight: 600; margin-bottom: 2cqw; }
+    .perf .m { font-size: 2.2cqw; color: rgba(255,255,255,.7); display: flex; justify-content: space-between; margin-top: 1.6cqw; }
+    .bar { height: .9cqw; border-radius: 1cqw; background: rgba(255,255,255,.12); margin-top: .8cqw; overflow: hidden; }
+    .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--cyan), var(--accent)); }
 
-    @media (max-width: 860px) {
-      .grid, .steps { grid-template-columns: 1fr; }
-      .links a:not(.gh) { display: none; }
-      .hero { padding-top: 40px; }
+    /* Library mock */
+    .lib { position: absolute; inset: 0; background: radial-gradient(120% 100% at 50% 120%, #1e4a92, #0a1638 60%, #050a1c); padding: 6cqw; }
+    .lib .t { font-size: 3cqw; font-weight: 600; margin-bottom: 4cqw; display: flex; justify-content: space-between; align-items: baseline; }
+    .lib .t span { font-size: 2.2cqw; color: rgba(255,255,255,.6); font-weight: 400; }
+    .lib .gridm { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2.4cqw; }
+    .lib .tile { aspect-ratio: 3 / 4; border-radius: 1.4cqw; position: relative; box-shadow: 0 1cqw 3cqw rgba(0,0,0,.4); }
+    .lib .tile::after { content: attr(data-src); position: absolute; left: 1.4cqw; bottom: 1.2cqw; font-size: 1.7cqw; font-weight: 600; padding: .4cqw 1cqw; border-radius: 1cqw; background: rgba(0,0,0,.45); }
+    .lib .tile.sel { outline: .5cqw solid #fff; outline-offset: .4cqw; }
+
+    /* Store mock */
+    .store { position: absolute; inset: 0; background: radial-gradient(ellipse at 15% 0%, rgba(90,70,200,.6), transparent 60%), radial-gradient(ellipse at 90% 100%, rgba(40,120,220,.45), transparent 60%), #0a0c1c; padding: 6cqw; }
+    .store .t { font-size: 3.4cqw; font-weight: 600; }
+    .tabs { display: flex; gap: 1.4cqw; margin: 3cqw 0 4cqw; }
+    .tabs span { font-size: 2.1cqw; padding: 1cqw 2.2cqw; border-radius: 3cqw; color: rgba(255,255,255,.65); }
+    .tabs span.on { background: #fff; color: #111; }
+    .sgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2.4cqw; }
+    .scard { border-radius: 2cqw; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.08); padding: 2.6cqw 1.6cqw; text-align: center; }
+    .scard.sel { background: rgba(255,255,255,.14); border-color: rgba(255,255,255,.7); }
+    .scard .ic { width: 9cqw; height: 9cqw; border-radius: 2cqw; margin: 0 auto 1.6cqw; }
+    .scard b { display: block; font-size: 2.1cqw; font-weight: 500; }
+    .scard span { font-size: 1.7cqw; color: rgba(255,255,255,.6); }
+    .scard .pb { height: .8cqw; border-radius: 1cqw; background: rgba(255,255,255,.12); margin: 1.2cqw 1cqw 0; overflow: hidden; }
+    .scard .pb i { display: block; height: 100%; width: 64%; background: linear-gradient(90deg, #7ab8ff, #b59bff); }
+
+    /* ── Feature grid ────────────────────── */
+    .fgrid { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+    .f { padding: 32px 30px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: rgba(255,255,255,.012); }
+    .f:nth-child(3n) { border-right: 0; }
+    .f:nth-last-child(-n+3) { border-bottom: 0; }
+    .f svg { width: 22px; height: 22px; stroke: var(--accent); fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; margin-bottom: 16px; }
+    .f h4 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+    .f p { margin: 0; color: var(--dim); font-size: 14.5px; }
+
+    /* ── Platforms ───────────────────────── */
+    .plat { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .pcard { border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; background: rgba(255,255,255,.015); }
+    .pcard h4 { margin: 0 0 10px; font: 600 18px 'Space Grotesk', sans-serif; }
+    .pcard p { margin: 0 0 14px; color: #cfd1e4; font-size: 15px; }
+    .pcard small { color: var(--faint); font-size: 13px; }
+    .badge { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; padding: 3px 8px; border-radius: 6px; margin-left: 8px; vertical-align: 2px; }
+    .b-stable { background: rgba(90, 220, 150, .14); color: #7de3ac; }
+    .b-exp { background: rgba(255, 200, 90, .14); color: #ffd27a; }
+
+    /* ── Steps ───────────────────────────── */
+    .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .stepc { border: 1px solid var(--line); border-radius: var(--radius); padding: 28px; }
+    .stepc .n { font: 600 14px 'Space Grotesk'; color: var(--accent); margin-bottom: 18px; display: block; }
+    .stepc h4 { margin: 0 0 8px; font-size: 19px; }
+    .stepc p { margin: 0; color: var(--dim); font-size: 15px; }
+
+    /* ── FAQ ─────────────────────────────── */
+    .faq { max-width: 820px; }
+    details { border-bottom: 1px solid var(--line); padding: 22px 0; }
+    summary { cursor: pointer; list-style: none; font-size: 18px; font-weight: 500; display: flex; justify-content: space-between; gap: 20px; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: '+'; color: var(--dim); font-size: 22px; line-height: 1; }
+    details[open] summary::after { content: '–'; }
+    details p { color: var(--dim); margin: 12px 0 0; font-size: 16px; }
+
+    /* ── Final CTA ───────────────────────── */
+    .final { text-align: center; border: 1px solid var(--line2); border-radius: 28px; padding: 80px 24px; position: relative; overflow: hidden;
+      background: radial-gradient(70% 120% at 50% 0%, rgba(139,123,255,.25), transparent 70%), var(--panel); }
+    .final img { width: 72px; height: 72px; margin-bottom: 20px; }
+    .final h2 { margin-bottom: 14px; }
+    .final p { color: var(--dim); margin: 0 auto 32px; max-width: 520px; font-size: 18px; }
+
+    footer { padding: 56px 0 64px; color: var(--faint); font-size: 14px; }
+    footer .wrap { display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+    footer a { color: var(--dim); }
+    footer a:hover { color: var(--fg); }
+
+    @media (max-width: 900px) {
+      .navlinks { display: none; }
+      .navstar span { display: none; }
+      .row, .row.flip { grid-template-columns: 1fr; gap: 36px; }
+      .row.flip > :first-child { order: 0; }
+      .fgrid, .plat, .steps { grid-template-columns: 1fr; }
+      .f { border-right: 0 !important; border-bottom: 1px solid var(--line) !important; }
+      .f:last-child { border-bottom: 0 !important; }
+      section { padding: 80px 0; }
+      .hero { padding-top: 64px; }
     }
+    @media (prefers-reduced-motion: reduce) { .trophy-toast { animation: none; } html { scroll-behavior: auto; } }
   </style>
 </head>
 <body>
-  <div class="glow" aria-hidden="true"></div>
-
-  <div class="wrap">
-    <nav>
+  <nav>
+    <div class="wrap">
       <a class="brand" href="#"><img src="assets/icon.svg" alt="" />POLYMIRA</a>
-      <div class="links">
+      <div class="navlinks">
+        <a href="#experience">Experience</a>
         <a href="#features">Features</a>
         <a href="#platforms">Platforms</a>
-        <a href="#start">Get started</a>
-        <a class="gh" href="https://github.com/hasanlior/polymira">GitHub</a>
+        <a href="#faq">FAQ</a>
       </div>
-    </nav>
+      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars">—</b></a>
+      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+    </div>
+  </nav>
 
-    <header class="hero">
-      <img class="logo" src="assets/icon.svg" alt="POLYMIRA logo" />
-      <h1>POLYMIRA</h1>
-      <p class="tag">Every console. One universe.</p>
-      <p class="lead">
-        Turn your Windows PC into a game console. Steam, Epic, Xbox app and emulator games in one PS3-style menu — played entirely with a controller, from the couch.
-      </p>
-      <div class="cta">
-        <a class="btn primary" id="dl" href="https://github.com/hasanlior/polymira/releases/latest">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
-          <span>Download for Windows</span>
+  <header class="hero">
+    <div class="wrap">
+      <a class="eyebrow" href="https://github.com/hasanlior/polymira/releases/latest"><b id="ver">New</b> First public release is out →</a>
+      <h1 class="display">Your PC is now<br /><span class="grad">a game console.</span></h1>
+      <p class="lede">POLYMIRA brings every game you own — Steam, Epic, Xbox app and classic consoles — into one controller-first interface inspired by the PS3. Pick up a controller and play from the couch.</p>
+      <div class="ctas">
+        <a class="btn btn-primary dl" href="https://github.com/hasanlior/polymira/releases/latest">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+          Download for Windows
         </a>
-        <a class="btn ghost" href="https://github.com/hasanlior/polymira">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.3 1.9 1.3 1.1 1.8 2.9 1.3 3.6 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.7 1.7.3 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .5Z"/></svg>
-          <span>Star on GitHub</span>
+        <a class="btn btn-secondary" href="https://github.com/hasanlior/polymira">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg>
+          Star on GitHub <b class="count stars">—</b>
         </a>
       </div>
-      <p class="meta" id="meta">Free · Windows 10 / 11 · English &amp; Turkish</p>
-    </header>
+      <p class="fine" id="meta">Free · Windows 10 &amp; 11 · English and Turkish</p>
+
+      <div class="stage">
+        <div class="tv">
+          <div class="screen" role="img" aria-label="POLYMIRA home screen with a game library and a trophy notification">
+            <svg class="waves" viewBox="0 0 1600 900" preserveAspectRatio="none" aria-hidden="true">
+              <defs>
+                <linearGradient id="w" x1="0" x2="1"><stop offset="0" stop-color="#9fd2ff" stop-opacity="0"/><stop offset=".5" stop-color="#bfe2ff" stop-opacity=".55"/><stop offset="1" stop-color="#9fd2ff" stop-opacity="0"/></linearGradient>
+              </defs>
+              <path d="M0 560 C 260 470, 520 640, 800 560 S 1340 470, 1600 540" fill="none" stroke="url(#w)" stroke-width="3"/>
+              <path d="M0 590 C 300 520, 560 660, 820 590 S 1320 520, 1600 580" fill="none" stroke="url(#w)" stroke-width="1.5" opacity=".7"/>
+              <path d="M0 620 C 240 570, 600 690, 860 620 S 1360 560, 1600 610" fill="none" stroke="url(#w)" stroke-width="1" opacity=".5"/>
+              <path d="M0 640 C 260 560, 520 700, 800 630 S 1340 560, 1600 620 L1600 900 L0 900 Z" fill="#7fb6ff" opacity=".06"/>
+            </svg>
+
+            <div class="x-status"><span>23/11</span><b>21:40</b></div>
+
+            <div class="trophy-toast">
+              <div class="ti"><svg viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg></div>
+              <div><b>Trophy unlocked</b><span>Skyline Rally · First Podium</span></div>
+            </div>
+
+            <div class="x-cats">
+              <div class="x-cat" style="left:4cqw"><svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5M5.5 9.5V20h13V9.5M10 20v-5.5h4V20"/></svg></div>
+              <div class="x-cat" style="left:13cqw"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg></div>
+              <div class="x-cat sel" style="left:23cqw"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/></svg><span>PC Games</span></div>
+              <div class="x-cat" style="left:38cqw"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 3v5h8V3"/></svg></div>
+              <div class="x-cat" style="left:48cqw"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="12" rx="2"/><path d="M10 9v4.5l4-2.25Z"/></svg></div>
+              <div class="x-cat" style="left:58cqw"><svg viewBox="0 0 24 24"><path d="M5 8h14l-1 12H6Z"/><path d="M9 8V6.5a3 3 0 0 1 6 0V8"/></svg></div>
+              <div class="x-cat" style="left:68cqw"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="6.5"/></svg></div>
+            </div>
+
+            <div class="x-list">
+              <div class="x-item sel"><div class="cover c1">SR</div><div><div class="title">Skyline Rally</div><small>Steam · 12 h played</small></div></div>
+              <div class="x-item"><div class="cover c2">HK</div><div>Hollow Keep</div></div>
+              <div class="x-item"><div class="cover c3">SC</div><div>Star Courier</div></div>
+              <div class="x-item"><div class="cover c4">NV</div><div>Neon Vale</div></div>
+            </div>
+
+            <div class="x-hints"><span><i style="background:#5fd068">A</i>Select</span><span><i style="background:#ffcf3a;color:#222">Y</i>Options</span><span><i style="background:#4aa3ff">X</i>Gallery</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="strip">
+    <div class="wrap">
+      <p>Finds and launches your games from</p>
+      <ul>
+        <li>Steam</li><li>Epic Games</li><li>Xbox app</li><li>GOG</li><li>EA app</li><li>Ubisoft Connect</li><li>Battle.net</li><li>Riot Games</li><li>RetroArch</li>
+      </ul>
+    </div>
   </div>
 
-  <section id="features">
+  <section id="experience">
     <div class="wrap">
-      <h2>A real console experience</h2>
-      <p class="sub">Everything a console does, on the PC you already own.</p>
-      <div class="grid">
-        <div class="card">
-          <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5M5.5 9.5V20h13V9.5"/></svg></div>
-          <h3>PS3-style interface</h3>
-          <p>Horizontal categories, animated waves, menu sounds. Focus a game and its artwork, trailer and theme music fade in.</p>
+      <div class="head">
+        <p class="kicker">The experience</p>
+        <h2 class="display">Feels like a console.<br />Runs on your PC.</h2>
+        <p class="section-lede">No mouse, no desktop, no emulator menus. Everything happens on one screen you drive with a controller.</p>
+      </div>
+
+      <div class="row">
+        <div>
+          <h3 class="display">One library for everything you own</h3>
+          <p>The first-run wizard scans every drive and finds your store games, emulators and ROM folders — wherever they are installed. Covers, backgrounds and trailers are fetched for you.</p>
+          <ul class="ticks">
+            <li>Steam, Epic, Xbox app / Game Pass, GOG, EA, Ubisoft, Battle.net, Riot</li>
+            <li>PlayStation, Nintendo, Xbox, Sega and arcade games through emulators</li>
+            <li>Game info pages, trophies and play statistics</li>
+          </ul>
         </div>
-        <div class="card">
-          <div class="ic"><svg viewBox="0 0 24 24"><path d="M7 8h10a4 4 0 0 1 4 4l-.6 4.2a2.5 2.5 0 0 1-4.4 1.2L14.5 16h-5L8 17.4a2.5 2.5 0 0 1-4.4-1.2L3 12a4 4 0 0 1 4-4Z"/><path d="M8 10.5v3M6.5 12h3"/></svg></div>
-          <h3>Built for controllers</h3>
-          <p>Xbox, PlayStation and Switch pads. Button hints match your controller, and every button can be remapped.</p>
-        </div>
-        <div class="card">
-          <div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 10h8M12 6v8"/></svg></div>
-          <h3>In-game menu</h3>
-          <p>Press the Guide button in any game: pause for real, take screenshots, quick save, check performance, quit.</p>
-        </div>
-        <div class="card">
-          <div class="ic"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg></div>
-          <h3>Finds all your games</h3>
-          <p>Steam, Epic, Xbox app, GOG, Riot, Ubisoft, EA and Battle.net games are found automatically, wherever they are installed.</p>
-        </div>
-        <div class="card">
-          <div class="ic"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></svg></div>
-          <h3>Emulation that just works</h3>
-          <p>One-click emulator downloads and automatic controller setup. Nobody has to open an emulator's settings.</p>
-        </div>
-        <div class="card">
-          <div class="ic"><svg viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg></div>
-          <h3>Trophies &amp; stats</h3>
-          <p>Steam achievements and RetroAchievements in one trophy room, unlock notifications and weekly play statistics.</p>
-        </div>
-        <div class="card">
-          <div class="ic"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="6" rx="1.5"/><rect x="3.5" y="13" width="17" height="6" rx="1.5"/></svg></div>
-          <h3>Save backups</h3>
-          <p>Saves of every emulator backed up after each session, restored with one button, synced to your cloud folder.</p>
-        </div>
-        <div class="card">
-          <div class="ic"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="12" rx="2"/><path d="M10 9v4.5l4-2.25Z"/></svg></div>
-          <h3>Apps inside the console</h3>
-          <p>Built-in browser, YouTube, Twitch and streaming apps with an on-screen keyboard and controller pointer.</p>
-        </div>
-        <div class="card">
-          <div class="ic"><svg viewBox="0 0 24 24"><path d="M5 8h14l-1 12H6Z"/><path d="M9 8V6.5a3 3 0 0 1 6 0V8"/></svg></div>
-          <h3>Store, themes &amp; mods</h3>
-          <p>A full-screen store for apps, emulators, themes and community mods. Updates install themselves.</p>
+        <div class="shot">
+          <div class="lib">
+            <div class="t">All games <span>128 games</span></div>
+            <div class="gridm">
+              <div class="tile c1 sel" data-src="Steam"></div><div class="tile c2" data-src="Epic"></div><div class="tile c3" data-src="PS2"></div><div class="tile c4" data-src="Xbox app"></div>
+              <div class="tile c5" data-src="SNES"></div><div class="tile c2" data-src="GOG"></div><div class="tile c4" data-src="PSP"></div><div class="tile c1" data-src="Steam"></div>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="stores" style="margin-top:34px">
-        <span class="pill">Steam</span><span class="pill">Epic Games</span><span class="pill">Xbox app / Game Pass</span><span class="pill">GOG</span><span class="pill">Riot Games</span><span class="pill">Ubisoft Connect</span><span class="pill">EA app</span><span class="pill">Battle.net</span>
+
+      <div class="row flip">
+        <div>
+          <h3 class="display">Press Guide. Get the console menu.</h3>
+          <p>In any game — PC or emulated — the controller's Guide button opens a console-style menu over the game. The game is truly paused while you're in it.</p>
+          <ul class="ticks">
+            <li>Pause, screenshot, quick save and load, quit</li>
+            <li>Live CPU, RAM and GPU usage</li>
+            <li>Back to the home screen without closing the game</li>
+          </ul>
+        </div>
+        <div class="shot">
+          <div class="game-bg"></div>
+          <div class="ov">
+            <div class="g"><div class="cover c4"></div><div><b>Neon Vale</b><span>PlayStation 2 · Paused</span></div></div>
+            <div class="it sel">Resume game</div>
+            <div class="it">Take screenshot</div>
+            <div class="it">Quick save</div>
+            <div class="it">Return to home</div>
+            <div class="it">Quit game</div>
+          </div>
+          <div class="perf">
+            <b>Performance</b>
+            <div class="m"><span>Game CPU</span><span>34%</span></div><div class="bar"><i style="width:34%"></i></div>
+            <div class="m"><span>GPU</span><span>61%</span></div><div class="bar"><i style="width:61%"></i></div>
+            <div class="m"><span>Session</span><span>1 h 12 min</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <h3 class="display">Emulation without the setup</h3>
+          <p>Download emulators from their official sources in one click. POLYMIRA writes controller settings into them before the game starts, backs up your saves after every session, and keeps playing while downloads run in the background.</p>
+          <ul class="ticks">
+            <li>RetroArch, DuckStation, PCSX2, PPSSPP, RPCS3, Xenia, Cemu and more</li>
+            <li>Automatic controller configuration</li>
+            <li>Save backups with optional OneDrive / Google Drive sync</li>
+          </ul>
+        </div>
+        <div class="shot">
+          <div class="store">
+            <div class="t">Store</div>
+            <div class="tabs"><span>Featured</span><span>Apps</span><span class="on">Emulators</span><span>Themes</span><span>Mods</span></div>
+            <div class="sgrid">
+              <div class="scard sel"><div class="ic c2"></div><b>DuckStation</b><span>64%</span><div class="pb"><i></i></div></div>
+              <div class="scard"><div class="ic c4"></div><b>PCSX2</b><span>Installed</span></div>
+              <div class="scard"><div class="ic c3"></div><b>PPSSPP</b><span>Download</span></div>
+              <div class="scard"><div class="ic c1"></div><b>RetroArch</b><span>Installed</span></div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </section>
 
-  <section id="platforms">
+  <section id="features" style="padding-top:20px">
     <div class="wrap">
-      <h2>Supported platforms</h2>
-      <p class="sub">Honest compatibility: each platform is marked stable, experimental or unsupported — nothing is faked.</p>
-      <div class="tbl">
-        <table>
-          <thead><tr><th>Family</th><th>Platforms</th><th>Emulators</th></tr></thead>
-          <tbody>
-            <tr><td>PlayStation</td><td>PS1, PS2, PSP · PS3, Vita, PS4 (experimental)</td><td>DuckStation, PCSX2, PPSSPP, RPCS3, Vita3K, shadPS4</td></tr>
-            <tr><td>Xbox</td><td>Xbox, Xbox 360 (experimental)</td><td>xemu, Xenia Canary</td></tr>
-            <tr><td>Nintendo</td><td>NES, SNES, N64, GB, GBC, GBA, DS, 3DS, GameCube, Wii, Wii U, Switch</td><td>RetroArch, melonDS, Azahar, Dolphin, Cemu, Ryujinx</td></tr>
-            <tr><td>Sega</td><td>Master System, Mega Drive, Saturn, Dreamcast, Game Gear</td><td>RetroArch, Flycast</td></tr>
-            <tr><td>Other</td><td>Arcade, Neo Geo, Atari, MSX, Commodore 64</td><td>RetroArch</td></tr>
-            <tr><td>PC</td><td>Every launcher, plus any .exe</td><td>—</td></tr>
-          </tbody>
-        </table>
+      <div class="head">
+        <p class="kicker">Features</p>
+        <h2 class="display">Everything a console does.</h2>
       </div>
-      <p class="note">POLYMIRA does not include or distribute games, BIOS, firmware or keys. Only use backups of software you own.</p>
+      <div class="fgrid">
+        <div class="f"><svg viewBox="0 0 24 24"><path d="M7 8h10a4 4 0 0 1 4 4l-.6 4.2a2.5 2.5 0 0 1-4.4 1.2L14.5 16h-5L8 17.4a2.5 2.5 0 0 1-4.4-1.2L3 12a4 4 0 0 1 4-4Z"/></svg><h4>Any controller</h4><p>Xbox, DualShock, DualSense, Switch Pro. Button symbols match your pad; every button can be remapped.</p></div>
+        <div class="f"><svg viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><h4>Trophies</h4><p>Steam achievements and RetroAchievements in one trophy room, with unlock pop-ups in game.</p></div>
+        <div class="f"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg><h4>Play statistics</h4><p>Your week at a glance, total play time and most played games.</p></div>
+        <div class="f"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="12" rx="2"/><path d="M10 9v4.5l4-2.25Z"/></svg><h4>Apps inside</h4><p>Built-in browser, YouTube, Twitch and streaming apps with a controller pointer and on-screen keyboard.</p></div>
+        <div class="f"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18c1.2 0 1.8-.9 1.4-1.9-.5-1.3.3-2.6 1.7-2.6H17a4 4 0 0 0 4-4c0-5-4-9.5-9-9.5Z"/></svg><h4>Themes &amp; mods</h4><p>Change the look with themes and community CSS mods from the store.</p></div>
+        <div class="f"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M7 6.2a7.5 7.5 0 1 0 10 0"/></svg><h4>Game mode</h4><p>High CPU priority, a performance power plan and an optional desktop-free mode while you play — all restored after.</p></div>
+        <div class="f"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.5-4.5L4 8.5M4 13a8 8 0 0 0 14.5 4.5l1.5-2"/></svg><h4>Self-updating</h4><p>New versions download and install themselves, verified with SHA-256.</p></div>
+        <div class="f"><svg viewBox="0 0 24 24"><path d="M12 3.5 21.5 20h-19Z"/><path d="M12 10v4.5"/></svg><h4>Crash-proof</h4><p>A watchdog restores your desktop and restarts the console if anything goes wrong.</p></div>
+        <div class="f"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg><h4>English &amp; Turkish</h4><p>Switch the interface language any time in settings.</p></div>
+      </div>
     </div>
   </section>
 
-  <section id="start">
+  <section id="platforms" style="padding-top:20px">
     <div class="wrap">
-      <h2>Get started in a minute</h2>
-      <p class="sub">No configuration files, no emulator menus.</p>
+      <div class="head">
+        <p class="kicker">Platforms</p>
+        <h2 class="display">Decades of games.</h2>
+        <p class="section-lede">Every platform shows an honest compatibility label. Nothing is presented as working when it isn't.</p>
+      </div>
+      <div class="plat">
+        <div class="pcard"><h4>PlayStation <span class="badge b-stable">Stable</span></h4><p>PS1, PS2, PSP — plus PS3, Vita and PS4 (experimental)</p><small>DuckStation · PCSX2 · PPSSPP · RPCS3 · Vita3K · shadPS4</small></div>
+        <div class="pcard"><h4>Nintendo <span class="badge b-stable">Stable</span></h4><p>NES to Switch: SNES, N64, GB/GBA, DS, 3DS, GameCube, Wii, Wii U</p><small>RetroArch · melonDS · Azahar · Dolphin · Cemu · Ryujinx</small></div>
+        <div class="pcard"><h4>PC <span class="badge b-stable">Stable</span></h4><p>Every major launcher and any .exe, shortcut or game folder</p><small>Steam · Epic · Xbox app · GOG · EA · Ubisoft · Battle.net · Riot</small></div>
+        <div class="pcard"><h4>Sega <span class="badge b-stable">Stable</span></h4><p>Master System, Mega Drive, Saturn, Dreamcast, Game Gear</p><small>RetroArch · Flycast</small></div>
+        <div class="pcard"><h4>Xbox <span class="badge b-exp">Experimental</span></h4><p>Original Xbox and Xbox 360</p><small>xemu · Xenia Canary</small></div>
+        <div class="pcard"><h4>Arcade &amp; retro <span class="badge b-stable">Stable</span></h4><p>Arcade, Neo Geo, Atari, MSX, Commodore 64</p><small>RetroArch</small></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="start" style="padding-top:20px">
+    <div class="wrap">
+      <div class="head">
+        <p class="kicker">Get started</p>
+        <h2 class="display">Up and running in a minute.</h2>
+      </div>
       <div class="steps">
-        <div class="card step">
-          <h3>Download</h3>
-          <p>Get the installer from the latest release. If SmartScreen warns, choose <b>More info → Run anyway</b>.</p>
-        </div>
-        <div class="card step">
-          <h3>Scan</h3>
-          <p>The first-run wizard finds your games and emulators, and can download missing emulators in the background.</p>
-        </div>
-        <div class="card step">
-          <h3>Play</h3>
-          <p>Grab your controller. Press the Guide button in any game to open the in-game menu.</p>
-        </div>
+        <div class="stepc"><span class="n">01</span><h4>Download</h4><p>Get the installer from the latest release. If SmartScreen appears, choose More info → Run anyway.</p></div>
+        <div class="stepc"><span class="n">02</span><h4>Scan</h4><p>The welcome wizard finds your games and emulators and can download missing emulators for you.</p></div>
+        <div class="stepc"><span class="n">03</span><h4>Play</h4><p>Grab a controller. Press the Guide button in any game for the console menu.</p></div>
       </div>
-      <div class="cta" style="margin-top:40px">
-        <a class="btn primary" href="https://github.com/hasanlior/polymira/releases/latest">Download POLYMIRA</a>
+    </div>
+  </section>
+
+  <section id="faq" style="padding-top:20px">
+    <div class="wrap">
+      <div class="head">
+        <p class="kicker">FAQ</p>
+        <h2 class="display">Questions.</h2>
+      </div>
+      <div class="faq">
+        <details><summary>Is POLYMIRA free?</summary><p>Yes. Download it from GitHub Releases and use it for free for noncommercial purposes.</p></details>
+        <details><summary>Does it include games or BIOS files?</summary><p>No. POLYMIRA does not include or distribute games, BIOS, firmware or keys. Only use backups of software you own.</p></details>
+        <details><summary>Why does Windows show a SmartScreen warning?</summary><p>The installer is not code-signed yet. Choose More info → Run anyway. The source code is public on GitHub.</p></details>
+        <details><summary>Do my Steam and Epic games keep working normally?</summary><p>Yes. POLYMIRA launches them through their own launchers; it never moves or modifies game files.</p></details>
+        <details><summary>Which controllers are supported?</summary><p>Xbox controllers, DualShock 4, DualSense, Switch Pro and most standard gamepads. A keyboard works too.</p></details>
+        <details><summary>Can I contribute?</summary><p>Bug reports and ideas are welcome on GitHub, and anyone can publish themes and mods to the community store catalog.</p></details>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top:20px">
+    <div class="wrap">
+      <div class="final">
+        <img src="assets/icon.svg" alt="" />
+        <h2 class="display">Every console. One universe.</h2>
+        <p>Turn tonight's gaming session into a console night. If you like it, a star on GitHub helps the project grow.</p>
+        <div class="ctas">
+          <a class="btn btn-primary dl" href="https://github.com/hasanlior/polymira/releases/latest">Download for Windows</a>
+          <a class="btn btn-secondary" href="https://github.com/hasanlior/polymira"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg> Star on GitHub <b class="count stars">—</b></a>
+        </div>
       </div>
     </div>
   </section>
 
   <footer>
     <div class="wrap">
-      <p>POLYMIRA · source-available under the <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a> · made by <a href="https://github.com/hasanlior">hasanlior</a></p>
-      <p>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve. Platform names are trademarks of their owners.</p>
+      <span>© 2026 POLYMIRA · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a> · by <a href="https://github.com/hasanlior">hasanlior</a></span>
+      <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
     </div>
   </footer>
 
   <script>
-    // Point the download button straight at the newest installer.
+    // Live GitHub star count on every star button.
+    fetch('https://api.github.com/repos/hasanlior/polymira')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((repo) => {
+        if (!repo) return
+        const n = repo.stargazers_count
+        const text = n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n)
+        document.querySelectorAll('.stars').forEach((el) => (el.textContent = text))
+      })
+      .catch(() => document.querySelectorAll('.stars').forEach((el) => el.remove()))
+
+    // Point the download buttons at the newest installer and show its version.
     fetch('https://api.github.com/repos/hasanlior/polymira/releases/latest')
       .then((r) => (r.ok ? r.json() : null))
       .then((rel) => {
         if (!rel) return
+        const v = rel.tag_name.replace(/^v/, '')
         const setup = rel.assets.find((a) => /setup.*\.exe$/i.test(a.name))
-        if (setup) document.getElementById('dl').href = setup.browser_download_url
-        const mb = setup ? ` · ${Math.round(setup.size / 1048576)} MB` : ''
-        document.getElementById('meta').textContent = `Version ${rel.tag_name.replace(/^v/, '')}${mb} · Windows 10 / 11 · Free`
+        if (setup) document.querySelectorAll('a.dl').forEach((a) => (a.href = setup.browser_download_url))
+        document.getElementById('ver').textContent = 'v' + v
+        document.getElementById('meta').textContent = `Version ${v}${setup ? ' · ' + Math.round(setup.size / 1048576) + ' MB' : ''} · Windows 10 & 11 · Free`
       })
       .catch(() => {})
   </script>
