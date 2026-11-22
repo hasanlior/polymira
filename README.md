@@ -51,6 +51,19 @@ POLYMIRA, bilgisayarı oyun konsoluna çeviren, tamamen kontrolcüyle kullanıla
   - oyuna yüksek işlemci önceliği
   - Dengeli / Güç tasarrufu planındaysan Yüksek performans güç planı (zaten performans planındaysan dokunulmaz)
   - isteğe bağlı olarak Windows masaüstünü (görev çubuğu, `explorer.exe`) kapatma
+- **Kumanda simgeleri ve tuş ataması:** alttaki tuş ipuçları kullanılan kumandaya göre Xbox (A B X Y), PlayStation (✕ ○ □ △), Nintendo ya da klavye simgeleriyle gösterilir. Her işlem istenen tuşa atanabilir, titreşim açılıp kapatılabilir.
+- **Emülatörlerde otomatik kol ayarı:** oyun başlamadan önce DuckStation, PCSX2, Dolphin (GameCube) ve RPCS3'ün kol ayarları yazılır; RetroArch, PPSSPP, Vita3K, shadPS4, xemu, Xenia ve Flycast kolu kendisi tanır. Oyuncunun emülatörü açıp ayar yapmasına gerek kalmaz. (Cemu, Ryujinx, melonDS ve Azahar şimdilik elle ayarlanır.)
+- **Kayıt yönetimi:** tüm emülatörlerin kayıt klasörleri bulunur, zip olarak yedeklenir (her oyundan sonra otomatik, son 10 yedek), tek tuşla geri yüklenir; istenirse OneDrive / Google Drive / USB klasörüne de kopyalanır.
+- **Bildirimler:** PS3 tarzı kartlar sağ üstten kayar (indirme bitti, kupa kazanıldı, yedek alındı, güncelleme hazır). Oyun oynarken de oyunun üstünde görünür. Geçmiş Ana Sayfa → Bildirimler'de.
+- **Kupalar:** Steam başarımları Steam'in kendi dosyalarından okunur (anahtar gerekmez); emülatör oyunları için RetroAchievements hesabı bağlanabilir. Oyun sırasında açılan kupalar bildirim olarak gelir.
+- **Oyun bilgi sayfası:** açıklama, çıkış yılı, tür, geliştirici ve ekran görüntüleri; PC oyunları için Steam mağazasından, konsol oyunları için libretro veritabanı ve Wikipedia'dan otomatik.
+- **Oyun başına emülatör ayarı:** her oyun için emülatör seçimi, RetroArch'ta görüntü filtresi (CRT, LCD, keskin) ve ek komut satırı.
+- **Hızlı kayıt:** RetroArch oyunlarında oyun içi menüden durum kaydetme / yükleme.
+- **Oynama istatistikleri:** son 7 günün grafiği, haftalık ve toplam süre, en çok oynanan oyunlar.
+- **Otomatik güncelleme:** yeni sürümler GitHub Releases'ten indirilir, SHA-256 ile doğrulanır ve sessizce kurulur (`src/shared/brand.ts` → `repo`).
+- **Topluluk mağazası:** `community/catalog.json` üzerinden tema, mod ve uygulama yayınlanır; herkes pull request ile ekleyebilir (bkz. `community/README.md`).
+- **Dil:** Türkçe ve İngilizce arayüz (Ayarlar → Arayüz Kişiselleştirme → Dil / Language).
+- **Masaüstü kısayolu:** her `npm run build` ve `npm run dist` sonrasında masaüstüne POLYMIRA kısayolu konur (`NO_SHORTCUT=1` ile kapatılır).
 - **Çökmeye dayanıklılık:** küçük bir bekçi süreci uygulamayı izler. Uygulama beklenmedik şekilde kapanırsa masaüstünü ve güç planını geri getirir, uygulamayı yeniden açar. Üst üste çökmelerde döngüye girmez. Arayüz süreci çökerse kendini yeniden yükler.
 - **Windows ile başlatma** (kurulu sürümde): bilgisayar açılınca doğrudan konsol arayüzü gelir.
 - **Ayarlar:** tam ekran / kenarlıksız / pencere, temalar, animasyon kapatma, menü sesleri, oyun arka planları / fragmanları / müzikleri, kategori gizleme, emülatör yolları, platform başına emülatör seçimi.

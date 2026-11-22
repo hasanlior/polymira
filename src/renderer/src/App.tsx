@@ -20,6 +20,7 @@ import { RemapScreen } from './components/Remap'
 import { NoticeStack } from './components/Notices'
 import { StatsScreen } from './components/Stats'
 import { TrophyScreen } from './components/Trophies'
+import { applyLanguage } from './i18n'
 
 type Modal =
   | { type: 'detail'; gameId: string }
@@ -172,6 +173,7 @@ export function App() {
     input.setMap(state.settings.padMap)
     input.setForcedStyle(state.settings.padStyle === 'auto' ? null : state.settings.padStyle)
     input.rumble = state.settings.padRumble
+    applyLanguage(state.settings.language)
     document.documentElement.classList.toggle('no-anim', !state.settings.animations)
     if (bgRef.current) bgRef.current.animate = state.settings.animations
   }, [state?.settings])

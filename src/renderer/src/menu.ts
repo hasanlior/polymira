@@ -851,6 +851,18 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     title: 'Arayüz Kişiselleştirme',
     icon: 'palette',
     children: [
+      choice(
+        'set:ui:lang',
+        'Dil / Language',
+        'info',
+        ctx.state.settings.language,
+        [
+          { value: 'tr', label: 'Türkçe' },
+          { value: 'en', label: 'English' }
+        ],
+        (v) => ctx.setSettings({ language: v }),
+        ctx
+      ),
       {
         id: 'set:ui:hidden',
         title: 'Kategorileri göster / gizle',

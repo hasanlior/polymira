@@ -9,6 +9,7 @@ import { input, useInput } from '../input'
 import { configureSound, sfx } from '../sound'
 import '../styles.css'
 import { NoticeStack } from '../components/Notices'
+import { applyLanguage } from '../i18n'
 
 /**
  * In-game menu. Runs in a transparent always-on-top window above the emulator and is
@@ -44,6 +45,7 @@ function Overlay() {
     configureSound(state.settings.menuSounds, state.settings.soundVolume)
     input.setMap(state.settings.padMap)
     input.setForcedStyle(state.settings.padStyle === 'auto' ? null : state.settings.padStyle)
+    applyLanguage(state.settings.language)
   }, [state?.settings])
 
   useEffect(() => {
