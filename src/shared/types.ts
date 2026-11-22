@@ -60,6 +60,10 @@ export interface Game {
   missing?: boolean
   meta: GameMeta
   lastLaunch?: { at: number; result: LaunchResult; message?: string }
+  /** Per-game emulator choice (runner key), overriding the platform default. */
+  emulator?: string
+  /** Per-game emulator options. */
+  emuOptions?: GameEmuOptions
 }
 
 export interface WatchedFolder {
@@ -89,6 +93,10 @@ export interface Settings {
   padRumble: boolean
   /** Show notification cards over a running game. */
   notifyInGame: boolean
+  /** Back up an emulator's saves after each play session. */
+  saveAutoBackup: boolean
+  /** Folder that receives a copy of every save backup (e.g. inside OneDrive). Empty = off. */
+  saveSyncFolder: string
   watchedFolders: WatchedFolder[]
   emulatorPaths: Record<string, string>
   /** Per-platform emulator choice; falls back to the platform's first option. */
@@ -212,6 +220,7 @@ export interface AppState {
   appIcons: Record<string, number>
   /** Recent notifications, newest first. */
   notices: Notice[]
+  saves: SaveInfo[]
   drm: { widevine: boolean; vmp: boolean; inConsole: boolean; detail: string }
   mods: ModInfo[]
   downloads: DownloadJob[]
@@ -223,6 +232,40 @@ export interface AppState {
   session: SessionInfo | null
   version: string
   scanning: boolean
+}
+
+/** Per-game emulator options (RetroArch: shader and resolution; others: extra arguments). */
+export interface GameEmuOptions {
+  shader?: 'none' | 'crt' | 'lcd' | 'smooth'
+  /** Extra command line arguments appended for this game. */
+  extraArgs?: string
+}
+
+export interface PlayStats {
+  /** Last 7 days, oldest first. */
+  days: { day: number; sec: number }[]
+  top: { gameId: string; title: string; sec: number; weekSec: number; sessions: number }[]
+  weekSec: number
+  totalSec: number
+  sessions: number
+  gamesPlayed: number
+}
+
+export interface SaveBackup {
+  file: string
+  name: string
+  at: number
+  size: number
+  /** Also present in the sync folder. */
+  synced: boolean
+}
+
+/** Save data of one emulator: where it lives and its backups. */
+export interface SaveInfo {
+  emuId: string
+  name: string
+  locations: string[]
+  backups: SaveBackup[]
 }
 
 /** PS3-style notification card (top right), also shown over a running game. */

@@ -20,6 +20,10 @@ import { appLaunchPlan, appPath, catalog, findItem, installedThemes, listMods, m
 import { addCandidates } from './library'
 import { appIconFile, appIconRevs, fetchAppIcon } from './appIcons'
 import { drmStatus, initDrm } from './drm'
+import { recordSession, playStats } from './stats'
+import { createSocket } from 'dgram'
+import { RETROARCH_CMD_PORT } from './emulators'
+import { backupAll, emulatorOfGame, openSaveFolder, refreshSaves, restoreBackup, savesSnapshot } from './saves'
 import { enterGameMode, exitGameMode, startExplorer } from './gameMode'
 import { getRuntime, initRuntime, readRuntime, runtimeFile, updateRuntime } from './runtime'
 
@@ -132,6 +136,7 @@ function snapshot(): AppState {
     themes: installedThemes(),
     appIcons: appIconRevs(),
     notices,
+    saves: savesSnapshot(),
     drm: drmStatus(),
     mods: listMods(),
     downloads: downloads.jobs,
@@ -372,6 +377,7 @@ session.on('ended', (end: import('./session').SessionEnd) => {
   overlayWindow = null
   const g = store.games.find((x) => x.id === end.gameId)
   if (g) {
+    recordSession(g.id, Date.now() - end.playedSec * 1000, end.playedSec)
     store.updateGame(g.id, {
       playTimeSec: g.playTimeSec + end.playedSec,
       lastLaunch: { at: Date.now(), result: end.result, message: end.message }
@@ -383,6 +389,16 @@ session.on('ended', (end: import('./session').SessionEnd) => {
     mainWindow.focus()
   }
   if (end.result === 'crashed' && end.message) toast('error', end.message)
+  // Back up this emulator's saves after playing.
+  if (g && store.settings.saveAutoBackup) {
+    const emu = emulatorOfGame(g.platformId, g.emulator)
+    if (emu) {
+      void backupAll([emu]).then((n) => {
+        broadcast()
+        if (n) notify({ kind: 'save', title: 'Kayıtlar yedeklendi', text: `${g.title} oturumundan sonra otomatik yedek alındı.` })
+      })
+    }
+  }
   broadcast()
 })
 
@@ -709,9 +725,36 @@ const handlers: Handlers = {
   },
   'app:closed': (id, playedSec) => {
     const g = store.games.find((x) => x.id === id)
+    if (g && playedSec > 0) recordSession(id, Date.now() - playedSec * 1000, playedSec)
     if (g && playedSec > 0) store.updateGame(id, { playTimeSec: g.playTimeSec + Math.round(playedSec), lastLaunch: { at: Date.now(), result: 'ok' } })
     broadcast()
   },
+  'saves:refresh': () => {
+    const r = refreshSaves()
+    broadcast()
+    return r
+  },
+  'saves:backup': async (emuIds) => {
+    const n = await backupAll(emuIds)
+    broadcast()
+    if (n) notify({ kind: 'save', title: 'Kayıtlar yedeklendi', text: `${n} emülatörün kayıtları yedeklendi.` })
+    return n
+  },
+  'saves:restore': async (emuId, file) => {
+    await restoreBackup(emuId, file)
+    broadcast()
+    notify({ kind: 'save', title: 'Kayıtlar geri yüklendi', text: 'Önceki kayıtların da ayrıca yedeklendi.' })
+  },
+  'saves:openFolder': (emuId) => openSaveFolder(emuId),
+  'stats:get': () => playStats(),
+  'library:setEmulator': (id, runner, options) => {
+    const g = store.games.find((x) => x.id === id)
+    if (!g) return
+    store.updateGame(id, { emulator: runner ?? undefined, emuOptions: options ?? g.emuOptions })
+    broadcast()
+  },
+  'session:quickSave': () => retroArchCommand('SAVE_STATE'),
+  'session:quickLoad': () => retroArchCommand('LOAD_STATE'),
   'notices:clear': () => {
     notices.length = 0
     broadcast()
@@ -744,6 +787,25 @@ function registerMediaProtocol(): void {
     if (!file || !fs.existsSync(file)) return new Response(null, { status: 404 })
     return net.fetch(pathToFileURL(file).toString())
   })
+}
+
+/** Sends a command to RetroArch's local command port (enabled by our append config). */
+async function retroArchCommand(cmd: 'SAVE_STATE' | 'LOAD_STATE'): Promise<void> {
+  if (!session.info) throw new Error('Çalışan oyun yok.')
+  const wasPaused = session.info.paused
+  // A suspended process cannot answer: resume for a moment.
+  if (wasPaused) session.setPaused(false)
+  await new Promise<void>((resolve, reject) => {
+    const sock = createSocket('udp4')
+    sock.send(cmd, RETROARCH_CMD_PORT, '127.0.0.1', (err) => {
+      sock.close()
+      if (err) reject(err)
+      else resolve()
+    })
+  })
+  await new Promise((r) => setTimeout(r, 700))
+  if (wasPaused) session.setPaused(true)
+  notify({ kind: 'save', title: cmd === 'SAVE_STATE' ? 'Durum kaydedildi' : 'Durum yüklendi', text: 'RetroArch hızlı kayıt' })
 }
 
 // ── Built-in browser (webview guests) ────────────────────────────────
@@ -876,6 +938,7 @@ app.whenReady().then(() => {
     queueCovers()
     void attachSoundtracks().then((n) => n && broadcast())
     void refreshAppIcons()
+    refreshSaves()
     broadcast()
     if (process.env.APP_RESTARTED) {
       delete process.env.APP_RESTARTED

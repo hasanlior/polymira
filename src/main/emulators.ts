@@ -1,6 +1,7 @@
 import { shell } from 'electron'
 import fs from 'fs'
 import os from 'os'
+import { paths } from './store'
 import path from 'path'
 import { EMULATORS, getEmulator, getPlatform, resolveRunner, runnerLabel } from '@shared/platforms'
 import type { EmulatorStatus, Game, Settings } from '@shared/types'
@@ -126,7 +127,7 @@ export function planLaunch(game: Game, settings: Settings): LaunchPlan {
     throw new LaunchError(platform.note ?? 'Bu platform için çalışan bir emülatör yok.')
   }
 
-  const runner = resolveRunner(platform, settings.platformEmulator[platform.id])!
+  const runner = resolveRunner(platform, game.emulator ?? settings.platformEmulator[platform.id])!
   const emu = getEmulator(runner.emulatorId)!
   const exe = settings.emulatorPaths[emu.id]
   if (!exe) throw new LaunchError(`${emu.name} ayarlanmamış. Ayarlar → Emülasyon bölümünden yolunu seçin.`)
@@ -143,7 +144,47 @@ export function planLaunch(game: Game, settings: Settings): LaunchPlan {
   }
 
   const args = emu.args.map((a) => a.replace('{rom}', target).replace('{core}', core))
+  const extra: string[] = []
+  if (emu.id === 'retroarch') extra.push(...retroArchExtras(game, exe))
+  if (game.emuOptions?.extraArgs) extra.push(...splitArgs(game.emuOptions.extraArgs))
+  // Extra options go before the game path (emulators read the last argument as the game).
+  const romAt = args.lastIndexOf(target)
+  if (romAt >= 0) args.splice(romAt, 0, ...extra)
+  else args.push(...extra)
   return { type: 'spawn', exe, args, cwd: path.dirname(exe), label: runnerLabel(runner) }
+}
+
+/** Splits a command line string, keeping "quoted parts" together. */
+export function splitArgs(s: string): string[] {
+  return (s.match(/"[^"]*"|\S+/g) ?? []).map((a) => a.replace(/^"|"$/g, ''))
+}
+
+export const RETROARCH_CMD_PORT = 55355
+
+const SHADERS: Record<string, string[]> = {
+  crt: ['shaders_slang/crt/crt-easymode.slangp', 'shaders_glsl/crt/crt-easymode.glslp', 'shaders_slang/crt/crt-geom.slangp', 'shaders_glsl/crt/crt-geom.glslp'],
+  lcd: ['shaders_slang/handheld/lcd-grid-v2.slangp', 'shaders_glsl/handheld/lcd-grid-v2.glslp', 'shaders_slang/handheld/lcd3x.slangp'],
+  smooth: ['shaders_slang/interpolation/sharp-bilinear-simple.slangp', 'shaders_glsl/interpolation/sharp-bilinear-simple.glslp']
+}
+
+/**
+ * RetroArch: enable its local command port (used for quick save / load from the in-game menu)
+ * through an append config, plus the game's shader choice.
+ */
+function retroArchExtras(game: Game, exe: string): string[] {
+  const dir = path.dirname(exe)
+  const cfgDir = path.join(paths.cache, 'retroarch')
+  fs.mkdirSync(cfgDir, { recursive: true })
+  const cfg = path.join(cfgDir, 'append.cfg')
+  fs.writeFileSync(cfg, `network_cmd_enable = "true"\nnetwork_cmd_port = "${RETROARCH_CMD_PORT}"\nsavestate_auto_index = "false"\n`)
+  const out = [`--appendconfig=${cfg}`]
+  const shader = game.emuOptions?.shader
+  if (shader && shader !== 'none') {
+    const found = SHADERS[shader]?.map((rel) => path.join(dir, 'shaders', rel)).find((p) => fs.existsSync(p))
+    if (found) out.push('--set-shader', found)
+    else console.warn('[retroarch] shader not installed:', shader)
+  }
+  return out
 }
 
 export function homeDir(): string {

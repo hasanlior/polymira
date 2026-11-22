@@ -17,6 +17,8 @@ export const DEFAULT_SETTINGS: Settings = {
   padMap: {},
   padRumble: true,
   notifyInGame: true,
+  saveAutoBackup: true,
+  saveSyncFolder: '',
   watchedFolders: [],
   emulatorPaths: {},
   platformEmulator: {},

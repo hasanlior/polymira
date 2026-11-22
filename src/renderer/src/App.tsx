@@ -18,6 +18,7 @@ import { WebApp } from './components/WebApp'
 import { OnScreenKeyboard } from './components/Keyboard'
 import { RemapScreen } from './components/Remap'
 import { NoticeStack } from './components/Notices'
+import { StatsScreen } from './components/Stats'
 
 type Modal =
   | { type: 'detail'; gameId: string }
@@ -29,6 +30,7 @@ type Modal =
   | { type: 'scan' }
   | { type: 'store'; tab?: StoreTab }
   | { type: 'remap' }
+  | { type: 'stats' }
   | { type: 'web'; item: StoreItem; gameId?: string }
   | { type: 'keyboard'; title: string; initial: string; onDone: (text: string) => void }
 
@@ -214,6 +216,8 @@ export function App() {
       openScan: () => openModal({ type: 'scan' }),
       openStore: (tab) => openModal({ type: 'store', tab }),
       openRemap: () => openModal({ type: 'remap' }),
+      openStats: () => openModal({ type: 'stats' }),
+      keyboard: (title, initial, onDone) => openModal({ type: 'keyboard', title, initial, onDone }),
       setSettings: (patch) => void call('settings:set', patch),
       run: (fn, success) => {
         fn()
@@ -340,6 +344,8 @@ export function App() {
                     openKeyboard={(title, initial, onDone) => openModal({ type: 'keyboard', title, initial, onDone })}
                   />
                 )
+              case 'stats':
+                return <StatsScreen key={m.key} onClose={close} />
               case 'remap':
                 return <RemapScreen key={m.key} settings={state.settings} onClose={close} />
               case 'keyboard':

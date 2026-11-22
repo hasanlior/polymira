@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client'
 import { useEffect, useState } from 'react'
-import { getPlatform } from '@shared/platforms'
+import { getPlatform, resolveRunner } from '@shared/platforms'
 import type { PerfSnapshot, Toast } from '@shared/types'
 import { call, coverUrl, formatPlayTime, useAppState } from '../api'
 import { Icon, type IconName } from '../icons'
@@ -57,6 +57,8 @@ function Overlay() {
   const session = state?.session
   const game = session ? state?.games.find((g) => g.id === session.gameId) : undefined
   const platform = game ? getPlatform(game.platformId) : undefined
+  const isRetroArch =
+    Boolean(platform && game && state) && resolveRunner(platform!, game!.emulator ?? state!.settings.platformEmulator[platform!.id])?.emulatorId === 'retroarch'
 
   const close = () => {
     setVisible(false)
@@ -71,6 +73,12 @@ function Overlay() {
       run: () => void call('session:pause', !session?.paused)
     },
     { label: 'Ekran görüntüsü al', icon: 'camera', run: () => void call('session:screenshot') },
+    ...(isRetroArch
+      ? [
+          { label: 'Hızlı kaydet (durum)', icon: 'storage' as IconName, run: () => void call('session:quickSave').catch(() => {}) },
+          { label: 'Hızlı yükle (durum)', icon: 'refresh' as IconName, run: () => void call('session:quickLoad').catch(() => {}) }
+        ]
+      : []),
     {
       label: 'Ana menüye dön',
       icon: 'home',

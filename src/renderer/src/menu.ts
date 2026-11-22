@@ -1,7 +1,7 @@
 import { BRAND } from '@shared/brand'
 import { EMULATORS, FAMILIES, PLATFORMS, getEmulator, getPlatform, resolveRunner, runnerKey, runnerLabel, type PlatformDef } from '@shared/platforms'
 import type { AppState, Game, OverlayHotkey, Settings, SupportLevel, WindowMode } from '@shared/types'
-import { appIconUrl, coverUrl, downloadLine, formatPlayTime } from './api'
+import { appIconUrl, coverUrl, downloadLine, formatBytes, formatPlayTime } from './api'
 import type { IconName } from './icons'
 import type { StoreItem } from '@shared/catalog'
 
@@ -70,6 +70,8 @@ export interface MenuCtx {
   openScreenshots: (gameId?: string) => void
   openScan: () => void
   openRemap: () => void
+  openStats: () => void
+  keyboard: (title: string, initial: string, onDone: (text: string) => void) => void
   openStore: (tab?: 'featured' | 'apps' | 'emulators' | 'themes' | 'mods' | 'downloads') => void
   setSettings: (patch: Partial<Settings>) => void
 }
@@ -145,6 +147,47 @@ export function gameItem(g: Game, ctx: MenuCtx, prefix = ''): XItem {
   }
 }
 
+/** Per-game emulator choice, RetroArch shader and extra command line arguments. */
+function emulatorOptions(g: Game, ctx: MenuCtx): OptItem {
+  const p = getPlatform(g.platformId)!
+  const opts = g.emuOptions ?? {}
+  const runner = resolveRunner(p, g.emulator ?? ctx.state.settings.platformEmulator[p.id])
+  const save = (runnerKeyValue: string | null, o = opts) => ctx.run(() => window.bridge.invoke('library:setEmulator', g.id, runnerKeyValue, o), 'Oyun ayarı kaydedildi.')
+  const shaderNames: Record<string, string> = { none: 'Yok', crt: 'CRT (tüplü TV)', lcd: 'LCD ızgara (el konsolu)', smooth: 'Keskin yumuşatma' }
+  return {
+    label: 'Emülatör ayarları (bu oyun)',
+    icon: 'chip',
+    children: [
+      {
+        label: `Emülatör: ${g.emulator ? runnerLabel(runner!) : 'Platform varsayılanı'}`,
+        icon: 'chip',
+        children: [
+          { label: 'Platform varsayılanı', checked: !g.emulator, onSelect: () => save(null) },
+          ...p.runners.map((r) => ({ label: runnerLabel(r), checked: g.emulator === runnerKey(r), onSelect: () => save(runnerKey(r)) }))
+        ]
+      },
+      ...(runner?.emulatorId === 'retroarch'
+        ? [
+            {
+              label: `Görüntü filtresi: ${shaderNames[opts.shader ?? 'none']}`,
+              icon: 'display' as IconName,
+              children: (['none', 'crt', 'lcd', 'smooth'] as const).map((sh) => ({
+                label: shaderNames[sh],
+                checked: (opts.shader ?? 'none') === sh,
+                onSelect: () => save(g.emulator ?? null, { ...opts, shader: sh })
+              }))
+            }
+          ]
+        : []),
+      {
+        label: opts.extraArgs ? `Ek komut satırı: ${opts.extraArgs}` : 'Ek komut satırı ekle',
+        icon: 'file',
+        onSelect: () => ctx.keyboard('Bu oyun için ek komut satırı argümanları', opts.extraArgs ?? '', (t) => save(g.emulator ?? null, { ...opts, extraArgs: t.trim() || undefined }))
+      }
+    ]
+  }
+}
+
 export function gameOptions(g: Game, ctx: MenuCtx): OptItem[] {
   const current = getPlatform(g.platformId)
   const moveTargets = PLATFORMS.filter((p) => p.id !== g.platformId && (current?.kind === p.kind || p.kind === 'file'))
@@ -157,6 +200,7 @@ export function gameOptions(g: Game, ctx: MenuCtx): OptItem[] {
       onSelect: () => ctx.run(() => window.bridge.invoke('library:favorite', g.id, !g.favorite))
     },
     { label: 'Ekran görüntüleri', icon: 'camera', onSelect: () => ctx.openScreenshots(g.id) },
+    ...(current && current.runners.length ? [emulatorOptions(g, ctx)] : []),
     {
       label: 'Kapak görseli seç',
       icon: 'photo',
@@ -440,6 +484,78 @@ export function allThemes(ctx: { state: AppState }): { value: string; label: str
     ...THEMES,
     ...ctx.state.themes.map((t) => ({ value: t.id, label: t.name, hue: t.hue, night: t.night, css: t.css }))
   ]
+}
+
+/** Save management shared by every emulator. */
+function savesSection(ctx: MenuCtx): XItem {
+  const s = ctx.state.settings
+  const set = ctx.setSettings
+  const when = (t: number) => new Date(t).toLocaleString('tr-TR', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  const perEmu: XItem[] = ctx.state.saves.map((sv) => ({
+    id: `saves:${sv.emuId}`,
+    title: sv.name,
+    icon: 'storage' as IconName,
+    value: sv.backups.length ? `${sv.backups.length} yedek` : sv.locations.length ? 'Yedek yok' : 'Kayıt bulunamadı',
+    subtitle: sv.locations.length ? sv.locations.join(' · ') : 'Bu emülatörün kayıt klasörü henüz oluşmamış (oyun oynayınca oluşur).',
+    children: [
+      {
+        id: `saves:${sv.emuId}:backup`,
+        title: 'Şimdi yedekle',
+        icon: 'up' as IconName,
+        onActivate: () => ctx.run(() => window.bridge.invoke('saves:backup', [sv.emuId]), (n) => (n ? null : 'Yedeklenecek kayıt bulunamadı.'))
+      },
+      {
+        id: `saves:${sv.emuId}:restore`,
+        title: 'Yedekten geri yükle',
+        icon: 'refresh' as IconName,
+        emptyText: 'Henüz yedek yok.',
+        children: sv.backups.map((b) => ({
+          id: `saves:${sv.emuId}:${b.name}`,
+          title: when(b.at),
+          subtitle: `${formatBytes(b.size)}${b.synced ? ' · eşitleme klasöründe de var' : ''}`,
+          icon: 'storage' as IconName,
+          onActivate: () =>
+            ctx.confirm(`${sv.name} kayıtları ${when(b.at)} tarihli yedeğe döndürülsün mü?\nŞu anki kayıtlar önce ayrıca yedeklenir.`, () =>
+              ctx.run(() => window.bridge.invoke('saves:restore', sv.emuId, b.file))
+            )
+        }))
+      },
+      { id: `saves:${sv.emuId}:open`, title: 'Kayıt klasörünü aç', icon: 'folder' as IconName, onActivate: () => void window.bridge.invoke('saves:openFolder', sv.emuId) }
+    ]
+  }))
+  return {
+    id: 'set:saves',
+    title: 'Kayıt Yönetimi',
+    icon: 'storage',
+    subtitle: 'Tüm emülatörlerin oyun kayıtları tek yerde: yedekle, geri yükle, eşitle',
+    children: [
+      {
+        id: 'saves:all',
+        title: 'Tüm kayıtları şimdi yedekle',
+        icon: 'up',
+        onActivate: () => ctx.run(() => window.bridge.invoke('saves:backup'), (n) => (n ? null : 'Yedeklenecek kayıt bulunamadı.'))
+      },
+      toggle('saves:auto', 'Oyundan sonra otomatik yedekle', 'refresh', s.saveAutoBackup, (v) => set({ saveAutoBackup: v }), 'Her oyun oturumu bitince o emülatörün kayıtları yedeklenir (son 10 yedek saklanır)'),
+      {
+        id: 'saves:sync',
+        title: 'Eşitleme klasörü',
+        icon: 'folder',
+        value: s.saveSyncFolder ? 'Açık' : 'Kapalı',
+        subtitle: s.saveSyncFolder || 'Yedeklerin bir kopyası OneDrive, Google Drive veya bir USB diskteki klasöre de yazılır',
+        onActivate: () =>
+          s.saveSyncFolder
+            ? ctx.confirm('Eşitleme klasörü kapatılsın mı?', () => set({ saveSyncFolder: '' }))
+            : ctx.browse({ title: 'Eşitleme klasörü seç', mode: 'folder', onPick: (dir) => set({ saveSyncFolder: dir }) })
+      },
+      {
+        id: 'saves:refresh',
+        title: 'Kayıt konumlarını yeniden tara',
+        icon: 'search',
+        onActivate: () => ctx.run(() => window.bridge.invoke('saves:refresh'), 'Kayıt konumları güncellendi.')
+      },
+      ...perEmu
+    ]
+  }
 }
 
 const HOTKEYS: { value: OverlayHotkey; label: string }[] = [
@@ -728,7 +844,7 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     icon: 'power',
     onActivate: () => ctx.confirm('Uygulamadan çıkılsın mı?', () => void window.bridge.invoke('app:quit'))
   }
-  return [display, sound, controllers, gameSettings, emulation, storage, ui, about, quit]
+  return [display, sound, controllers, gameSettings, emulation, savesSection(ctx), storage, ui, about, quit]
 }
 
 const CATEGORY_DEFS: { id: string; title: string; icon: IconName }[] = [
@@ -786,6 +902,7 @@ function homeItems(ctx: MenuCtx): XItem[] {
       ]
     })
   }
+  items.push({ id: 'home:stats', title: 'Oynama istatistikleri', icon: 'chart', subtitle: 'Haftalık süre ve en çok oynanan oyunlar', onActivate: () => ctx.openStats() })
   const recent = games.filter((g) => g.lastPlayedAt).sort((a, b) => b.lastPlayedAt! - a.lastPlayedAt!)
   items.push(...recent.slice(0, 4).map((g) => gameItem(g, ctx, 'home:')))
   if (recent.length) {

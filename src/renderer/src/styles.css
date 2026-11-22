@@ -1987,3 +1987,103 @@ body.overlay-body #root {
   color: var(--fg-dim);
   margin-top: calc(0.2 * var(--u));
 }
+
+/* Play statistics */
+.stats {
+  width: min(90vw, calc(110 * var(--u)));
+  max-height: 88vh;
+  overflow: auto;
+  padding: calc(3.5 * var(--u)) calc(4 * var(--u));
+  border-radius: calc(2 * var(--u));
+  background: linear-gradient(160deg, rgba(34, 40, 76, 0.97), rgba(12, 14, 30, 0.97));
+  border: 1px solid var(--line);
+  scrollbar-width: none;
+}
+.stats-head {
+  display: flex;
+  align-items: center;
+  gap: calc(1.2 * var(--u));
+  font-size: calc(3.2 * var(--u));
+}
+.stats-head svg {
+  width: calc(3.6 * var(--u));
+  height: calc(3.6 * var(--u));
+}
+.stats-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: calc(1.6 * var(--u));
+  margin: calc(2.6 * var(--u)) 0;
+}
+.stats-tile {
+  padding: calc(1.6 * var(--u));
+  border-radius: calc(1.2 * var(--u));
+  background: rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.4 * var(--u));
+}
+.stats-tile b {
+  font-size: calc(2.8 * var(--u));
+  font-weight: 400;
+}
+.stats-tile span,
+.stats-day,
+.stats-val,
+.stats-week {
+  font-size: calc(1.5 * var(--u));
+  color: var(--fg-dim);
+}
+.stats-chart {
+  display: flex;
+  gap: calc(1.6 * var(--u));
+  height: calc(24 * var(--u));
+  align-items: stretch;
+}
+.stats-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(0.6 * var(--u));
+}
+.stats-bar-wrap {
+  flex: 1;
+  width: 60%;
+  display: flex;
+  align-items: flex-end;
+  border-bottom: 1px solid var(--line);
+}
+.stats-bar {
+  width: 100%;
+  min-height: 2px;
+  border-radius: calc(0.6 * var(--u)) calc(0.6 * var(--u)) 0 0;
+  background: linear-gradient(180deg, #8fb6ff, #6a5cff);
+}
+.stats-top-title {
+  font-size: calc(2.2 * var(--u));
+  margin: calc(3 * var(--u)) 0 calc(1 * var(--u));
+}
+.stats-row {
+  display: flex;
+  align-items: center;
+  gap: calc(1.6 * var(--u));
+  padding: calc(0.9 * var(--u)) 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: calc(1.9 * var(--u));
+}
+.stats-rank {
+  width: calc(3 * var(--u));
+  color: var(--fg-faint);
+}
+.stats-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stats-empty {
+  color: var(--fg-dim);
+  padding: calc(2 * var(--u)) 0;
+}

@@ -44,6 +44,14 @@ export interface IpcContract {
   'app:opened': (id: string) => void
   'app:closed': (id: string, playedSec: number) => void
   'notices:clear': () => void
+  'stats:get': () => import('./types').PlayStats
+  'library:setEmulator': (id: string, runner: string | null, options?: import('./types').GameEmuOptions) => void
+  'session:quickSave': () => void
+  'session:quickLoad': () => void
+  'saves:refresh': () => import('./types').SaveInfo[]
+  'saves:backup': (emuIds?: string[]) => number
+  'saves:restore': (emuId: string, file: string) => void
+  'saves:openFolder': (emuId: string) => void
   'app:quit': () => void
 }
 
@@ -91,6 +99,14 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'app:opened',
   'app:closed',
   'notices:clear',
+  'stats:get',
+  'library:setEmulator',
+  'session:quickSave',
+  'session:quickLoad',
+  'saves:refresh',
+  'saves:backup',
+  'saves:restore',
+  'saves:openFolder',
   'app:quit'
 ]
 
