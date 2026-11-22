@@ -76,3 +76,11 @@ export function formatDate(ts?: number): string {
 export function appIconUrl(id: string, rev?: number): string {
   return `${MEDIA_SCHEME}://appicon/${id.replace(/[^a-z0-9_-]/gi, '_')}.png?v=${rev ?? 0}`
 }
+
+/** Whether DRM apps open inside the console (Widevine present and the user's choice). */
+export function drmInConsole(state: AppState): boolean {
+  const mode = state.settings.drmMode
+  if (mode === 'edge' || !state.drm.widevine) return false
+  return mode === 'console' || state.drm.inConsole
+}
+

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BRAND } from '@shared/brand'
 import type { AppState, Game, Toast } from '@shared/types'
-import { call, coverUrl, downloadLine, formatEta, useAppState } from './api'
+import { call, coverUrl, downloadLine, drmInConsole, formatEta, useAppState } from './api'
 import { WaveBackground } from './background'
 import { Icon } from './icons'
 import { input, useInput } from './input'
@@ -86,6 +86,17 @@ function ShutdownScreen({ text, done }: { text: string; done: boolean }) {
   )
 }
 
+/** Shown behind a running game: the console stays open, so the desktop never flashes. */
+function PlayingCurtain({ game }: { game: Game | undefined }) {
+  return (
+    <div className="curtain">
+      {game?.hasCover && <img className="curtain-cover" src={coverUrl(game.id, game.coverRev)} alt="" />}
+      <div className="curtain-title">{game?.title ?? 'Oyun'}</div>
+      <div className="curtain-hint">Oyun çalışıyor · Menü için kumandanın orta tuşu veya Ctrl+Shift+Home</div>
+    </div>
+  )
+}
+
 function LaunchSplash({ game }: { game: Game }) {
   useInput(() => true) // swallow input while the game starts
   return (
@@ -116,6 +127,8 @@ export function App() {
   const [shutdown, setShutdown] = useState<{ text: string; done?: boolean } | null>(null)
   useEffect(() => window.bridge.on('shutdown', setShutdown), [])
   const keyRef = useRef(1)
+  const [focused, setFocused] = useState(() => document.hasFocus())
+  useEffect(() => window.bridge.on('window:focus', setFocused), [])
 
   // Background
   useEffect(() => {
@@ -212,7 +225,7 @@ export function App() {
         if (g.platformId === 'apps') {
           // Web apps open inside the console; DRM apps (Netflix…) go through Edge like a game.
           const item = catalog.find((i) => i.id === g.meta.storeId)
-          if (item?.app && !item.app.drm) {
+          if (item?.app && (!item.app.drm || drmInConsole(state))) {
             sfx('confirm')
             openModal({ type: 'web', item, gameId: g.id })
             return
@@ -239,9 +252,11 @@ export function App() {
   // A full-screen app (store, browser) covers the XMB: hide it and silence the ambience.
   const inApp = modals.some((m) => m.type === 'web' || m.type === 'store')
   const inWeb = modals.some((m) => m.type === 'web')
+  // A game has focus and the console is waiting behind it: draw nothing that costs GPU time.
+  const playing = Boolean(state?.session) && !focused
   useEffect(() => {
-    if (bgRef.current) bgRef.current.animate = !inWeb && (state?.settings.animations ?? true)
-  }, [inWeb, state?.settings.animations])
+    if (bgRef.current) bgRef.current.animate = !inWeb && !playing && (state?.settings.animations ?? true)
+  }, [inWeb, playing, state?.settings.animations])
 
   return (
     <div className={`app ${inApp ? 'in-app' : ''}`}>
@@ -303,7 +318,7 @@ export function App() {
                     openApp={(item) => {
                       const g = state.games.find((x) => x.platformId === 'apps' && x.meta.storeId === item.id)
                       if (g) ctx.launch(g.id)
-                      else if (item.app && !item.app.drm) openModal({ type: 'web', item })
+                      else if (item.app && (!item.app.drm || drmInConsole(state))) openModal({ type: 'web', item })
                     }}
                   />
                 )
@@ -328,6 +343,7 @@ export function App() {
       )}
       {!state && <div className="boot">{BRAND.name}</div>}
       <Toasts toasts={toasts} />
+      {state && playing && !shutdown && <PlayingCurtain game={state.games.find((g) => g.id === state.session?.gameId)} />}
       {shutdown && <ShutdownScreen text={shutdown.text} done={Boolean(shutdown.done)} />}
     </div>
   )

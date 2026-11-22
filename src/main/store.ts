@@ -22,6 +22,7 @@ export const DEFAULT_SETTINGS: Settings = {
   gmPriority: true,
   gmPowerPlan: true,
   gmStopExplorer: false,
+  drmMode: 'auto',
   autoRestart: true,
   launchOnStartup: false,
   gameBackgrounds: true,

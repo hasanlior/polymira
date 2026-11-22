@@ -19,6 +19,7 @@ import { DownloadManager, EMULATOR_SOURCES } from './downloads'
 import { appLaunchPlan, appPath, catalog, findItem, installedThemes, listMods, modsCss, openFolder } from './apps'
 import { addCandidates } from './library'
 import { appIconFile, appIconRevs, fetchAppIcon } from './appIcons'
+import { drmStatus, initDrm } from './drm'
 import { enterGameMode, exitGameMode, startExplorer } from './gameMode'
 import { getRuntime, initRuntime, readRuntime, runtimeFile, updateRuntime } from './runtime'
 
@@ -77,6 +78,7 @@ function snapshot(): AppState {
   return {
     themes: installedThemes(),
     appIcons: appIconRevs(),
+    drm: drmStatus(),
     mods: listMods(),
     downloads: downloads.jobs,
     downloadable: Object.keys(EMULATOR_SOURCES),
@@ -159,8 +161,9 @@ function createMainWindow(): void {
   const mode = process.argv.includes('--windowed') ? 'windowed' : store.settings.windowMode
   mainWindow = new BrowserWindow(windowOptions(mode))
   if (!app.isPackaged) {
-    mainWindow.webContents.on('console-message', (_e, level, message) => {
-      if (level >= 2) console.log(`[renderer] ${message}`)
+    mainWindow.webContents.on('console-message', (e) => {
+      const d = e as unknown as { level: string | number; message: string }
+      if (d.level === 'warning' || d.level === 'error' || (typeof d.level === 'number' && d.level >= 2)) console.log(`[renderer] ${d.message}`)
     })
   }
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -279,7 +282,12 @@ session.on('started', (info: import('@shared/types').SessionInfo) => {
   void enterGameMode(info.pid).then((applied) => {
     if (applied.length) console.log('[game mode]', applied.join(', '))
   })
-  mainWindow?.hide()
+  // The console stays open behind the game (no desktop flashing between game and menu);
+  // it pauses its own rendering while the game has focus.
+  for (const ms of [1500, 4000]) setTimeout(() => {
+      // Bring the game forward if the console still has focus (launchers can leave it behind).
+      if (session.info && !session.info.paused && mainWindow?.isFocused()) session.focusGame()
+    }, ms)
   ensureOverlay()
   watcher.hotkey = store.settings.overlayHotkey
   watcher.start()
@@ -560,9 +568,8 @@ const handlers: Handlers = {
   },
   'session:returnToGame': () => {
     if (!session.info) return
-    mainWindow?.hide()
     session.setPaused(false)
-    session.focusGame()
+    if (!session.focusGame()) toast('warning', 'Oyun penceresi bulunamadı.')
   },
   'session:perf': () => session.perf(),
   'overlay:close': () => closeOverlay(),
@@ -685,7 +692,8 @@ async function refreshAppIcons(items?: import('@shared/catalog').StoreItem[]): P
 }
 
 const WEB_PARTITION = /^persist:(web|app-[a-z0-9_-]+)$/i
-const allowedPermissions = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock'])
+// mediaKeySystem: protected video (Widevine) on castlabs builds.
+const allowedPermissions = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock', 'mediaKeySystem'])
 const configuredSessions = new WeakSet<Electron.Session>()
 
 function configureWebSession(ses: Electron.Session): void {
@@ -771,6 +779,7 @@ app.whenReady().then(() => {
     previousPowerScheme: null
   })
   startWatchdog()
+  void initDrm(broadcast)
   watcher = new GamepadWatcher(store.settings.overlayHotkey)
   watcher.on('menu', toggleOverlay)
   registerMediaProtocol()

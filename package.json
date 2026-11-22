@@ -11,7 +11,8 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "dist": "electron-vite build && electron-builder --win"
+    "dist": "electron-vite build && electron-builder --win",
+    "vmp:sign": "python -m castlabs_evs.vmp sign-pkg node_modules/electron/dist"
   },
   "dependencies": {
     "koffi": "2.9.2"
@@ -21,7 +22,7 @@
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
     "@vitejs/plugin-react": "4.3.4",
-    "electron": "33.2.1",
+    "electron": "github:castlabs/electron-releases#v45.2.1+wvcus",
     "electron-builder": "25.1.8",
     "electron-vite": "2.3.0",
     "hls.js": "1.5.17",
@@ -48,6 +49,10 @@
         "nsis",
         "portable"
       ]
-    }
+    },
+    "electronDownload": {
+      "mirror": "https://github.com/castlabs/electron-releases/releases/download/v"
+    },
+    "afterPack": "scripts/vmp-sign.cjs"
   }
 }

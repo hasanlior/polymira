@@ -95,6 +95,8 @@ export interface Settings {
   gmPowerPlan: boolean
   /** Game mode: close the Windows desktop shell (explorer.exe) while playing. */
   gmStopExplorer: boolean
+  /** Where DRM apps (Netflix…) open: auto = in the console when the build is VMP-signed, else Edge. */
+  drmMode: 'auto' | 'console' | 'edge'
   /** Relaunch the app automatically if it crashes. */
   autoRestart: boolean
   /** Start with Windows (packaged builds only). */
@@ -200,6 +202,7 @@ export interface AppState {
   themes: import('./catalog').ThemeDef[]
   /** Store app id → cached icon revision. */
   appIcons: Record<string, number>
+  drm: { widevine: boolean; vmp: boolean; inConsole: boolean; detail: string }
   mods: ModInfo[]
   downloads: DownloadJob[]
   /** Emulators that can be downloaded automatically. */

@@ -42,7 +42,7 @@ XPORT, bilgisayarı oyun konsoluna çeviren, tamamen kontrolcüyle kullanılan b
 - **Uygulamalar ve Mağaza:**
   - Uygulamalar: YouTube (TV arayüzü), Netflix, Disney+, Prime Video, Spotify, Twitch ve konsolun kendi tarayıcısı
   - Tarayıcı, YouTube ve Twitch konsolun içinde açılır. Tarayıcıda sol çubuk imleç, sağ çubuk kaydırma, ✕ tıklama, ○ geri; sanal klavye (□ / Start) ile adres ve metin girilir. Her uygulamanın oturumu kalıcıdır.
-  - DRM korumalı servisler (Netflix, Disney+, Prime Video, Spotify) Microsoft Edge'de tam ekran açılır; oyun içi menü onların üstünde de çalışır.
+  - DRM korumalı servisler (Netflix, Disney+, Prime Video, Spotify) de konsolun içinde açılır: XPORT, Widevine içeren castlabs Electron sürümünü kullanır. Yayın servisleri uygulamanın VMP imzalı olmasını ister; kurulum paketi `electron-builder` sırasında imzalanır (bkz. *VMP imzası*). İmza yoksa bu uygulamalar Microsoft Edge'de tam ekran açılır. Ayarlar → Oyun Modu ve Sistem → *Korumalı uygulamalar* ile seçilebilir.
   - Uygulama ikonları her uygulamanın kendi sitesinden çalışma anında alınır; kaynak kodda üçüncü taraf logosu yoktur.
   - Mağaza tam ekran bir uygulama olarak açılır: Öne Çıkanlar, Uygulamalar, Emülatörler, Temalar, Modlar ve İndirmeler bölümleri (L1/R1). Uzaktan katalog adresi (`storeCatalogUrl`) ile yeni içerik uygulama güncellemesi gerekmeden yayınlanabilir.
 - **Temalar ve modlar:** `themes/*.json` tema dosyaları ve `mods/<ad>/` CSS görünüm modları (`mod.json` + `style.css`). Modlar yalnızca görünümü değiştirir, kod çalıştıramaz.
@@ -121,6 +121,17 @@ src/
 
 Sadece `src/shared/platforms.ts` dosyasını düzenleyin: `EMULATORS` listesine emülatörü (exe adları ve komut satırı şablonu), `PLATFORMS` listesine platformu (uzantılar, çalıştırıcılar) ekleyin. Arayüz ve tarama otomatik güncellenir.
 
+### VMP imzası (Netflix vb. için)
+
+Yayın servisleri Widevine'in yanında uygulamanın castlabs EVS ile imzalanmasını ister. Ücretsiz bir EVS hesabı bir kez açılır:
+
+```bash
+pip install --upgrade castlabs-evs
+python -m castlabs_evs.account signup
+```
+
+Sonra `npm run dist` paketlenen uygulamayı otomatik imzalar (`scripts/vmp-sign.cjs`). Geliştirme ortamındaki Electron'u imzalamak için `npm run vmp:sign`.
+
 ### Uygulamanın adını değiştirmek
 
 `src/shared/brand.ts` içindeki değerleri ve `package.json` içindeki `name`, `productName`, `build.productName`, `build.appId` alanlarını değiştirin.
@@ -132,7 +143,7 @@ Sadece `src/shared/platforms.ts` dosyasını düzenleyin: `EMULATORS` listesine 
 - Elle eklenen `.url` kısayollarında oynama süresi takip edilemez (taranarak bulunan mağaza oyunlarında edilir).
 - Fragmanlar ve Steam isim eşleşmesi yalnızca Steam mağazasında bulunan oyunlar için çalışır. Her oyunun soundtrack'ini internetten yasal olarak çekebilecek açık bir kaynak yok; tema müziği Steam soundtrack'lerinden veya elle seçilen dosyadan gelir.
 - Dolphin ve Ryujinx'in sabit bir indirme adresi olmadığı için otomatik indirilemiyor; elle kurulup otomatik algılanabilir.
-- Netflix gibi DRM korumalı uygulamalar Microsoft Edge (veya Chrome) gerektirir; konsolun yerleşik tarayıcısında DRM modülü yoktur.
+- Netflix gibi DRM korumalı uygulamalar konsolun içinde yalnızca VMP imzalı kurulumda oynatılır; geliştirme sürümünde (`npm run dev`) Edge kullanılır.
 - PC oyunları ve emülatörler kendi pencerelerinde tam ekran çalışır; konsol arkada bekler ve oyun içi menü üstlerinde açılır.
 - Oyun bilgileri (yıl, tür, geliştirici) için çevrimiçi veritabanı henüz bağlı değil.
 

@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { BRAND } from '@shared/brand'
 import { PLATFORMS, getEmulator } from '@shared/platforms'
 import type { StoreItem } from '@shared/catalog'
-import { appIconUrl, downloadLine, formatBytes, formatEta } from '../api'
+import { appIconUrl, downloadLine, drmInConsole, formatBytes, formatEta } from '../api'
 import { Badge, Icon, type IconName } from '../icons'
 import { useInput } from '../input'
 import type { MenuCtx } from '../menu'
 import { sfx } from '../sound'
+
 
 export type StoreTab = 'featured' | 'apps' | 'emulators' | 'themes' | 'mods' | 'downloads'
 
@@ -109,9 +110,9 @@ export function Store({
         icon: state.appIcons[i.id.replace(/[^a-z0-9_-]/gi, '_')] ? appIconUrl(i.id, state.appIcons[i.id.replace(/[^a-z0-9_-]/gi, '_')]) : i.icon,
         author: i.author,
         description: i.description,
-        details: i.app?.drm
-          ? ['Korumalı (DRM) içerik: Microsoft Edge ile tam ekran açılır, oyun içi menü üstünde çalışır.']
-          : ['Konsolun içinde açılır.', i.app?.kiosk ? 'TV arayüzü: yön tuşları, ✕ seç, ○ geri' : 'Sol çubuk imleç, sağ çubuk kaydırma, sanal klavye'],
+        details: i.app?.drm && !drmInConsole(state)
+          ? ['Korumalı (DRM) içerik: Microsoft Edge ile tam ekran açılır, oyun içi menü üstünde çalışır.', `Konsol içi DRM: ${state.drm.detail}`]
+          : [i.app?.drm ? 'Konsolun içinde açılır (Widevine).' : 'Konsolun içinde açılır.', i.app?.kiosk ? 'TV arayüzü: yön tuşları, ✕ seç, ○ geri' : 'Sol çubuk imleç, sağ çubuk kaydırma, sanal klavye'],
         status: inst ? 'Yüklü' : 'Ücretsiz',
         installed: inst,
         actions: inst

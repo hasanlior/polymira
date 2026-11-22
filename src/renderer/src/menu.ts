@@ -538,6 +538,20 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
                 () => set({ gmStopExplorer: true })
               )
       },
+      choice(
+        'set:sys:drm',
+        'Korumalı uygulamalar (Netflix vb.)',
+        'apps',
+        s.drmMode,
+        [
+          { value: 'auto', label: 'Otomatik' },
+          { value: 'console', label: 'Konsolun içinde' },
+          { value: 'edge', label: 'Microsoft Edge' }
+        ],
+        (v) => set({ drmMode: v }),
+        ctx,
+        ctx.state.drm.detail
+      ),
       toggle('set:sys:restart', 'Kapanırsa otomatik yeniden başlat', 'refresh', s.autoRestart, (v) => set({ autoRestart: v }), 'Beklenmedik kapanmada uygulama kendini yeniden açar ve masaüstünü geri getirir'),
       toggle('set:sys:startup', 'Windows açılınca başlat', 'home', s.launchOnStartup, (v) => set({ launchOnStartup: v }), 'Bilgisayar açılınca doğrudan konsol arayüzü gelir'),
       {
