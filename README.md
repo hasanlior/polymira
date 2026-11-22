@@ -1,10 +1,10 @@
-# XPORT
+# POLYMIRA
 
 **One PC. Every Console. One Gaming Experience.**
 
-XPORT, bilgisayarı oyun konsoluna çeviren, tamamen kontrolcüyle kullanılan bir oyun arayüzüdür. Klasik konsol menülerinden (XMB tarzı yatay/dikey menü) ilham alır; farklı platformlardaki oyunlarını tek yerde toplar ve uygun emülatörle başlatır. Oyun sırasında kontrolcünün **Guide (Xbox / PS) tuşuna** basınca konsoldaki gibi bir oyun içi menü açılır.
+POLYMIRA, bilgisayarı oyun konsoluna çeviren, tamamen kontrolcüyle kullanılan bir oyun arayüzüdür. Klasik konsol menülerinden (XMB tarzı yatay/dikey menü) ilham alır; farklı platformlardaki oyunlarını tek yerde toplar ve uygun emülatörle başlatır. Oyun sırasında kontrolcünün **Guide (Xbox / PS) tuşuna** basınca konsoldaki gibi bir oyun içi menü açılır.
 
-> XPORT oyun, BIOS, firmware veya anahtar **içermez ve dağıtmaz**. Yalnızca sahip olduğunuz yazılımların yedeklerini kullanın.
+> POLYMIRA oyun, BIOS, firmware veya anahtar **içermez ve dağıtmaz**. Yalnızca sahip olduğunuz yazılımların yedeklerini kullanın.
 
 ## Özellikler
 
@@ -42,7 +42,7 @@ XPORT, bilgisayarı oyun konsoluna çeviren, tamamen kontrolcüyle kullanılan b
 - **Uygulamalar ve Mağaza:**
   - Uygulamalar: YouTube (TV arayüzü), Netflix, Disney+, Prime Video, Spotify, Twitch ve konsolun kendi tarayıcısı
   - Tarayıcı, YouTube ve Twitch konsolun içinde açılır. Tarayıcıda sol çubuk imleç, sağ çubuk kaydırma, ✕ tıklama, ○ geri; sanal klavye (□ / Start) ile adres ve metin girilir. Her uygulamanın oturumu kalıcıdır.
-  - DRM korumalı servisler (Netflix, Disney+, Prime Video, Spotify) de konsolun içinde açılır: XPORT, Widevine içeren castlabs Electron sürümünü kullanır. Yayın servisleri uygulamanın VMP imzalı olmasını ister; kurulum paketi `electron-builder` sırasında imzalanır (bkz. *VMP imzası*). İmza yoksa bu uygulamalar Microsoft Edge'de tam ekran açılır. Ayarlar → Oyun Modu ve Sistem → *Korumalı uygulamalar* ile seçilebilir.
+  - DRM korumalı servisler (Netflix, Disney+, Prime Video, Spotify) de konsolun içinde açılır: POLYMIRA, Widevine içeren castlabs Electron sürümünü kullanır. Yayın servisleri uygulamanın VMP imzalı olmasını ister; kurulum paketi `electron-builder` sırasında imzalanır (bkz. *VMP imzası*). İmza yoksa bu uygulamalar Microsoft Edge'de tam ekran açılır. Ayarlar → Oyun Modu ve Sistem → *Korumalı uygulamalar* ile seçilebilir.
   - Uygulama ikonları her uygulamanın kendi sitesinden çalışma anında alınır; kaynak kodda üçüncü taraf logosu yoktur.
   - Mağaza tam ekran bir uygulama olarak açılır: Öne Çıkanlar, Uygulamalar, Emülatörler, Temalar, Modlar ve İndirmeler bölümleri (L1/R1). Uzaktan katalog adresi (`storeCatalogUrl`) ile yeni içerik uygulama güncellemesi gerekmeden yayınlanabilir.
 - **Temalar ve modlar:** `themes/*.json` tema dosyaları ve `mods/<ad>/` CSS görünüm modları (`mod.json` + `style.css`). Modlar yalnızca görünümü değiştirir, kod çalıştıramaz.
@@ -66,7 +66,7 @@ XPORT, bilgisayarı oyun konsoluna çeviren, tamamen kontrolcüyle kullanılan b
 | Diğer | Arcade, Neo Geo, Atari 2600/7800/Lynx, MSX, Commodore 64 | RetroArch |
 | PC | Steam, Epic, Xbox uygulaması, GOG, Riot, Ubisoft, `.exe`, `.lnk`, `.url` | — |
 
-Emülatörleri kendiniz kurmanız gerekir. XPORT onları **Ayarlar → Emülasyon Ayarları → Emülatörleri otomatik bul** ile bulmaya çalışır ya da yolunu elle seçebilirsiniz.
+Emülatörleri kendiniz kurmanız gerekir. POLYMIRA onları **Ayarlar → Emülasyon Ayarları → Emülatörleri otomatik bul** ile bulmaya çalışır ya da yolunu elle seçebilirsiniz.
 
 ## Kontroller
 

@@ -2,6 +2,7 @@
 import { createElement, useCallback, useEffect, useRef, useState } from 'react'
 import type { StoreItem } from '@shared/catalog'
 import { appIconUrl } from '../api'
+import { BRAND } from '@shared/brand'
 import { Icon } from '../icons'
 import { input, useInput, type Action } from '../input'
 import type { MenuCtx, OptItem } from '../menu'
@@ -10,7 +11,10 @@ import { sfx } from '../sound'
 type WebviewEl = HTMLElement & Electron.WebviewTag
 
 /** Chromium user agent without the Electron/app tokens (some sites refuse "Electron"). */
-const CHROME_UA = navigator.userAgent.replace(/\s(Electron|xport)\/\S+/gi, '')
+const CHROME_UA = navigator.userAgent
+  .split(' ')
+  .filter((t) => !new RegExp(`^(Electron|xport|${BRAND.slug})/`, 'i').test(t))
+  .join(' ')
 
 const DEADZONE = 0.18
 

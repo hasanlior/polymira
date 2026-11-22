@@ -1,6 +1,6 @@
 {
-  "name": "xport",
-  "productName": "XPORT",
+  "name": "polymira",
+  "productName": "POLYMIRA",
   "version": "0.1.0",
   "description": "Universal gaming console experience for PC: a controller-first, XMB-style frontend that organizes and launches games across platforms.",
   "main": "./out/main/index.js",
@@ -11,8 +11,9 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "dist": "electron-vite build && electron-builder --win",
-    "vmp:sign": "python -m castlabs_evs.vmp sign-pkg node_modules/electron/dist"
+    "dist": "electron-vite build && electron-builder --win && node scripts/shortcut.cjs dist",
+    "vmp:sign": "python -m castlabs_evs.vmp sign-pkg node_modules/electron/dist",
+    "postbuild": "node scripts/shortcut.cjs"
   },
   "dependencies": {
     "koffi": "2.9.2"
@@ -32,13 +33,14 @@
     "vite": "5.4.11"
   },
   "build": {
-    "appId": "io.github.xport.app",
-    "productName": "XPORT",
+    "appId": "io.github.polymira.app",
+    "productName": "POLYMIRA",
     "directories": {
       "output": "release"
     },
     "files": [
       "out/**/*",
+      "resources/**/*",
       "package.json"
     ],
     "asarUnpack": [
@@ -48,11 +50,20 @@
       "target": [
         "nsis",
         "portable"
-      ]
+      ],
+      "icon": "build/icon.ico"
     },
     "electronDownload": {
       "mirror": "https://github.com/castlabs/electron-releases/releases/download/v"
     },
-    "afterPack": "scripts/vmp-sign.cjs"
+    "afterPack": "scripts/vmp-sign.cjs",
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "POLYMIRA",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    }
   }
 }

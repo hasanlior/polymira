@@ -4,8 +4,12 @@
  * and `build.productName` / `build.appId` in package.json.
  */
 export const BRAND = {
-  name: 'XPORT',
-  tagline: 'One PC. Every Console. One Gaming Experience.',
-  /** Used for the user data folder name and internal identifiers. Keep it filesystem-safe. */
-  slug: 'xport'
-} as const
+  name: 'POLYMIRA',
+  tagline: 'Every console. One universe.',
+  /** Used for internal identifiers. Keep it filesystem-safe. */
+  slug: 'polymira',
+  /** GitHub repository ("owner/name") used for updates and the community store. Empty = disabled. */
+  repo: '' as string,
+  /** Data folder names of earlier product names, migrated on first start. */
+  legacyNames: ['XPORT'] as string[]
+}

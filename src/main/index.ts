@@ -25,10 +25,33 @@ import { getRuntime, initRuntime, readRuntime, runtimeFile, updateRuntime } from
 
 /** Keyboard fallback for opening the in-game menu (works while the emulator has focus). */
 const OVERLAY_SHORTCUT = 'Control+Shift+Home'
+const appIcon = path.join(__dirname, '../../resources/icon.png')
 
 protocol.registerSchemesAsPrivileged([
   { scheme: MEDIA_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
 ])
+
+/**
+ * The product was renamed: on the first start under the new name, carry over the library,
+ * settings, artwork and app logins from the old data folder (Chromium caches are skipped).
+ */
+function migrateLegacyData(): void {
+  const target = app.getPath('userData')
+  if (fs.existsSync(path.join(target, 'settings.json'))) return
+  for (const old of BRAND.legacyNames) {
+    const src = path.join(app.getPath('appData'), old)
+    if (src === target || !fs.existsSync(path.join(src, 'settings.json'))) continue
+    const skip = new Set(['Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache', 'Crashpad', 'runtime.json', 'SingletonLock'])
+    try {
+      fs.cpSync(src, target, { recursive: true, filter: (p) => !skip.has(path.basename(p)) })
+      console.log('[migrate] copied data from', src)
+    } catch (err) {
+      console.warn('[migrate] failed:', (err as Error).message)
+    }
+    return
+  }
+}
+migrateLegacyData()
 
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -136,6 +159,7 @@ function windowOptions(mode: WindowMode): Electron.BrowserWindowConstructorOptio
   const d = screen.getPrimaryDisplay()
   const base: Electron.BrowserWindowConstructorOptions = {
     title: BRAND.name,
+    icon: appIcon,
     backgroundColor: '#000000',
     show: false,
     autoHideMenuBar: true,
