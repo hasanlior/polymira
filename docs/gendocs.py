@@ -44,7 +44,7 @@ P['install'] = ('Installation', 'Download, install, update and uninstall.', """
 <p>The installer is not code-signed yet, so Windows may show “Windows protected your PC”. Choose <b>More info</b> and then <b>Run anyway</b>.</p>
 <h2 id="updates">Updates</h2>
 <p>The installed version checks GitHub Releases when it starts. A new version is downloaded in the background and verified against the SHA-256 digest GitHub publishes for the file. You get a notification when it is ready; install it from <b>Settings → About → Install update</b>. The app closes, installs and starts again.</p>
-<p>Automatic checks can be turned off with <b>Settings → About → Check for updates on start</b>.</p>
+<p>Automatic checks can be turned off with <b>Settings → About → Check for updates on start</b>. After an update, <b>Settings → About → What's new</b> shows the release notes. Notes for every version are also on the <a href="../changelog.html">changelog</a>.</p>
 <h2 id="data">Where your data lives</h2>
 <p>Settings, the library, covers, screenshots and save backups are stored in <code>%APPDATA%\\POLYMIRA</code>. Uninstalling the app keeps this folder; delete it yourself for a clean start.</p>
 <h2 id="uninstall">Uninstall</h2>
@@ -79,6 +79,8 @@ P['library'] = ('Library', 'How games are found, organised and launched.', """
 <p>Added folders are watched: <b>Settings → Library &amp; Storage → Rescan all folders</b> picks up new games, and scanning on start can be turned on there.</p>
 <h2 id="artwork">Artwork and information</h2>
 <p>Covers and backgrounds come from the game files themselves (PS3/PS4/Vita), Steam, the Epic launcher's cache and the libretro thumbnail archive. Descriptions, year, genre and developer come from the Steam store, the libretro database and Wikipedia. You can set your own cover, background and theme music from a game's options.</p>
+<h2 id="search">Search and random pick</h2>
+<p><b>Home → Search games</b> opens the on-screen keyboard; results match the title, platform, genre or developer and open as a cover gallery. <b>Home → Pick a game for me</b> opens a random game, preferring ones you have never played.</p>
 <h2 id="gallery">Gallery view</h2>
 <p>Press <kbd>X</kbd> / <kbd>□</kbd> on a platform folder to see its games as a grid of covers.</p>
 <figure><img src="../assets/shots/gallery.jpg" alt="Gallery view" /></figure>
@@ -120,6 +122,7 @@ P['in-game-menu'] = ('In-game menu', 'The menu you open on top of a running game
 <p>The performance panel shows the game's CPU and RAM use, system CPU and RAM, and GPU usage on NVIDIA cards.</p>
 <h2 id="borderless">Exclusive full screen</h2>
 <div class="note warn"><p>The menu draws over games running in <b>borderless</b> full screen. Games in <b>exclusive</b> full screen may hide it. Choose borderless or windowed full screen in the game's display settings.</p></div>
+<p>RetroArch, DuckStation, PCSX2 and Dolphin are switched to borderless full screen automatically. Turn this off with <b>Settings → Controller Settings → Borderless full screen in emulators</b>.</p>
 <h2 id="behind">While you play</h2>
 <p>POLYMIRA stays open behind the game on a black screen and stops its own animation, so it does not use GPU time. When the game exits, you are back on the home screen.</p>
 """)
@@ -305,7 +308,7 @@ def page(slug):
         <a href="../#tour">Tour</a>
         <a href="../#features">Features</a>
         <a href="./" class="on">Docs</a>
-        <a href="https://github.com/hasanlior/polymira/releases">Releases</a>
+        <a href="../changelog.html">Changelog</a>
       </div>
       <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub">{STAR}<span>Star</span><b class="stars"></b></a>
       <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>

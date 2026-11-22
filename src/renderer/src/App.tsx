@@ -20,6 +20,7 @@ import { RemapScreen } from './components/Remap'
 import { NoticeStack } from './components/Notices'
 import { StatsScreen } from './components/Stats'
 import { TrophyScreen } from './components/Trophies'
+import { WhatsNew } from './components/WhatsNew'
 import { applyLanguage, locale } from './i18n'
 
 type Modal =
@@ -33,6 +34,7 @@ type Modal =
   | { type: 'store'; tab?: StoreTab }
   | { type: 'remap' }
   | { type: 'stats' }
+  | { type: 'whatsnew' }
   | { type: 'trophies'; key2?: string }
   | { type: 'web'; item: StoreItem; gameId?: string }
   | { type: 'keyboard'; title: string; initial: string; onDone: (text: string) => void }
@@ -221,6 +223,7 @@ export function App() {
       openStore: (tab) => openModal({ type: 'store', tab }),
       openRemap: () => openModal({ type: 'remap' }),
       openStats: () => openModal({ type: 'stats' }),
+      openWhatsNew: () => openModal({ type: 'whatsnew' }),
       openTrophies: (key) => openModal({ type: 'trophies', key2: key }),
       keyboard: (title, initial, onDone) => openModal({ type: 'keyboard', title, initial, onDone }),
       setSettings: (patch) => void call('settings:set', patch),
@@ -351,6 +354,8 @@ export function App() {
                 )
               case 'trophies':
                 return <TrophyScreen key={m.key} initialKey={m.key2} onClose={close} />
+              case 'whatsnew':
+                return <WhatsNew key={m.key} onClose={close} />
               case 'stats':
                 return <StatsScreen key={m.key} onClose={close} />
               case 'remap':

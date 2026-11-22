@@ -72,6 +72,7 @@ export interface MenuCtx {
   openScan: () => void
   openRemap: () => void
   openStats: () => void
+  openWhatsNew: () => void
   openTrophies: (key?: string) => void
   keyboard: (title: string, initial: string, onDone: (text: string) => void) => void
   openStore: (tab?: 'featured' | 'apps' | 'emulators' | 'themes' | 'mods' | 'downloads') => void
@@ -648,6 +649,14 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
         (v) => set({ autoPadConfig: v }),
         'Oyun başlamadan önce emülatörün kol ayarları yazılır; emülatörü açıp ayarlamana gerek kalmaz'
       ),
+      toggle(
+        'set:emu:borderless',
+        'Emülatörlerde kenarlıksız tam ekran',
+        'display',
+        s.emuBorderless,
+        (v) => set({ emuBorderless: v }),
+        'Oyun içi menünün emülatörlerin üstünde görünmesi için RetroArch, DuckStation, PCSX2 ve Dolphin kenarlıksız tam ekrana alınır'
+      ),
       {
         id: 'set:pads:reapply',
         title: 'Kol ayarlarını yeniden uygula',
@@ -882,6 +891,7 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     icon: 'info',
     children: [
       { id: 'about:name', title: BRAND.name, subtitle: BRAND.tagline, icon: 'info', value: `v${ctx.state.version}` },
+      { id: 'about:notes', title: 'Yenilikler', icon: 'star', value: `v${ctx.state.version}`, subtitle: 'Bu sürümdeki değişiklikler', onActivate: () => ctx.openWhatsNew() },
       { id: 'about:games', title: 'Kütüphanedeki oyunlar', icon: 'game', value: String(ctx.state.games.length) },
       (() => {
         const u = ctx.state.update
@@ -976,6 +986,38 @@ function homeItems(ctx: MenuCtx): XItem[] {
         })),
         { id: 'notices:clear', title: 'Bildirimleri temizle', icon: 'trash', onActivate: () => void window.bridge.invoke('notices:clear') }
       ]
+    })
+  }
+  const playable = ctx.state.games.filter((g) => g.platformId !== 'apps')
+  if (playable.length) {
+    items.push({
+      id: 'home:search',
+      title: 'Oyun ara',
+      icon: 'search',
+      subtitle: 'Ada, platforma veya türe göre ara',
+      onActivate: () =>
+        ctx.keyboard('Oyun ara', '', (q) => {
+          const query = q.trim().toLocaleLowerCase('tr')
+          if (!query) return
+          const hits = playable.filter((g) =>
+            [g.title, getPlatform(g.platformId)?.name, getPlatform(g.platformId)?.short, g.meta.genre, g.meta.developer]
+              .filter(Boolean)
+              .some((t) => String(t).toLocaleLowerCase('tr').includes(query))
+          )
+          if (hits.length) ctx.openGallery(`Arama: ${q.trim()}`, hits.sort(byTitle))
+          else ctx.run(() => Promise.reject(new Error(`"${q.trim()}" için oyun bulunamadı.`)))
+        })
+    })
+    items.push({
+      id: 'home:random',
+      title: 'Bana bir oyun seç',
+      icon: 'star',
+      subtitle: 'Kütüphanenden rastgele bir oyun; önce hiç oynamadıkların',
+      onActivate: () => {
+        const fresh = playable.filter((g) => !g.playCount)
+        const pool = fresh.length ? fresh : playable
+        ctx.openDetail(pool[Math.floor(Math.random() * pool.length)].id)
+      }
     })
   }
   items.push({ id: 'home:trophies', title: 'Kupalar', icon: 'star', subtitle: 'Steam ve RetroAchievements başarımların', onActivate: () => ctx.openTrophies() })

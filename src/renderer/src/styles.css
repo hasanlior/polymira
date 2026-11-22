@@ -2177,3 +2177,42 @@ body.overlay-body #root {
 .detail-desc.dim {
   color: var(--fg-faint);
 }
+
+/* What's new */
+.whatsnew {
+  width: min(90vw, calc(100 * var(--u)));
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  padding: calc(3.5 * var(--u)) calc(4 * var(--u));
+  border-radius: calc(2 * var(--u));
+  background: linear-gradient(160deg, rgba(34, 40, 76, 0.97), rgba(12, 14, 30, 0.97));
+  border: 1px solid var(--line);
+}
+.whatsnew-body {
+  flex: 1;
+  overflow-y: auto;
+  margin: calc(2 * var(--u)) 0;
+  font-size: calc(1.9 * var(--u));
+  line-height: 1.55;
+  scrollbar-width: none;
+}
+.whatsnew-body h3 {
+  font-size: calc(2.3 * var(--u));
+  font-weight: 500;
+  margin: calc(2.4 * var(--u)) 0 calc(0.8 * var(--u));
+}
+.whatsnew-body ul {
+  margin: 0;
+  padding-left: calc(2.6 * var(--u));
+}
+.whatsnew-body li {
+  margin: calc(0.5 * var(--u)) 0;
+  color: rgba(255, 255, 255, 0.85);
+}
+.whatsnew-body code {
+  font-size: 0.9em;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0 0.4em;
+  border-radius: 0.3em;
+}

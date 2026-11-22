@@ -173,6 +173,41 @@ function rpcs3(dir: string): void {
 
 const WRITERS: Record<string, (dir: string) => void> = { duckstation, pcsx2, dolphin, rpcs3 }
 
+// ── Borderless full screen ────────────────────────────────────────────
+// The in-game menu can only draw over games in borderless (not exclusive) full screen.
+// Only the display keys below are written; the rest of the emulator's settings stay as they are.
+
+const DISPLAY_WRITERS: Record<string, (dir: string) => void> = {
+  duckstation(dir) {
+    const base = fs.existsSync(path.join(dir, 'portable.txt')) || fs.existsSync(path.join(dir, 'settings.ini')) ? dir : path.join(docs(), 'DuckStation')
+    setIni(path.join(base, 'settings.ini'), 'GPU', { FullscreenMode: '' })
+  },
+  pcsx2(dir) {
+    const portable = fs.existsSync(path.join(dir, 'portable.ini')) || fs.existsSync(path.join(dir, 'portable.txt'))
+    setIni(path.join(portable ? dir : path.join(docs(), 'PCSX2'), 'inis', 'PCSX2.ini'), 'EmuCore/GS', { FullscreenMode: '' })
+  },
+  dolphin(dir) {
+    const user = fs.existsSync(path.join(dir, 'portable.txt')) ? path.join(dir, 'User') : path.join(docs(), 'Dolphin Emulator')
+    setIni(path.join(user, 'Config', 'GFX.ini'), 'Settings', { BorderlessFullscreen: 'True' })
+  }
+}
+
+/** Switches an emulator to borderless full screen, once per emulator install. */
+export function ensureBorderless(emuId: string, exe: string): void {
+  if (!store.settings.emuBorderless) return
+  const write = DISPLAY_WRITERS[emuId]
+  if (!write) return
+  const done = store.settings.displayConfigured ?? {}
+  if (done[emuId] === exe) return
+  try {
+    write(path.dirname(exe))
+    store.updateSettings({ displayConfigured: { ...done, [emuId]: exe } })
+    console.log('[display] borderless full screen set for', emuId)
+  } catch (err) {
+    console.warn('[display] could not write display settings for', emuId, (err as Error).message)
+  }
+}
+
 /**
  * Called right before an emulator starts. Writes its controller settings the first time
  * (or again after the user asked to re-apply them).

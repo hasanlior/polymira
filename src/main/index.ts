@@ -17,7 +17,7 @@ import { riotClientPath } from './launchers'
 import { attachSoundtracks } from './music'
 import { DownloadManager, EMULATOR_SOURCES } from './downloads'
 import { appLaunchPlan, appPath, catalog, findItem, installMod, installedThemes, listMods, modsCss, openFolder, removeMod } from './apps'
-import { checkForUpdate, installUpdate, updateState } from './updater'
+import { checkForUpdate, installUpdate, releaseNotes, updateState } from './updater'
 import { addCandidates } from './library'
 import { appIconFile, appIconRevs, fetchAppIcon } from './appIcons'
 import { drmStatus, initDrm } from './drm'
@@ -766,6 +766,7 @@ const handlers: Handlers = {
   'saves:openFolder': (emuId) => openSaveFolder(emuId),
   'stats:get': () => playStats(),
   'update:check': () => checkForUpdate(broadcast),
+  'app:notes': () => releaseNotes(),
   'update:install': () => {
     if (installUpdate()) void gracefulQuit()
     else throw new Error('Kurulmaya hazır bir güncelleme yok.')
@@ -979,6 +980,12 @@ app.whenReady().then(() => {
     void attachSoundtracks().then((n) => n && broadcast())
     void refreshAppIcons()
     refreshSaves()
+    // First start after an update: point to the release notes.
+    const current = app.getVersion()
+    if (store.settings.lastSeenVersion !== current) {
+      if (store.settings.lastSeenVersion) notify({ kind: 'update', title: `${BRAND.name} ${current} yüklendi`, text: 'Yenilikler: Ayarlar → Hakkında → Yenilikler' })
+      store.updateSettings({ lastSeenVersion: current })
+    }
     if (store.settings.autoUpdate) {
       void checkForUpdate(broadcast).then((u) => {
         if (u.status === 'ready') notify({ kind: 'update', title: `${BRAND.name} ${u.version} hazır`, text: 'Ayarlar → Hakkında → Güncellemeyi kur' })

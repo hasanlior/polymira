@@ -105,6 +105,16 @@ async function download(asset: Asset, progress: (p: number) => void): Promise<st
   return file
 }
 
+/** Release notes of the installed version (GitHub release body). */
+export async function releaseNotes(): Promise<{ version: string; body: string }> {
+  const version = app.getVersion()
+  if (!BRAND.repo) throw new Error('Sürüm notları için depo ayarlanmamış.')
+  const res = await net.fetch(`https://api.github.com/repos/${BRAND.repo}/releases/tags/v${version}`, { headers: HEADERS })
+  if (!res.ok) throw new Error('Sürüm notları alınamadı. İnternet bağlantını kontrol et.')
+  const rel = (await res.json()) as { body?: string }
+  return { version, body: rel.body?.trim() || 'Bu sürüm için not yok.' }
+}
+
 /** Runs the downloaded installer silently; it replaces the app and starts it again. */
 export function installUpdate(): boolean {
   if (state.status !== 'ready' || !installer || !fs.existsSync(installer)) return false

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Changelog · POLYMIRA</title>
+  <meta name="description" content="Release notes for every POLYMIRA version." />
+  <meta name="theme-color" content="#05060f" />
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="assets/site.css" />
+  <style>
+    .log { max-width: 820px; margin: 0 auto; padding: 56px 24px 80px; }
+    .log h1 { text-align: left; font-size: clamp(34px, 5vw, 48px); margin: 0 0 10px; }
+    .log > p { color: var(--dim); font-size: 17px; margin: 0 0 40px; }
+    .rel { border-top: 1px solid var(--line); padding: 34px 0; display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 28px; }
+    .rel-side h2 { font-size: 22px; margin: 0; }
+    .rel-side time { display: block; color: var(--faint); font-size: 13px; margin-top: 4px; }
+    .rel-side .latest { display: inline-block; margin-top: 10px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; padding: 3px 8px; border-radius: 6px; background: rgba(154, 140, 255, .18); color: #c9c1ff; }
+    .rel-body h3 { font-size: 15px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); margin: 0 0 8px; }
+    .rel-body h3:not(:first-child) { margin-top: 22px; }
+    .rel-body ul { margin: 0; padding-left: 20px; }
+    .rel-body li { color: #c9cbdd; margin: 6px 0; }
+    .rel-body p { color: #c9cbdd; margin: 8px 0; }
+    .rel-body code { font: 13.5px ui-monospace, Consolas, monospace; background: rgba(255,255,255,.07); padding: 1px 6px; border-radius: 6px; }
+    .rel-body a { color: var(--accent); }
+    .rel-dl { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+    .rel-dl a { font-size: 13px; padding: 6px 12px; border: 1px solid var(--line2); border-radius: 999px; color: var(--fg); }
+    .rel-dl a:hover { border-color: rgba(255,255,255,.35); }
+    .empty { color: var(--dim); }
+    @media (max-width: 700px) { .rel { grid-template-columns: 1fr; gap: 12px; } }
+  </style>
+</head>
+<body>
+  <nav class="top">
+    <div class="wrap">
+      <a class="brand" href="./"><img src="assets/icon.svg" alt="" />POLYMIRA</a>
+      <div class="navlinks">
+        <a href="./#tour">Tour</a>
+        <a href="./#features">Features</a>
+        <a href="docs/">Docs</a>
+        <a href="changelog.html" class="on">Changelog</a>
+      </div>
+      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+    </div>
+  </nav>
+
+  <main class="log">
+    <h1 class="display">Changelog</h1>
+    <p>What changed in each version. The installed app updates itself and shows these notes under Settings → About → What's new.</p>
+    <div id="releases"><p class="empty">Loading releases…</p></div>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <span>© 2026 POLYMIRA · <a href="docs/">Docs</a> · <a href="https://github.com/hasanlior/polymira/blob/main/CHANGELOG.md">CHANGELOG.md</a></span>
+      <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
+    </div>
+  </footer>
+
+  <script src="assets/site.js"></script>
+  <script>
+    // Release notes come straight from GitHub Releases, so every new release shows up here.
+    const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+    const inline = (s) =>
+      esc(s)
+        .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2">$1</a>')
+    function md(text) {
+      let out = ''
+      let inList = false
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim()
+        const h = line.match(/^#{1,4}\s+(.*)$/)
+        const li = line.match(/^[-*]\s+(.*)$/)
+        if (li) {
+          if (!inList) { out += '<ul>'; inList = true }
+          out += '<li>' + inline(li[1]) + '</li>'
+          continue
+        }
+        if (inList) { out += '</ul>'; inList = false }
+        if (h) out += '<h3>' + inline(h[1]) + '</h3>'
+        else if (line) out += '<p>' + inline(line) + '</p>'
+      }
+      if (inList) out += '</ul>'
+      return out
+    }
+    const box = document.getElementById('releases')
+    fetch('https://api.github.com/repos/hasanlior/polymira/releases?per_page=50')
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((list) => {
+        const rels = list.filter((r) => !r.draft)
+        if (!rels.length) { box.innerHTML = '<p class="empty">No releases yet.</p>'; return }
+        box.innerHTML = rels.map((r, i) => {
+          const date = new Date(r.published_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
+          const files = r.assets.filter((a) => /\.exe$/i.test(a.name))
+            .map((a) => `<a href="${a.browser_download_url}">${esc(a.name)} · ${Math.round(a.size / 1048576)} MB</a>`).join('')
+          return `<article class="rel" id="${esc(r.tag_name)}">
+            <div class="rel-side"><h2 class="display">${esc(r.tag_name.replace(/^v/, ''))}</h2><time>${date}</time>${i === 0 ? '<span class="latest">Latest</span>' : ''}</div>
+            <div class="rel-body">${md(r.body || '')}<div class="rel-dl">${files}</div></div>
+          </article>`
+        }).join('')
+      })
+      .catch(() => {
+        box.innerHTML = '<p class="empty">Could not load releases right now. See <a style="color:var(--accent)" href="https://github.com/hasanlior/polymira/releases">GitHub Releases</a> or <a style="color:var(--accent)" href="https://github.com/hasanlior/polymira/blob/main/CHANGELOG.md">CHANGELOG.md</a>.</p>'
+      })
+  </script>
+</body>
+</html>

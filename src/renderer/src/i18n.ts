@@ -526,12 +526,28 @@ const EN: Record<string, string> = {
   'Geçersiz dosya.': 'Invalid file.',
   Türkçe: 'Türkçe',
   '<1 dk': '<1 min',
-  'Bulunamadı.': 'Not found.'
+  'Bulunamadı.': 'Not found.',
+  'Oyun ara': 'Search games',
+  Yenilikler: "What's new",
+  'Bu sürümdeki değişiklikler': 'Changes in this version',
+  'Sürüm notları alınamadı. İnternet bağlantını kontrol et.': 'Could not load the release notes. Check your internet connection.',
+  'Sürüm notları için depo ayarlanmamış.': 'No repository set for release notes.',
+  'Bu sürüm için not yok.': 'No notes for this version.',
+  'Yenilikler: Ayarlar → Hakkında → Yenilikler': "What's new: Settings → About → What's new",
+  'Ada, platforma veya türe göre ara': 'Search by title, platform or genre',
+  'Bana bir oyun seç': 'Pick a game for me',
+  'Kütüphanenden rastgele bir oyun; önce hiç oynamadıkların': "A random game from your library, unplayed ones first",
+  'Emülatörlerde kenarlıksız tam ekran': 'Borderless full screen in emulators',
+  'Oyun içi menünün emülatörlerin üstünde görünmesi için RetroArch, DuckStation, PCSX2 ve Dolphin kenarlıksız tam ekrana alınır': 'RetroArch, DuckStation, PCSX2 and Dolphin are set to borderless full screen so the in-game menu can appear over them'
 }
 
 /** Texts with names or numbers inside. */
 const PATTERNS: [RegExp, string][] = [
   [/^%(\d+)$/, '$1%'],
+  [/^Arama: (.+)$/, 'Search: $1'],
+  [/^Yenilikler · v(.+)$/, "What's new · v$1"],
+  [/^(.+) (\d+\.\d+\.\d+) yüklendi$/, '$1 $2 installed'],
+  [/^"(.+)" için oyun bulunamadı\.$/, 'No games found for "$1".'],
   [/^(\d+) sa$/, '$1 h'],
   [/^Kontrolcü (\d+): (.+)$/, 'Controller $1: $2'],
   [/^Tarama (\d+) sn sürdü · (\d+) klasör tarandı$/, 'Scan took $1 s · $2 folders scanned'],

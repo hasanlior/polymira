@@ -110,6 +110,12 @@ export interface Settings {
   autoPadConfig: boolean
   /** Emulators whose controller settings were written (id → exe path). */
   padConfigured: Record<string, string>
+  /** Put emulators in borderless full screen so the in-game menu can draw over them. */
+  emuBorderless: boolean
+  /** Emulators whose display settings were written (id → exe path). */
+  displayConfigured: Record<string, string>
+  /** Last app version the user has seen the "What's new" notes for. */
+  lastSeenVersion: string
   /** Check GitHub Releases for a new version on start. */
   autoUpdate: boolean
   watchedFolders: WatchedFolder[]

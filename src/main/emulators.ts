@@ -2,7 +2,7 @@ import { shell } from 'electron'
 import fs from 'fs'
 import os from 'os'
 import { paths } from './store'
-import { ensurePadConfig } from './padconfig'
+import { ensureBorderless, ensurePadConfig } from './padconfig'
 import path from 'path'
 import { EMULATORS, getEmulator, getPlatform, resolveRunner, runnerLabel } from '@shared/platforms'
 import type { EmulatorStatus, Game, Settings } from '@shared/types'
@@ -145,6 +145,7 @@ export function planLaunch(game: Game, settings: Settings): LaunchPlan {
   }
 
   ensurePadConfig(emu.id, exe)
+  ensureBorderless(emu.id, exe)
   const args = emu.args.map((a) => a.replace('{rom}', target).replace('{core}', core))
   const extra: string[] = []
   if (emu.id === 'retroarch') extra.push(...retroArchExtras(game, exe))
@@ -189,6 +190,7 @@ function retroArchExtras(game: Game, exe: string): string[] {
       'input_joypad_driver = "xinput"',
       'pause_nonactive = "false"',
       'video_fullscreen = "true"',
+      'video_windowed_fullscreen = "true"',
       'config_save_on_exit = "true"'
     ].join('\n') + '\n'
   )
