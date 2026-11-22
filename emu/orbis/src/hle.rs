@@ -150,5 +150,5 @@ pub fn forced(nid_: &str) -> bool {
 /// NID → (name, address) for every implemented function.
 pub fn table() -> &'static HashMap<String, (&'static str, usize)> {
     static T: OnceLock<HashMap<String, (&'static str, usize)>> = OnceLock::new();
-    T.get_or_init(|| crate::hle_rt::functions().into_iter().chain(implemented()).chain(crate::kernel::functions()).chain(crate::thread::functions()).chain(crate::system::functions()).map(|(name, addr)| (name.strip_prefix('#').map(str::to_string).unwrap_or_else(|| nid(name)), (name.trim_start_matches('#'), addr))).collect())
+    T.get_or_init(|| crate::hle_rt::functions().into_iter().chain(implemented()).chain(crate::kernel::functions()).chain(crate::thread::functions()).chain(crate::system::functions()).chain(crate::gpu::functions()).map(|(name, addr)| (name.strip_prefix('#').map(str::to_string).unwrap_or_else(|| nid(name)), (name.trim_start_matches('#'), addr))).collect())
 }

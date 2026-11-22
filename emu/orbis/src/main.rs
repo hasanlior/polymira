@@ -12,6 +12,7 @@ mod hle;
 mod hle_rt;
 mod known;
 mod kernel;
+mod gpu;
 mod system;
 mod thread;
 mod loader;
