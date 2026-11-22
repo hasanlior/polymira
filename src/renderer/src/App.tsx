@@ -19,6 +19,7 @@ import { OnScreenKeyboard } from './components/Keyboard'
 import { RemapScreen } from './components/Remap'
 import { NoticeStack } from './components/Notices'
 import { StatsScreen } from './components/Stats'
+import { TrophyScreen } from './components/Trophies'
 
 type Modal =
   | { type: 'detail'; gameId: string }
@@ -31,6 +32,7 @@ type Modal =
   | { type: 'store'; tab?: StoreTab }
   | { type: 'remap' }
   | { type: 'stats' }
+  | { type: 'trophies'; key2?: string }
   | { type: 'web'; item: StoreItem; gameId?: string }
   | { type: 'keyboard'; title: string; initial: string; onDone: (text: string) => void }
 
@@ -217,6 +219,7 @@ export function App() {
       openStore: (tab) => openModal({ type: 'store', tab }),
       openRemap: () => openModal({ type: 'remap' }),
       openStats: () => openModal({ type: 'stats' }),
+      openTrophies: (key) => openModal({ type: 'trophies', key2: key }),
       keyboard: (title, initial, onDone) => openModal({ type: 'keyboard', title, initial, onDone }),
       setSettings: (patch) => void call('settings:set', patch),
       run: (fn, success) => {
@@ -344,6 +347,8 @@ export function App() {
                     openKeyboard={(title, initial, onDone) => openModal({ type: 'keyboard', title, initial, onDone })}
                   />
                 )
+              case 'trophies':
+                return <TrophyScreen key={m.key} initialKey={m.key2} onClose={close} />
               case 'stats':
                 return <StatsScreen key={m.key} onClose={close} />
               case 'remap':

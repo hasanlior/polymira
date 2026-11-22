@@ -21,6 +21,8 @@ import { addCandidates } from './library'
 import { appIconFile, appIconRevs, fetchAppIcon } from './appIcons'
 import { drmStatus, initDrm } from './drm'
 import { recordSession, playStats } from './stats'
+import { fetchGameInfo } from './gameinfo'
+import { trophyGames, trophyList, watchTrophies } from './achievements'
 import { createSocket } from 'dgram'
 import { RETROARCH_CMD_PORT } from './emulators'
 import { backupAll, emulatorOfGame, openSaveFolder, refreshSaves, restoreBackup, savesSnapshot } from './saves'
@@ -311,6 +313,7 @@ function ensureOverlay(): BrowserWindow {
 // ── In-game menu ──────────────────────────────────────────────────────
 
 let overlayMenuOpen = false
+let stopTrophyWatch: (() => void) | null = null
 
 function hideOverlay(): void {
   overlayMenuOpen = false
@@ -351,6 +354,11 @@ function toggleOverlay(): void {
 }
 
 session.on('started', (info: import('@shared/types').SessionInfo) => {
+  const played = store.games.find((x) => x.id === info.gameId)
+  stopTrophyWatch?.()
+  stopTrophyWatch = played
+    ? watchTrophies(played, (t) => notify({ kind: 'trophy', title: `Kupa kazanıldı: ${t.title}`, text: t.description, icon: t.icon }))
+    : null
   void enterGameMode(info.pid).then((applied) => {
     if (applied.length) console.log('[game mode]', applied.join(', '))
   })
@@ -369,6 +377,8 @@ session.on('started', (info: import('@shared/types').SessionInfo) => {
 session.on('changed', () => broadcast())
 
 session.on('ended', (end: import('./session').SessionEnd) => {
+  stopTrophyWatch?.()
+  stopTrophyWatch = null
   void exitGameMode()
   watcher.stop()
   globalShortcut.unregister(OVERLAY_SHORTCUT)
@@ -747,6 +757,23 @@ const handlers: Handlers = {
   },
   'saves:openFolder': (emuId) => openSaveFolder(emuId),
   'stats:get': () => playStats(),
+  'game:info': async (id, force) => {
+    const g = store.games.find((x) => x.id === id)
+    if (!g) return null
+    const fresh = g.infoCheckedAt && Date.now() - g.infoCheckedAt < 30 * 24 * 3600 * 1000
+    if (fresh && !force) return g
+    const info = await fetchGameInfo(g)
+    // Only fill what is missing: details from scans or the user are kept.
+    const meta = { ...g.meta }
+    for (const [k, v] of Object.entries(info.meta)) {
+      if (v !== undefined && v !== '' && (force || meta[k as keyof typeof meta] === undefined)) (meta as Record<string, unknown>)[k] = v
+    }
+    store.updateGame(id, { meta, infoCheckedAt: Date.now(), onlineShots: info.screenshots.length ? info.screenshots : g.onlineShots })
+    broadcast()
+    return store.games.find((x) => x.id === id) ?? null
+  },
+  'trophies:games': () => trophyGames(),
+  'trophies:list': (key) => trophyList(key),
   'library:setEmulator': (id, runner, options) => {
     const g = store.games.find((x) => x.id === id)
     if (!g) return

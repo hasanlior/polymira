@@ -60,6 +60,10 @@ export interface Game {
   missing?: boolean
   meta: GameMeta
   lastLaunch?: { at: number; result: LaunchResult; message?: string }
+  /** When game information was last looked up online. */
+  infoCheckedAt?: number
+  /** Screenshot URLs from the store page (PC games). */
+  onlineShots?: string[]
   /** Per-game emulator choice (runner key), overriding the platform default. */
   emulator?: string
   /** Per-game emulator options. */
@@ -97,6 +101,13 @@ export interface Settings {
   saveAutoBackup: boolean
   /** Folder that receives a copy of every save backup (e.g. inside OneDrive). Empty = off. */
   saveSyncFolder: string
+  /** Interface language. */
+  language: 'tr' | 'en'
+  /** RetroAchievements account (username + web API key) for emulator trophies. */
+  raUser: string
+  raKey: string
+  /** Write controller settings into emulators before launching, so they work with no setup. */
+  autoPadConfig: boolean
   watchedFolders: WatchedFolder[]
   emulatorPaths: Record<string, string>
   /** Per-platform emulator choice; falls back to the platform's first option. */
@@ -239,6 +250,30 @@ export interface GameEmuOptions {
   shader?: 'none' | 'crt' | 'lcd' | 'smooth'
   /** Extra command line arguments appended for this game. */
   extraArgs?: string
+}
+
+export interface Trophy {
+  id: string
+  title: string
+  description: string
+  icon?: string
+  unlocked: boolean
+  unlockedAt?: number
+  hidden?: boolean
+}
+
+/** A game that has trophies, with the user's progress. */
+export interface TrophyGame {
+  /** "steam:<appid>" or "ra:<game id>" */
+  key: string
+  source: 'steam' | 'ra'
+  title: string
+  subtitle?: string
+  /** Matching library game, if any. */
+  gameId?: string
+  unlocked: number
+  total: number
+  icon?: string
 }
 
 export interface PlayStats {

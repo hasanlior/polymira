@@ -45,6 +45,9 @@ export interface IpcContract {
   'app:closed': (id: string, playedSec: number) => void
   'notices:clear': () => void
   'stats:get': () => import('./types').PlayStats
+  'game:info': (id: string, force?: boolean) => Game | null
+  'trophies:games': () => import('./types').TrophyGame[]
+  'trophies:list': (key: string) => import('./types').Trophy[]
   'library:setEmulator': (id: string, runner: string | null, options?: import('./types').GameEmuOptions) => void
   'session:quickSave': () => void
   'session:quickLoad': () => void
@@ -100,6 +103,9 @@ export const IPC_CHANNELS: IpcChannel[] = [
   'app:closed',
   'notices:clear',
   'stats:get',
+  'game:info',
+  'trophies:games',
+  'trophies:list',
   'library:setEmulator',
   'session:quickSave',
   'session:quickLoad',

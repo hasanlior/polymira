@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { getPlatform, resolveRunner, runnerLabel } from '@shared/platforms'
-import type { Game, Screenshot } from '@shared/types'
+import type { Game, Screenshot, TrophyGame } from '@shared/types'
 import { call, coverUrl, formatDate, formatPlayTime } from '../api'
 import { Badge, Icon, type IconName } from '../icons'
 import { Hint } from '../glyphs'
@@ -56,6 +56,19 @@ export function GameDetail({ gameId, ctx, onClose }: { gameId: string; ctx: Menu
     if (!game) onClose()
   }, [game, onClose])
 
+  // Game information (description, year, genre…) and trophy progress, looked up once.
+  const [loadingInfo, setLoadingInfo] = useState(false)
+  const [trophy, setTrophy] = useState<TrophyGame | null>(null)
+  useEffect(() => {
+    setLoadingInfo(true)
+    void call('game:info', gameId)
+      .catch(() => null)
+      .finally(() => setLoadingInfo(false))
+    void call('trophies:games')
+      .then((list) => setTrophy(list.find((t) => t.gameId === gameId) ?? null))
+      .catch(() => {})
+  }, [gameId])
+
   const buttons: { label: string; icon: IconName; run: () => void }[] = game
     ? [
         { label: 'Başlat', icon: 'play', run: () => ctx.launch(game.id) },
@@ -65,6 +78,7 @@ export function GameDetail({ gameId, ctx, onClose }: { gameId: string; ctx: Menu
           run: () => ctx.run(() => call('library:favorite', game.id, !game.favorite))
         },
         { label: `Ekran görüntüleri (${shots.length})`, icon: 'camera', run: () => ctx.openScreenshots(game.id) },
+        ...(trophy ? [{ label: `Kupalar ${trophy.unlocked}/${trophy.total}`, icon: 'star' as IconName, run: () => ctx.openTrophies(trophy.key) }] : []),
         { label: 'Seçenekler', icon: 'grid', run: () => ctx.openOptions(game.title, gameOptions(game, ctx)) }
       ]
     : []
@@ -120,7 +134,7 @@ export function GameDetail({ gameId, ctx, onClose }: { gameId: string; ctx: Menu
             <span className="dot" />
             {compat.text}
           </div>
-          {m.description && <p className="detail-desc">{m.description}</p>}
+          {m.description ? <p className="detail-desc">{m.description}</p> : loadingInfo ? <p className="detail-desc dim">Oyun bilgisi aranıyor…</p> : null}
           <div className="facts">
             {facts
               .filter(([, v]) => v)
@@ -144,6 +158,13 @@ export function GameDetail({ gameId, ctx, onClose }: { gameId: string; ctx: Menu
             <div className="detail-shots">
               {shots.slice(0, 5).map((s) => (
                 <img key={s.file} src={s.url} alt="" />
+              ))}
+            </div>
+          )}
+          {shots.length === 0 && game.onlineShots && game.onlineShots.length > 0 && (
+            <div className="detail-shots">
+              {game.onlineShots.slice(0, 5).map((u) => (
+                <img key={u} src={u} alt="" />
               ))}
             </div>
           )}

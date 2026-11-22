@@ -2087,3 +2087,93 @@ body.overlay-body #root {
   color: var(--fg-dim);
   padding: calc(2 * var(--u)) 0;
 }
+
+/* Trophies */
+.trophies {
+  width: min(92vw, calc(120 * var(--u)));
+  height: 86vh;
+  display: flex;
+  flex-direction: column;
+  padding: calc(3 * var(--u)) calc(3.5 * var(--u));
+  border-radius: calc(2 * var(--u));
+  background: linear-gradient(160deg, rgba(40, 34, 70, 0.97), rgba(12, 12, 28, 0.97));
+  border: 1px solid var(--line);
+}
+.trophies-head {
+  display: flex;
+  align-items: center;
+  gap: calc(1.2 * var(--u));
+  font-size: calc(3 * var(--u));
+  margin-bottom: calc(2 * var(--u));
+}
+.trophies-head svg {
+  width: calc(3.4 * var(--u));
+  height: calc(3.4 * var(--u));
+  color: #ffd479;
+}
+.trophies-list {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.trophy-row {
+  display: flex;
+  align-items: center;
+  gap: calc(1.6 * var(--u));
+  padding: calc(1 * var(--u)) calc(1.4 * var(--u));
+  border-radius: calc(1 * var(--u));
+}
+.trophy-row.sel {
+  background: rgba(255, 255, 255, 0.13);
+}
+.trophy-row.locked {
+  opacity: 0.55;
+}
+.trophy-row img,
+.trophy-ph {
+  width: calc(5.4 * var(--u));
+  height: calc(5.4 * var(--u));
+  border-radius: calc(0.8 * var(--u));
+  object-fit: cover;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.08);
+  display: grid;
+  place-items: center;
+}
+.trophy-ph svg {
+  width: 55%;
+  height: 55%;
+}
+.trophy-main {
+  flex: 1;
+  min-width: 0;
+}
+.trophy-title {
+  font-size: calc(2 * var(--u));
+}
+.trophy-desc {
+  font-size: calc(1.5 * var(--u));
+  color: var(--fg-dim);
+  margin-top: calc(0.2 * var(--u));
+}
+.trophy-side {
+  text-align: right;
+  font-size: calc(1.5 * var(--u));
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.trophy-bar {
+  width: calc(16 * var(--u));
+  height: calc(0.6 * var(--u));
+  border-radius: calc(0.3 * var(--u));
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+  margin-top: calc(0.6 * var(--u));
+}
+.trophy-bar > div {
+  height: 100%;
+  background: linear-gradient(90deg, #ffd479, #ff9f43);
+}
+.detail-desc.dim {
+  color: var(--fg-faint);
+}

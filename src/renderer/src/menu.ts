@@ -71,6 +71,7 @@ export interface MenuCtx {
   openScan: () => void
   openRemap: () => void
   openStats: () => void
+  openTrophies: (key?: string) => void
   keyboard: (title: string, initial: string, onDone: (text: string) => void) => void
   openStore: (tab?: 'featured' | 'apps' | 'emulators' | 'themes' | 'mods' | 'downloads') => void
   setSettings: (patch: Partial<Settings>) => void
@@ -653,6 +654,30 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     title: 'Oyun Modu ve Sistem',
     icon: 'game',
     children: [
+      {
+        id: 'set:ra',
+        title: 'RetroAchievements hesabı',
+        icon: 'star',
+        value: s.raUser ? s.raUser : 'Bağlı değil',
+        subtitle: 'Emülatör oyunlarında kupalar için. Web API anahtarını retroachievements.org → Settings sayfasından alırsın.',
+        children: [
+          {
+            id: 'set:ra:user',
+            title: 'Kullanıcı adı',
+            icon: 'user',
+            value: s.raUser || '—',
+            onActivate: () => ctx.keyboard('RetroAchievements kullanıcı adı', s.raUser, (t) => set({ raUser: t.trim() }))
+          },
+          {
+            id: 'set:ra:key',
+            title: 'Web API anahtarı',
+            icon: 'file',
+            value: s.raKey ? 'Girildi' : '—',
+            onActivate: () => ctx.keyboard('RetroAchievements Web API anahtarı', '', (t) => set({ raKey: t.trim() }))
+          },
+          { id: 'set:ra:off', title: 'Hesabı kaldır', icon: 'trash', onActivate: () => set({ raUser: '', raKey: '' }) }
+        ]
+      },
       toggle('set:notify', 'Oyun sırasında bildirimler', 'info', s.notifyInGame, (v) => set({ notifyInGame: v }), 'İndirme, kupa ve yedek bildirimleri oyunun üstünde kısa süre görünür'),
       toggle('set:pause', 'Menü açılınca oyunu duraklat', 'pause', s.pauseOnOverlay, (v) => set({ pauseOnOverlay: v }), 'Oyun içi menü açıkken oyun işlemi askıya alınır'),
       toggle('set:gm:prio', 'Oyuna yüksek işlemci önceliği', 'chip', s.gmPriority, (v) => set({ gmPriority: v }), 'Oyun, arka plandaki programlardan önce işlemci zamanı alır'),
@@ -902,6 +927,7 @@ function homeItems(ctx: MenuCtx): XItem[] {
       ]
     })
   }
+  items.push({ id: 'home:trophies', title: 'Kupalar', icon: 'star', subtitle: 'Steam ve RetroAchievements başarımların', onActivate: () => ctx.openTrophies() })
   items.push({ id: 'home:stats', title: 'Oynama istatistikleri', icon: 'chart', subtitle: 'Haftalık süre ve en çok oynanan oyunlar', onActivate: () => ctx.openStats() })
   const recent = games.filter((g) => g.lastPlayedAt).sort((a, b) => b.lastPlayedAt! - a.lastPlayedAt!)
   items.push(...recent.slice(0, 4).map((g) => gameItem(g, ctx, 'home:')))
