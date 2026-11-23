@@ -723,9 +723,18 @@ pub fn translate_rdna2_fragment_alu(decoded: &DecodedShader) -> Option<Vec<u32>>
     let mut exported = None;
     for op in &decoded.ops {
         match *op {
-            Rdna2Op::Vop1 { op: 1, dst, src } if (dst as usize) < 64 => {
-                // v_mov_b32
-                vgpr[dst as usize] = resolve_src(src, &vgpr);
+            Rdna2Op::Vop1 { op: sop, dst, src } if (dst as usize) < 64 => {
+                let s = resolve_src(src, &vgpr);
+                match sop {
+                    1 => vgpr[dst as usize] = s, // v_mov_b32
+                    42 => {
+                        // v_rcp_f32: 1.0 / s
+                        let res = b.id();
+                        SpirvBuilder::push_op(&mut b.body, 136, &[t_f32, res, c_f1, s]); // FDiv
+                        vgpr[dst as usize] = res;
+                    }
+                    _ => {}
+                }
             }
             Rdna2Op::Vop2 { op: sop, dst, src0, vsrc1 } if (dst as usize) < 64 && (vsrc1 as usize) < 64 => {
                 let a = resolve_src(src0, &vgpr);
@@ -734,7 +743,31 @@ pub fn translate_rdna2_fragment_alu(decoded: &DecodedShader) -> Option<Vec<u32>>
                 match sop {
                     3 => { SpirvBuilder::push_op(&mut b.body, 129, &[t_f32, res, a, c]); vgpr[dst as usize] = res; } // v_add_f32
                     4 => { SpirvBuilder::push_op(&mut b.body, 131, &[t_f32, res, a, c]); vgpr[dst as usize] = res; } // v_sub_f32
+                    5 => { SpirvBuilder::push_op(&mut b.body, 131, &[t_f32, res, c, a]); vgpr[dst as usize] = res; } // v_subrev_f32
                     7 | 8 => { SpirvBuilder::push_op(&mut b.body, 133, &[t_f32, res, a, c]); vgpr[dst as usize] = res; } // v_mul_f32
+                    43 => {
+                        // v_fmac_f32: dst = a * c + dst
+                        let mul = b.id();
+                        SpirvBuilder::push_op(&mut b.body, 133, &[t_f32, mul, a, c]);
+                        SpirvBuilder::push_op(&mut b.body, 129, &[t_f32, res, mul, vgpr[dst as usize]]);
+                        vgpr[dst as usize] = res;
+                    }
+                    _ => {}
+                }
+            }
+            Rdna2Op::Vop3 { op: sop, dst, src0, src1, src2 } if (dst as usize) < 64 => {
+                let a = resolve_src(src0, &vgpr);
+                let c = resolve_src(src1, &vgpr);
+                let d = resolve_src(src2, &vgpr);
+                match sop {
+                    0x14B | 0x151 => {
+                        // v_fma_f32 / v_mad_f32: a * c + d
+                        let mul = b.id();
+                        let add = b.id();
+                        SpirvBuilder::push_op(&mut b.body, 133, &[t_f32, mul, a, c]);
+                        SpirvBuilder::push_op(&mut b.body, 129, &[t_f32, add, mul, d]);
+                        vgpr[dst as usize] = add;
+                    }
                     _ => {}
                 }
             }

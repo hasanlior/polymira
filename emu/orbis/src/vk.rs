@@ -41,6 +41,8 @@ pub struct VkRenderer {
     pub surface: vk::SurfaceKHR,
     pub swapchain: vk::SwapchainKHR,
     pub swap_images: Vec<vk::Image>,
+    pub swap_views: Vec<vk::ImageView>,
+    pub swap_fbs: Vec<vk::Framebuffer>,
     pub swap_extent: vk::Extent2D,
     pub swap_format: vk::Format,
     pub image_avail: vk::Semaphore,
@@ -50,6 +52,7 @@ pub struct VkRenderer {
     pub pipelines: HashMap<(usize, usize), (vk::PipelineLayout, vk::Pipeline, vk::RenderPass)>,
     pub blit_ready: bool,
     pub blit_rp: vk::RenderPass,
+    pub swap_rp: vk::RenderPass,
     pub blit_layout: vk::PipelineLayout,
     pub blit_pipe: vk::Pipeline,
     pub quad_pipe: vk::Pipeline,
@@ -60,6 +63,10 @@ pub struct VkRenderer {
     pub staging_buf: vk::Buffer,
     pub staging_mem: vk::DeviceMemory,
     pub staging_cap: usize,
+    pub vbuf: vk::Buffer,
+    pub vmem: vk::DeviceMemory,
+    pub ibuf: vk::Buffer,
+    pub imem: vk::DeviceMemory,
     pub upload_tex: Option<VkTarget>,
 }
 
@@ -244,6 +251,8 @@ impl VkRenderer {
             surface,
             swapchain,
             swap_images,
+            swap_views: Vec::new(),
+            swap_fbs: Vec::new(),
             swap_extent,
             swap_format: fmt.format,
             image_avail,
@@ -253,6 +262,7 @@ impl VkRenderer {
             pipelines: HashMap::new(),
             blit_ready: false,
             blit_rp: vk::RenderPass::null(),
+            swap_rp: vk::RenderPass::null(),
             blit_layout: vk::PipelineLayout::null(),
             blit_pipe: vk::Pipeline::null(),
             quad_pipe: vk::Pipeline::null(),
@@ -263,6 +273,10 @@ impl VkRenderer {
             staging_buf: vk::Buffer::null(),
             staging_mem: vk::DeviceMemory::null(),
             staging_cap: 0,
+            vbuf: vk::Buffer::null(),
+            vmem: vk::DeviceMemory::null(),
+            ibuf: vk::Buffer::null(),
+            imem: vk::DeviceMemory::null(),
             upload_tex: None,
         };
         if let Err(e) = r.init_blit_pipeline() {
@@ -385,13 +399,179 @@ impl VkRenderer {
         self.sampler = sampler;
         self.desc_pool = desc_pool;
         self.desc_set = desc_set;
-        self.quad_pipe = self.create_quad_pipeline(rp, pl).unwrap_or(vk::Pipeline::null());
+
+        // Swapchain render pass (transitions UNDEFINED -> PRESENT_SRC_KHR) + per-image framebuffers
+        let s_att = [vk::AttachmentDescription::default()
+            .format(self.swap_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)];
+        let s_ref = [vk::AttachmentReference { attachment: 0, layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL }];
+        let s_sub = [vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&s_ref)];
+        let swap_rp = self
+            .device
+            .create_render_pass(&vk::RenderPassCreateInfo::default().attachments(&s_att).subpasses(&s_sub), None)
+            .map_err(|e| format!("swap_rp: {e}"))?;
+        self.swap_rp = swap_rp;
+        for &img in &self.swap_images {
+            let view = self
+                .device
+                .create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(img)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(self.swap_format)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        }),
+                    None,
+                )
+                .map_err(|e| format!("swap_view: {e}"))?;
+            let atts = [view];
+            let fb = self
+                .device
+                .create_framebuffer(
+                    &vk::FramebufferCreateInfo::default()
+                        .render_pass(swap_rp)
+                        .attachments(&atts)
+                        .width(self.swap_extent.width)
+                        .height(self.swap_extent.height)
+                        .layers(1),
+                    None,
+                )
+                .map_err(|e| format!("swap_fb: {e}"))?;
+            self.swap_views.push(view);
+            self.swap_fbs.push(fb);
+        }
+
+        // Dynamic host-visible vertex (64 KB) + index (32 KB) buffers for indexed draws
+        if let Some((vb, vm)) = self.alloc_host_buffer(65536, vk::BufferUsageFlags::VERTEX_BUFFER) {
+            self.vbuf = vb;
+            self.vmem = vm;
+        }
+        if let Some((ib, im)) = self.alloc_host_buffer(32768, vk::BufferUsageFlags::INDEX_BUFFER) {
+            self.ibuf = ib;
+            self.imem = im;
+        }
+
+        self.quad_pipe = self.create_quad_pipeline(swap_rp, pl).unwrap_or(vk::Pipeline::null());
         self.blit_ready = true;
         eprintln!(
-            "[orbis] Vulkan: SPIR-V fullscreen blit + indexed quad pipelines compiled on GPU (quad={})",
-            self.quad_pipe != vk::Pipeline::null()
+            "[orbis] Vulkan: SPIR-V fullscreen blit + indexed quad pipelines compiled on GPU (quad={}, fbs={})",
+            self.quad_pipe != vk::Pipeline::null(),
+            self.swap_fbs.len()
         );
         Ok(())
+    }
+
+    unsafe fn alloc_host_buffer(&self, bytes: usize, usage: vk::BufferUsageFlags) -> Option<(vk::Buffer, vk::DeviceMemory)> {
+        let buf = self
+            .device
+            .create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(bytes as u64)
+                    .usage(usage)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                None,
+            )
+            .ok()?;
+        let req = self.device.get_buffer_memory_requirements(buf);
+        let mi = self.find_mem_type(
+            req.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        let mem = self
+            .device
+            .allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mi), None)
+            .ok()?;
+        self.device.bind_buffer_memory(buf, mem, 0).ok()?;
+        Some((buf, mem))
+    }
+
+    /// Renders a list of indexed vertices directly into the swapchain framebuffer on the RTX 4060.
+    pub fn present_indexed_draws(&mut self, clear_rgba: [f32; 4], vertices: &[Vertex], indices: &[u32]) -> bool {
+        if !self.blit_ready || self.quad_pipe == vk::Pipeline::null() || self.vbuf == vk::Buffer::null() || self.ibuf == vk::Buffer::null() {
+            return false;
+        }
+        let v_bytes = (vertices.len() * std::mem::size_of::<Vertex>()).min(65536);
+        let i_bytes = (indices.len() * std::mem::size_of::<u32>()).min(32768);
+        let idx_count = (i_bytes / 4) as u32;
+        if v_bytes == 0 || idx_count == 0 {
+            return false;
+        }
+        unsafe {
+            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            if let Ok(vp) = self.device.map_memory(self.vmem, 0, v_bytes as u64, vk::MemoryMapFlags::empty()) {
+                std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const u8, vp as *mut u8, v_bytes);
+                self.device.unmap_memory(self.vmem);
+            }
+            if let Ok(ip) = self.device.map_memory(self.imem, 0, i_bytes as u64, vk::MemoryMapFlags::empty()) {
+                std::ptr::copy_nonoverlapping(indices.as_ptr() as *const u8, ip as *mut u8, i_bytes);
+                self.device.unmap_memory(self.imem);
+            }
+            let Ok((img_idx, _)) = self.swapchain_loader.acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null()) else {
+                return false;
+            };
+            let _ = self.device.reset_fences(&[self.fence]);
+            let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
+            let _ = self.device.begin_command_buffer(
+                self.cmd_buf,
+                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            );
+            let clear = [vk::ClearValue { color: vk::ClearColorValue { float32: clear_rgba } }];
+            let rp_bi = vk::RenderPassBeginInfo::default()
+                .render_pass(self.swap_rp)
+                .framebuffer(self.swap_fbs[img_idx as usize])
+                .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.swap_extent })
+                .clear_values(&clear);
+            self.device.cmd_begin_render_pass(self.cmd_buf, &rp_bi, vk::SubpassContents::INLINE);
+            self.device.cmd_bind_pipeline(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, self.quad_pipe);
+            let vp = [vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: self.swap_extent.width as f32,
+                height: self.swap_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }];
+            let sc = [vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.swap_extent }];
+            self.device.cmd_set_viewport(self.cmd_buf, 0, &vp);
+            self.device.cmd_set_scissor(self.cmd_buf, 0, &sc);
+            self.device.cmd_bind_vertex_buffers(self.cmd_buf, 0, &[self.vbuf], &[0]);
+            self.device.cmd_bind_index_buffer(self.cmd_buf, self.ibuf, 0, vk::IndexType::UINT32);
+            self.device.cmd_draw_indexed(self.cmd_buf, idx_count, 1, 0, 0, 0);
+            self.device.cmd_end_render_pass(self.cmd_buf);
+            let _ = self.device.end_command_buffer(self.cmd_buf);
+
+            let wait_sems = [self.image_avail];
+            let sig_sems = [self.render_done];
+            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let cmds = [self.cmd_buf];
+            let submit = [vk::SubmitInfo::default()
+                .wait_semaphores(&wait_sems)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(&cmds)
+                .signal_semaphores(&sig_sems)];
+            if self.device.queue_submit(self.queue, &submit, self.fence).is_err() {
+                return false;
+            }
+            let scs = [self.swapchain];
+            let idxs = [img_idx];
+            let present = vk::PresentInfoKHR::default()
+                .wait_semaphores(&sig_sems)
+                .swapchains(&scs)
+                .image_indices(&idxs);
+            let _ = self.swapchain_loader.queue_present(self.queue, &present);
+            true
+        }
     }
 
     unsafe fn create_quad_pipeline(&self, rp: vk::RenderPass, pl: vk::PipelineLayout) -> Result<vk::Pipeline, String> {
