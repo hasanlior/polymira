@@ -200,6 +200,38 @@ pub extern "sysv64" fn munmap(addr: usize, len: usize) -> i32 {
         use windows_sys::Win32::System::Memory::{VirtualFree, MEM_DECOMMIT};
         VirtualFree(addr as *mut c_void, len, MEM_DECOMMIT);
     }
+    // Recycle any direct-memory offset mapped at [addr, addr+len) (coalescing release is idempotent).
+    if len > 0 {
+        let unmap_end = addr.saturating_add(len);
+        let mut maps = DIRECT_MAPS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut released = Vec::new();
+        let mut remainder = Vec::new();
+        maps.retain(|&(va, mlen, off)| {
+            let mend = va.saturating_add(mlen);
+            let lo = va.max(addr);
+            let hi = mend.min(unmap_end);
+            if lo < hi {
+                released.push((off + (lo - va) as u64, (hi - lo) as u64));
+                if lo > va {
+                    remainder.push((va, lo - va, off));
+                }
+                if hi < mend {
+                    remainder.push((hi, mend - hi, off + (hi - va) as u64));
+                }
+                false
+            } else {
+                true
+            }
+        });
+        maps.extend(remainder);
+        drop(maps);
+        if !released.is_empty() {
+            let mut pool = direct_pool().lock().unwrap_or_else(|e| e.into_inner());
+            for (off, rlen) in released {
+                pool.release(off, rlen);
+            }
+        }
+    }
     let _ = (addr, len);
     0
 }
@@ -213,8 +245,9 @@ pub extern "sysv64" fn mprotect(addr: usize, len: usize, prot: i32) -> i32 {
     0
 }
 
-/// Direct memory: coalescing, alignment-aware free-list over a 16 GiB PS5 physical pool.
-const DIRECT_SIZE: u64 = 16 << 30;
+/// Direct memory: coalescing, alignment-aware free-list over a 64 GiB offset pool (virtual offsets only).
+const DIRECT_SIZE: u64 = 64 << 30;
+static DIRECT_MAPS: Mutex<Vec<(usize, usize, u64)>> = Mutex::new(Vec::new());
 
 struct DirectPool {
     free: Vec<(u64, u64)>,
@@ -355,8 +388,13 @@ pub extern "sysv64" fn release_direct(offset: i64, len: u64) -> i32 {
 }
 
 /// sceKernelMapDirectMemory(void** addr, len, prot, flags, offset, align)
-pub extern "sysv64" fn map_direct(addr: *mut usize, len: usize, prot: i32, flags: i32, _off: i64, _align: u64) -> i32 {
-    map_flexible(addr, len, prot, flags)
+pub extern "sysv64" fn map_direct(addr: *mut usize, len: usize, prot: i32, flags: i32, off: i64, _align: u64) -> i32 {
+    let rc = map_flexible(addr, len, prot, flags);
+    if rc == 0 && !addr.is_null() && off >= 0 && len > 0 {
+        let va = unsafe { *addr };
+        DIRECT_MAPS.lock().unwrap_or_else(|e| e.into_inner()).push((va, len, off as u64));
+    }
+    rc
 }
 
 pub extern "sysv64" fn map_named_direct(addr: *mut usize, len: usize, prot: i32, flags: i32, off: i64, align: u64, _name: *const c_char) -> i32 {
@@ -1594,5 +1632,20 @@ mod tests {
         // Pool must have fully coalesced back to a single 128 MiB free block.
         assert_eq!(pool.free, vec![(0, 128 << 20)]);
         assert_eq!(pool.largest_free(0, 128 << 20, 2 << 20), (0, 128 << 20));
+    }
+
+    #[test]
+    fn munmap_recycles_direct_memory_mapping() {
+        let mut off = 0u64;
+        assert_eq!(allocate_direct(0, DIRECT_SIZE as i64, 0x20_0000, 0x10_0000, 0, &mut off), 0);
+        let mut va = 0usize;
+        assert_eq!(map_direct(&mut va, 0x20_0000, 3, 0, off as i64, 0x10_0000), 0);
+        assert_ne!(va, 0);
+        assert_eq!(munmap(va, 0x20_0000), 0);
+        // Re-allocating the same size must be able to reuse the released offset (not leak).
+        let mut off2 = u64::MAX;
+        assert_eq!(allocate_direct(0, DIRECT_SIZE as i64, 0x20_0000, 0x10_0000, 0, &mut off2), 0);
+        assert_eq!(off2, off);
+        assert_eq!(release_direct(off2 as i64, 0x20_0000), 0);
     }
 }
