@@ -756,13 +756,22 @@ fn is_committed(addr: usize, len: usize) -> bool {
     }
 }
 
+fn bound_shader_pair(gpu: &GpuState) -> (usize, usize) {
+    let read_pair = |lo_reg: u32, hi_reg: u32| -> usize {
+        let lo = *gpu.sh.get(&lo_reg).unwrap_or(&0) as u64;
+        let hi = *gpu.sh.get(&hi_reg).unwrap_or(&0) as u64;
+        ((lo | ((hi & 0xFF) << 32)) << 8) as usize
+    };
+    let vs = [read_pair(0x88, 0x89), read_pair(0xC8, 0xC9), read_pair(0x48, 0x49)]
+        .into_iter()
+        .find(|&a| a >= 0x1_0000_0000)
+        .unwrap_or(0);
+    let ps = read_pair(0x08, 0x09);
+    (vs, ps)
+}
+
 fn compile_bound_graphics_pipeline(gpu: &GpuState) {
-    let vs_lo = *gpu.sh.get(&0x80).unwrap_or(&0) as u64;
-    let vs_hi = *gpu.sh.get(&0x81).unwrap_or(&0) as u64;
-    let ps_lo = *gpu.sh.get(&0x06).unwrap_or(&0) as u64;
-    let ps_hi = *gpu.sh.get(&0x07).unwrap_or(&0) as u64;
-    let vs_addr = ((vs_lo | ((vs_hi & 0xFF) << 32)) << 8) as usize;
-    let ps_addr = ((ps_lo | ((ps_hi & 0xFF) << 32)) << 8) as usize;
+    let (vs_addr, ps_addr) = bound_shader_pair(gpu);
     if !is_committed(vs_addr, 64) || !is_committed(ps_addr, 64) {
         return;
     }
@@ -1015,6 +1024,32 @@ fn execute_stream(
                         "[orbis] GPU:   DRAW_INDEX_OFFSET_2 off={} count={} ib={:#x}({}) vs={vs_ud:x?} ps={ps_ud:x?}",
                         w[2], w[3], gpu.index_base, gpu.index_count
                     );
+                    if std::env::var_os("ORBIS_DUMP_VERT").is_some() {
+                        let ib = gpu.index_base as usize + (w[2] as usize) * 2;
+                        if is_committed(ib, 16) {
+                            let idxs = unsafe { std::slice::from_raw_parts(ib as *const u16, (w[3] as usize).min(12)) };
+                            eprintln!("[orbis] GPU:     indices(u16)={idxs:?}");
+                        }
+                        for (tag, lo, hi) in [("vs0", vs_ud[0], vs_ud[1]), ("vs1", vs_ud[2], vs_ud[3])] {
+                            let p = (lo as u64 | (((hi & 0xFFFF) as u64) << 32)) as usize;
+                            if is_committed(p, 64) {
+                                let dw = unsafe { std::slice::from_raw_parts(p as *const u32, 16) };
+                                let fl = unsafe { std::slice::from_raw_parts(p as *const f32, 16) };
+                                eprintln!("[orbis] GPU:     {tag} @{p:#x} u32={dw:08x?}");
+                                eprintln!("[orbis] GPU:     {tag} @{p:#x} f32={fl:.2?}");
+                            }
+                        }
+                        let (vs_a, ps_a) = bound_shader_pair(gpu);
+                        eprintln!("[orbis] GPU:     bound shaders VS={vs_a:#x} PS={ps_a:#x}");
+                        if is_committed(vs_a, 96) {
+                            let wv = unsafe { std::slice::from_raw_parts(vs_a as *const u32, 24) };
+                            eprintln!("[orbis] GPU:     VS code={wv:08x?}");
+                        }
+                        if is_committed(ps_a, 96) {
+                            let wp = unsafe { std::slice::from_raw_parts(ps_a as *const u32, 24) };
+                            eprintln!("[orbis] GPU:     PS code={wp:08x?}");
+                        }
+                    }
                 }
             }
             OP_DISPATCH_DIRECT if len >= 5 => {
@@ -1061,7 +1096,8 @@ fn execute_stream(
                     }
                 }
                 if trace {
-                    eprintln!("[orbis] GPU:   DISPATCH ({}, {}, {}) cs={cs_addr:#x}", w[1], w[2], w[3]);
+                    let cs_regs: Vec<(u32, u32)> = gpu.sh.iter().filter(|(&k, _)| k >= 0x200).map(|(&k, &v)| (k, v)).collect();
+                    eprintln!("[orbis] GPU:   DISPATCH ({}, {}, {}) cs={cs_addr:#x} sh200={cs_regs:x?}", w[1], w[2], w[3]);
                 }
             }
             OP_NOP => match sub {

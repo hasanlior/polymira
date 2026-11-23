@@ -72,6 +72,20 @@ pub extern "sysv64" fn create_shader(out: *mut usize, header: usize, code: usize
             }
         }
         let kind = *((header + 0x5A) as *const u8);
+        let sh_regs = *((header + 0x20) as *const u64) as usize;
+        let num_sh = *((header + 0x5C) as *const u8) as usize;
+        if sh_regs != 0 && num_sh > 0 && num_sh <= 64 {
+            let pairs = std::slice::from_raw_parts_mut(sh_regs as *mut [u32; 2], num_sh);
+            let lo = (code >> 8) as u32;
+            let hi = (code >> 40) as u32;
+            for pair in pairs.iter_mut() {
+                match pair[0] {
+                    0x20C | 0x08 | 0x48 | 0x88 | 0xC8 | 0x108 | 0x148 => pair[1] = lo,
+                    0x20D | 0x09 | 0x49 | 0x89 | 0xC9 | 0x109 | 0x149 => pair[1] = hi,
+                    _ => {}
+                }
+            }
+        }
         let mut list = SHADERS.lock().unwrap();
         let idx = list.len();
         list.push((header, code, kind));

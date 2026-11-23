@@ -15,6 +15,7 @@ mod kernel;
 mod equeue;
 mod gpu;
 mod agc;
+mod audio;
 mod shader;
 mod tiling;
 mod vk;

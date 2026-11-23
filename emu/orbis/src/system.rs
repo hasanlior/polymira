@@ -264,6 +264,11 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("scePadReadState", pad_read_state as *const () as usize),
         ("scePadRead", pad_read as *const () as usize),
         ("scePadGetControllerInformation", pad_get_info as *const () as usize),
+        ("#ie7qhZ4X0Cc", ok as *const () as usize), // sceSaveDataCommit
+        ("#lJUQuaKqoKY", ok as *const () as usize), // sceSaveDataDeleteTransactionResource
+        ("#uW4vfTwMQVo", ok as *const () as usize), // sceSaveDataUmount2
+        ("#85zul--eGXs", ok as *const () as usize), // sceSaveDataSetParam
+        ("#65VH0Qaaz6s", ok as *const () as usize), // sceSaveDataGetMountInfo
         ("sceUserServiceGetEvent", user_get_event as *const () as usize),
         ("sceUserServiceGetLoginUserIdList", user_login_list as *const () as usize),
         ("sceUserServiceGetInitialUser", user_initial as *const () as usize),
