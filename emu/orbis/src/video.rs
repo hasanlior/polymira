@@ -183,7 +183,10 @@ fn present(buf: &Buffer, n: u64) {
                 ).encode_utf16().collect();
                 windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, title.as_ptr());
             }
-            windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
+            let presented_vk = crate::vk::with_renderer(|r| r.present_target(buf.addr, [0.0, 0.0, 0.0, 1.0])).unwrap_or(false);
+            if !presented_vk {
+                windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
         }
     }
 }
@@ -264,6 +267,7 @@ fn start_window() {
             WINDOW.store(hwnd as u64, Ordering::SeqCst);
             if std::env::var_os("ORBIS_HIDDEN").is_none() {
                 ShowWindow(hwnd, SW_SHOW);
+                crate::vk::init_window(hwnd as *mut c_void, inst as *mut c_void, 1280, 720);
             }
             let mut msg: MSG = std::mem::zeroed();
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {

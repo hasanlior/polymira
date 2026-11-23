@@ -72,7 +72,13 @@ pub extern "sysv64" fn create_shader(out: *mut usize, header: usize, code: usize
             }
         }
         let kind = *((header + 0x5A) as *const u8);
-        SHADERS.lock().unwrap().push((header, code, kind));
+        let mut list = SHADERS.lock().unwrap();
+        let idx = list.len();
+        list.push((header, code, kind));
+        if std::env::var_os("ORBIS_DUMP_SHADERS").is_some() && idx < 6 {
+            let words = std::slice::from_raw_parts(code as *const u32, 32);
+            eprintln!("[orbis] SHADER #{idx} kind={kind} hdr={header:#x} code={code:#x} dw={words:08x?}");
+        }
         if !out.is_null() {
             *out = header;
         }

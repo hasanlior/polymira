@@ -64,8 +64,8 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
     let rec = &*(*info).ExceptionRecord;
     let ctx = &*(*info).ContextRecord;
     let code = rec.ExceptionCode as u32;
-    // Ignore debugger/C++ notifications; report real faults.
-    if code < 0xC000_0000 {
+    // Ignore debugger/C++ exceptions (0xE06D7363 = MSVC C++, used by Vulkan/NVIDIA drivers); report real faults.
+    if code < 0xC000_0000 || code == 0xE06D_7363 || code == 0xE043_4352 {
         return 0; // EXCEPTION_CONTINUE_SEARCH
     }
     let rip = ctx.Rip as usize;

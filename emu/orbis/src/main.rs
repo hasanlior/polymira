@@ -15,6 +15,8 @@ mod kernel;
 mod equeue;
 mod gpu;
 mod agc;
+mod shader;
+mod vk;
 mod video;
 mod system;
 mod thread;
