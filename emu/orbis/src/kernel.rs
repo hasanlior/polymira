@@ -497,6 +497,10 @@ pub extern "sysv64" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> i
     0
 }
 
+pub fn monotonic_now() -> std::time::Duration {
+    start().elapsed()
+}
+
 pub extern "sysv64" fn read_tsc() -> u64 {
     start().elapsed().as_nanos() as u64
 }
@@ -524,7 +528,16 @@ fn host_path(p: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{data}/root{p}"))
 }
 
-static FILES: Mutex<Vec<Option<std::fs::File>>> = Mutex::new(Vec::new());
+enum FdEntry {
+    File(std::fs::File),
+    Dir {
+        path: std::path::PathBuf,
+        entries: Vec<(String, bool)>,
+        pos: usize,
+    },
+}
+
+static FILES: Mutex<Vec<Option<FdEntry>>> = Mutex::new(Vec::new());
 
 const O_WRONLY: i32 = 1;
 const O_RDWR: i32 = 2;
@@ -543,15 +556,23 @@ fn open_file(path: &str, flags: i32) -> Result<i32, i32> {
         }
     }
     if host.is_dir() {
-        // Directories open as a handle with no file behind it.
+        let mut entries = vec![(".".to_string(), true), ("..".to_string(), true)];
+        if let Ok(rd) = std::fs::read_dir(&host) {
+            for ent in rd.flatten() {
+                if let Some(name) = ent.file_name().to_str() {
+                    let is_dir = ent.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    entries.push((name.to_string(), is_dir));
+                }
+            }
+        }
         let mut f = FILES.lock().unwrap();
-        f.push(None);
+        f.push(Some(FdEntry::Dir { path: host, entries, pos: 0 }));
         return Ok((f.len() + 2) as i32);
     }
     match o.open(&host) {
         Ok(file) => {
             let mut f = FILES.lock().unwrap();
-            f.push(Some(file));
+            f.push(Some(FdEntry::File(file)));
             let fd = (f.len() + 2) as i32;
             eprintln!("[orbis] open {path} → fd {fd}");
             Ok(fd)
@@ -582,7 +603,10 @@ pub extern "sysv64" fn posix_open(path: *const c_char, flags: i32, _mode: i32) -
 
 fn with_file<R>(fd: i32, f: impl FnOnce(&mut std::fs::File) -> R) -> Option<R> {
     let mut files = FILES.lock().unwrap();
-    files.get_mut((fd - 3).max(0) as usize).and_then(|x| x.as_mut()).map(f)
+    match files.get_mut((fd - 3).max(0) as usize).and_then(|x| x.as_mut()) {
+        Some(FdEntry::File(file)) => Some(f(file)),
+        _ => None,
+    }
 }
 
 pub extern "sysv64" fn sce_close(fd: i32) -> i32 {
@@ -684,18 +708,91 @@ pub extern "sysv64" fn posix_stat(path: *const c_char, st: *mut Stat) -> i32 {
 }
 
 pub extern "sysv64" fn sce_fstat(fd: i32, st: *mut Stat) -> i32 {
-    match with_file(fd, |f| f.metadata()) {
-        Some(Ok(m)) => {
-            fill_stat(&m, st);
-            0
-        }
-        _ => {
+    let mut files = FILES.lock().unwrap();
+    match files.get_mut((fd - 3).max(0) as usize).and_then(|x| x.as_mut()) {
+        Some(FdEntry::File(f)) => match f.metadata() {
+            Ok(m) => {
+                fill_stat(&m, st);
+                0
+            }
+            Err(_) => SCE_KERNEL_ERROR_EBADF,
+        },
+        Some(FdEntry::Dir { path, .. }) => match std::fs::metadata(path) {
+            Ok(m) => {
+                fill_stat(&m, st);
+                0
+            }
+            Err(_) => {
+                unsafe {
+                    std::ptr::write_bytes(st as *mut u8, 0, std::mem::size_of::<Stat>());
+                    (*st).mode = 0o040755;
+                }
+                0
+            }
+        },
+        None => {
             unsafe {
                 std::ptr::write_bytes(st as *mut u8, 0, std::mem::size_of::<Stat>());
                 (*st).mode = 0o020666; // character device (console streams)
             }
             0
         }
+    }
+}
+
+/// sceKernelGetdents(fd, buf, nbytes): FreeBSD dirent records (fileno: u32, reclen: u16, type: u8, namlen: u8, name[]).
+pub extern "sysv64" fn sce_getdents(fd: i32, buf: *mut u8, nbytes: usize) -> i32 {
+    if fd < 3 || buf.is_null() {
+        return SCE_KERNEL_ERROR_EBADF;
+    }
+    let mut files = FILES.lock().unwrap();
+    let Some(Some(FdEntry::Dir { entries, pos, .. })) = files.get_mut((fd - 3) as usize) else {
+        return SCE_KERNEL_ERROR_EBADF;
+    };
+    let mut written = 0usize;
+    while *pos < entries.len() {
+        let (ref name, is_dir) = entries[*pos];
+        let nb = name.as_bytes();
+        let namlen = nb.len().min(255);
+        let reclen = (8 + namlen + 1 + 3) & !3;
+        if written + reclen > nbytes {
+            break;
+        }
+        unsafe {
+            let p = buf.add(written);
+            std::ptr::write_bytes(p, 0, reclen);
+            *(p as *mut u32) = (*pos as u32) + 1; // d_fileno
+            *(p.add(4) as *mut u16) = reclen as u16; // d_reclen
+            *p.add(6) = if is_dir { 4 } else { 8 }; // DT_DIR / DT_REG
+            *p.add(7) = namlen as u8; // d_namlen
+            std::ptr::copy_nonoverlapping(nb.as_ptr(), p.add(8), namlen);
+        }
+        written += reclen;
+        *pos += 1;
+    }
+    written as i32
+}
+
+pub extern "sysv64" fn sce_check_reachability(path: *const c_char) -> i32 {
+    if host_path(&text(path)).exists() {
+        0
+    } else {
+        SCE_KERNEL_ERROR_ENOENT
+    }
+}
+
+pub extern "sysv64" fn sce_dlsym(_handle: i32, symbol: *const c_char, out: *mut usize) -> i32 {
+    const ESRCH: i32 = 0x8002_0003u32 as i32;
+    let name = text(symbol);
+    let addr = crate::loader::export_addr(&name)
+        .or_else(|| crate::hle::table().get(&crate::nid::nid(&name)).map(|&(_, a)| a));
+    if let Some(a) = addr {
+        if !out.is_null() {
+            unsafe { *out = a };
+        }
+        0
+    } else {
+        ESRCH
     }
 }
 
@@ -732,6 +829,9 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceLibcMspaceMallocStats", mspace_stats as *const () as usize),
         ("sceLibcMspaceMallocStatsFast", mspace_stats as *const () as usize),
         ("sceKernelLoadStartModule", load_start_module as *const () as usize),
+        ("sceKernelDlsym", sce_dlsym as *const () as usize),
+        ("sceKernelGetdents", sce_getdents as *const () as usize),
+        ("sceKernelCheckReachability", sce_check_reachability as *const () as usize),
         ("sceKernelVirtualQuery", virtual_query as *const () as usize),
         ("sceKernelReserveVirtualRange", reserve_virtual_range as *const () as usize),
         ("scePthreadOnce", pthread_once as *const () as usize),

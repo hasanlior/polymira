@@ -397,10 +397,14 @@ pub extern "sysv64" fn sce_cond_timedwait(c: *mut usize, m: *mut usize, usec: u3
     }
 }
 
-/// pthread_cond_timedwait(c, m, abstime): absolute CLOCK_REALTIME.
+/// pthread_cond_timedwait(c, m, abstime): supports both CLOCK_REALTIME and CLOCK_MONOTONIC.
 pub extern "sysv64" fn cond_timedwait(c: *mut usize, m: *mut usize, abs: *const [i64; 2]) -> i32 {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let (s, n) = if abs.is_null() { (0, 0) } else { unsafe { ((*abs)[0], (*abs)[1]) } };
+    let now = if s < 1_000_000_000 {
+        crate::kernel::monotonic_now()
+    } else {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+    };
     let target = std::time::Duration::new(s.max(0) as u64, n.clamp(0, 999_999_999) as u32);
     let ms = target.saturating_sub(now).as_millis().min(u32::MAX as u128 - 1) as u32;
     if wait_ms(c, m, ms) {

@@ -20,8 +20,8 @@ const SCE_KERNEL_ERROR_ETIMEDOUT: i32 = 0x8002_003Cu32 as i32;
 const SCE_KERNEL_ERROR_EBADF: i32 = 0x8002_0009u32 as i32;
 
 pub struct Queue {
-    /// Registered events (ident, filter, udata) and whether each has fired.
-    registered: Mutex<Vec<(Event, bool)>>,
+    /// Registered events (ident, filter, udata) and how many pending firings each has.
+    registered: Mutex<Vec<(Event, u32)>>,
     signal: Condvar,
 }
 
@@ -51,7 +51,7 @@ fn add(eq: usize, ident: u64, filter: i16, udata: u64) -> i32 {
     let Some(q) = queue(eq) else { return SCE_KERNEL_ERROR_EBADF };
     let mut r = q.registered.lock().unwrap();
     r.retain(|(e, _)| !(e.ident == ident && e.filter == filter));
-    r.push((Event { ident, filter, udata, ..Default::default() }, false));
+    r.push((Event { ident, filter, udata, ..Default::default() }, 0));
     0
 }
 
@@ -69,7 +69,7 @@ pub extern "sysv64" fn trigger_user_event(eq: usize, id: i32, udata: u64) -> i32
     for (e, fired) in r.iter_mut() {
         if e.filter == EVFILT_USER && e.ident == id as u64 {
             e.udata = udata;
-            *fired = true;
+            *fired = fired.saturating_add(1);
         }
     }
     q.signal.notify_all();
@@ -92,6 +92,9 @@ const EVFILT_GRAPHICS: i16 = -14;
 
 /// sceAgcDriverAddEqEvent(eq, id, udata): GPU end-of-pipe notifications.
 pub extern "sysv64" fn add_gpu_event(eq: usize, id: i32, udata: u64) -> i32 {
+    if std::env::var_os("ORBIS_TRACE_WAIT").is_some() {
+        eprintln!("[orbis] equeue add_gpu_event eq={eq:#x} id={id} udata={udata:#x}");
+    }
     add(eq, id as u64, EVFILT_GRAPHICS, udata)
 }
 
@@ -109,7 +112,7 @@ pub fn trigger_gpu(id: u64) {
         let mut r = q.registered.lock().unwrap();
         for (e, fired) in r.iter_mut() {
             if e.filter == EVFILT_GRAPHICS && e.ident == id {
-                *fired = true;
+                *fired = fired.saturating_add(1);
             }
         }
         q.signal.notify_all();
@@ -124,7 +127,7 @@ pub fn trigger_flip(arg: u64) {
         for (e, fired) in r.iter_mut() {
             if e.filter == EVFILT_VIDEO_OUT {
                 e.data = arg as i64;
-                *fired = true;
+                *fired = fired.saturating_add(1);
             }
         }
         q.signal.notify_all();
@@ -139,9 +142,9 @@ pub extern "sysv64" fn wait(eq: usize, events: *mut Event, num: i32, out: *mut i
     loop {
         let mut n = 0;
         for (e, fired) in r.iter_mut() {
-            if *fired && n < num {
+            if *fired > 0 && n < num {
                 unsafe { *events.add(n as usize) = *e };
-                *fired = false;
+                *fired -= 1;
                 n += 1;
             }
         }
@@ -152,7 +155,13 @@ pub extern "sysv64" fn wait(eq: usize, events: *mut Event, num: i32, out: *mut i
             return 0;
         }
         match deadline {
-            None => r = q.signal.wait(r).unwrap(),
+            None => {
+                if std::env::var_os("ORBIS_TRACE_WAIT").is_some() {
+                    let ids: Vec<(i16, u64)> = r.iter().map(|(e, _)| (e.filter, e.ident)).collect();
+                    eprintln!("[orbis] equeue wait blocking on {ids:?}");
+                }
+                r = q.signal.wait(r).unwrap();
+            }
             Some(d) => {
                 let now = std::time::Instant::now();
                 if now >= d {

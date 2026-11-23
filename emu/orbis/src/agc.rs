@@ -679,7 +679,7 @@ pub extern "sysv64" fn create_prim_state(
     }
     unsafe {
         if !cx_regs.is_null() {
-            std::ptr::write_bytes(cx_regs, 0, 16);
+            std::ptr::write_bytes(cx_regs, 0, 4);
         }
         if !uc_regs.is_null() {
             std::ptr::write_bytes(uc_regs, 0, 6);
@@ -899,7 +899,10 @@ fn execute_stream(
                     let dest = ctrl & 0xFF;
                     let inc = (ctrl >> 16) & 0xFF;
                     let dst = (w[2] as u64) | ((w[3] as u64) << 32);
-                    if dst != 0 && dest <= 1 {
+                    if trace {
+                        eprintln!("[orbis] GPU:   write_data dest={dest} inc={inc} dst={dst:#x} words={:?}", &w[4..]);
+                    }
+                    if dst >= 0x10000 {
                         unsafe {
                             let p = dst as *mut u32;
                             for (k, &val) in w[4..].iter().enumerate() {
@@ -914,6 +917,9 @@ fn execute_stream(
                     let dst = (w[3] as u64) | ((w[4] as u64) << 32);
                     let data = (w[5] as u64) | ((w[6] as u64) << 32);
                     let int_ctx = w[7] as u64;
+                    if trace {
+                        eprintln!("[orbis] GPU:   release_mem sel={data_sel} int={interrupt} dst={dst:#x} data={data:#x} ctx={int_ctx:#x}");
+                    }
                     if dst != 0 {
                         unsafe {
                             match data_sel {
@@ -939,6 +945,9 @@ fn execute_stream(
                     let index = w[2] as i32;
                     let mode = w[3] as i32;
                     let arg = ((w[4] as u64) | ((w[5] as u64) << 32)) as i64;
+                    if trace {
+                        eprintln!("[orbis] GPU:   flip handle={handle} index={index} mode={mode} arg={arg:#x}");
+                    }
                     crate::video::submit_flip(handle, index, mode, arg);
                 }
                 _ => {}
@@ -962,6 +971,7 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
     let trace = std::env::var_os("ORBIS_TRACE_GPU").is_some() && n <= 3;
     let mut stats = BTreeMap::new();
     execute_stream(&mut gpu, addr, dwords, 0, trace, &mut stats);
+    crate::equeue::trigger_gpu(0);
     if n <= 5 || n % 60 == 0 || std::env::var_os("ORBIS_TRACE_GPU").is_some() {
         let summary: Vec<String> = stats.iter().map(|(k, v)| format!("{k:#06x}:{v}")).collect();
         eprintln!("[orbis] GPU: submit #{n} ({dwords} dwords @ {addr:#x}) [{}]", summary.join(" "));
