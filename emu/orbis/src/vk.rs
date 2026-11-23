@@ -127,6 +127,8 @@ pub struct VkRenderer {
     pub rt_layouts: HashMap<usize, vk::ImageLayout>,
     pub samplers: HashMap<u32, vk::Sampler>,
     pub rt_depth: HashMap<usize, (vk::Image, vk::DeviceMemory, vk::ImageView)>,
+    pub rt_last_used: HashMap<usize, u64>,
+    pub frame_seq: u64,
     pub rt_quad_pipe: vk::Pipeline,
     pub view_dsets: HashMap<(u64, u64), vk::DescriptorSet>,
     pub gen_layout: vk::PipelineLayout,
@@ -354,6 +356,8 @@ impl VkRenderer {
             rt_layouts: HashMap::new(),
             samplers: HashMap::new(),
             rt_depth: HashMap::new(),
+            rt_last_used: HashMap::new(),
+            frame_seq: 0,
             rt_quad_pipe: vk::Pipeline::null(),
             view_dsets: HashMap::new(),
             gen_layout: vk::PipelineLayout::null(),
@@ -923,6 +927,17 @@ impl VkRenderer {
                 }
                 return ds;
             }
+            // Same address reused at a different size: free old VkImage/VkDeviceMemory.
+            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            if let Some((old, _)) = self.tex_cache.remove(&addr) {
+                use ash::vk::Handle;
+                let old_raw = old.view.as_raw();
+                self.view_dsets.retain(|&(v, _), _| v != old_raw);
+                self.device.destroy_image_view(old.view, None);
+                self.device.destroy_image(old.image, None);
+                self.device.free_memory(old.memory, None);
+                self.tex_sums.remove(&addr);
+            }
         }
         if self.tex_cache.len() >= 4096 {
             return self.desc_set;
@@ -1417,7 +1432,7 @@ impl VkRenderer {
             let dump_dir = std::env::var("ORBIS_VK_DUMP").ok();
             let n = DUMP_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (ew, eh) = (self.swap_extent.width, self.swap_extent.height);
-            let dump = dump_dir.is_some() && n % 120 == 60 && self.ensure_staging((ew * eh * 4) as usize);
+            let dump = dump_dir.is_some() && (n % 120 == 60 || n % 120 == 61) && self.ensure_staging((ew * eh * 4) as usize);
             if dump {
                 let img = self.swap_images[img_idx as usize];
                 let range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
@@ -1523,9 +1538,45 @@ impl VkRenderer {
         Some((self.rt_rp_clear, self.rt_rp_load))
     }
 
+    /// Destroys a cached offscreen render target (framebuffer, depth, color image & memory).
+    unsafe fn destroy_rt(&mut self, addr: usize) {
+        if let Some(fb) = self.rt_fbs.remove(&addr) {
+            self.device.destroy_framebuffer(fb, None);
+        }
+        if let Some((img, mem, dview)) = self.rt_depth.remove(&addr) {
+            self.device.destroy_image_view(dview, None);
+            self.device.destroy_image(img, None);
+            self.device.free_memory(mem, None);
+        }
+        if let Some(old) = self.targets.remove(&addr) {
+            use ash::vk::Handle;
+            let old_raw = old.view.as_raw();
+            self.view_dsets.retain(|&(v, _), _| v != old_raw);
+            self.device.destroy_image_view(old.view, None);
+            self.device.destroy_image(old.image, None);
+            self.device.free_memory(old.memory, None);
+        }
+        self.rt_dsets.remove(&addr);
+        self.rt_layouts.remove(&addr);
+        self.rt_last_used.remove(&addr);
+    }
+
     /// Offscreen colour target for a guest render-target address (created on first use).
     unsafe fn rt_target(&mut self, addr: usize, w: u32, h: u32) -> Option<(vk::Image, vk::Framebuffer)> {
         let (_, rp_load) = self.rt_passes()?;
+        // If this guest address was previously uploaded as a CPU texture, free the stale copy.
+        if self.tex_cache.contains_key(&addr) {
+            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            if let Some((old, _)) = self.tex_cache.remove(&addr) {
+                use ash::vk::Handle;
+                let old_raw = old.view.as_raw();
+                self.view_dsets.retain(|&(v, _), _| v != old_raw);
+                self.device.destroy_image_view(old.view, None);
+                self.device.destroy_image(old.image, None);
+                self.device.free_memory(old.memory, None);
+                self.tex_sums.remove(&addr);
+            }
+        }
         let fresh = !matches!(self.targets.get(&addr), Some(t) if t.width == w && t.height == h);
         if fresh {
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
@@ -1713,6 +1764,50 @@ impl VkRenderer {
             let g_bytes = (gverts.len() * std::mem::size_of::<GVertex>()).min(GVBUF_BYTES);
             let g_max = (g_bytes / std::mem::size_of::<GVertex>()) as u32;
 
+            // Pre-create all render targets used this frame BEFORE resolving sampled textures,
+            // so a freshly allocated offscreen RT drawn and composited in the same frame resolves
+            // to its GPU VkImageView instead of falling through to a CPU RAM swiz=27 upload.
+            self.frame_seq = self.frame_seq.wrapping_add(1);
+            let seq = self.frame_seq;
+            let mut used: Vec<(usize, u32, u32)> = Vec::with_capacity(8);
+            used.push(display);
+            for b in batches {
+                if let Some(g) = b.gen {
+                    if let Some(gd) = gens.get(g as usize) {
+                        if self.gvbuf != vk::Buffer::null() && gd.vertex_count > 0 && gd.first_vertex.saturating_add(gd.vertex_count) <= g_max {
+                            let rt = if gd.rt.0 != 0 && gd.rt.1 <= 8192 && gd.rt.2 <= 8192 { gd.rt } else { display };
+                            used.push(rt);
+                        }
+                    }
+                }
+            }
+            used.sort();
+            used.dedup();
+            // Evict least-recently-used offscreen RTs if cache grows beyond 24 targets (prevents VRAM OOM).
+            if self.targets.len() > 24 {
+                let mut candidates: Vec<(u64, usize)> = self
+                    .targets
+                    .keys()
+                    .copied()
+                    .filter(|&a| !used.iter().any(|&(u, _, _)| u == a))
+                    .map(|a| (self.rt_last_used.get(&a).copied().unwrap_or(0), a))
+                    .collect();
+                candidates.sort_by_key(|&(t, _)| t);
+                let to_evict = self.targets.len().saturating_sub(24);
+                if to_evict > 0 && !candidates.is_empty() {
+                    let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+                    for &(_, addr) in candidates.iter().take(to_evict) {
+                        self.destroy_rt(addr);
+                    }
+                }
+            }
+            for &(a, w, h) in &used {
+                if self.rt_target(a, w, h).is_none() {
+                    return false;
+                }
+                self.rt_last_used.insert(a, seq);
+            }
+
             // Resolve every draw before recording: textures, pipelines, targets.
             struct Item {
                 rt: (usize, u32, u32),
@@ -1741,6 +1836,7 @@ impl VkRenderer {
                     let ds = match gd.tex {
                         Some((a, _, _, _)) if self.targets.contains_key(&a) && a != rt.0 => {
                             sampled_rt = a;
+                            self.rt_last_used.insert(a, seq);
                             self.rt_dset(a).unwrap_or(self.desc_set)
                         }
                         Some((a, _, _, _)) if a == rt.0 => self.desc_set,
@@ -1769,16 +1865,6 @@ impl VkRenderer {
             }
             if items.is_empty() {
                 return false;
-            }
-            // Targets used this frame (created now so sampling and framebuffers exist).
-            let mut used: Vec<(usize, u32, u32)> = items.iter().map(|i| i.rt).collect();
-            used.push(display);
-            used.sort();
-            used.dedup();
-            for &(a, w, h) in &used {
-                if self.rt_target(a, w, h).is_none() {
-                    return false;
-                }
             }
 
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
@@ -1836,18 +1922,28 @@ impl VkRenderer {
                     // contents (the game may build them over several frames).
                     // A target is cleared when first drawn to in this frame, unless the frame
                     // already read it (then it holds content from an earlier frame).
-                    let clear_now = !cleared.contains(&a) && !sampled_this_frame.contains(&a);
+                    let is_cohtml_clear = it.pipe != vk::Pipeline::null()
+                        && gens[it.gen].depth == 0x701
+                        && gens[it.gen].blend == 0x60010001
+                        && gens[it.gen].tex.is_none();
+                    let has_prev = *self.rt_layouts.get(&a).unwrap_or(&vk::ImageLayout::UNDEFINED) != vk::ImageLayout::UNDEFINED;
+                    let clear_now = !cleared.contains(&a)
+                        && !sampled_this_frame.contains(&a)
+                        && !(a != display.0 && is_cohtml_clear && has_prev);
                     if clear_now {
                         cleared.push(a);
                         self.rt_layouts.insert(a, vk::ImageLayout::UNDEFINED);
                     } else {
+                        if is_cohtml_clear && !cleared.contains(&a) {
+                            cleared.push(a);
+                        }
                         self.rt_barrier(a, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
                     }
                     let cv = if a == display.0 { clear_rgba } else { [0.0, 0.0, 0.0, 0.0] };
                     let zc = if clear_now {
                         items
                             .iter()
-                            .find(|x| x.rt.0 == a && x.pipe != vk::Pipeline::null() && gens[x.gen].depth & 2 != 0)
+                            .find(|x| x.rt.0 == a && x.pipe != vk::Pipeline::null() && (gens[x.gen].depth & 2 != 0 || gens[x.gen].depth == 0x701))
                             .map(|x| gens[x.gen].zclear)
                             .unwrap_or(1.0)
                     } else {
@@ -1897,6 +1993,19 @@ impl VkRenderer {
                 }
                 self.device.cmd_set_scissor(self.cmd_buf, 0, &[it.scissor]);
                 if generic {
+                    if gens[it.gen].depth == 0x701 && gens[it.gen].blend == 0x60010001 && gens[it.gen].tex.is_none() {
+                        let ca = [vk::ClearAttachment {
+                            aspect_mask: vk::ImageAspectFlags::DEPTH,
+                            color_attachment: 0,
+                            clear_value: vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } },
+                        }];
+                        let cr = [vk::ClearRect {
+                            rect: full(it.rt.1, it.rt.2),
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        }];
+                        self.device.cmd_clear_attachments(self.cmd_buf, &ca, &cr);
+                    }
                     let bytes = std::slice::from_raw_parts(gens[it.gen].slots.as_ptr() as *const u8, 256);
                     self.device.cmd_push_constants(self.cmd_buf, self.gen_layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
                     self.device.cmd_draw(self.cmd_buf, it.count, 1, it.first, 0);
@@ -1941,7 +2050,7 @@ impl VkRenderer {
             let dump_dir = std::env::var("ORBIS_VK_DUMP").ok();
             let n = DUMP_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (ew, eh) = (self.swap_extent.width, self.swap_extent.height);
-            let dump = dump_dir.is_some() && n % 120 == 60 && self.ensure_staging((ew * eh * 4) as usize);
+            let dump = dump_dir.is_some() && (n % 120 == 60 || n % 120 == 61) && self.ensure_staging((ew * eh * 4) as usize);
             let mut swap_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
             if dump {
                 let b = [vk::ImageMemoryBarrier::default()
@@ -2098,19 +2207,27 @@ impl VkRenderer {
         let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let ds = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
         let dc = gd.depth;
-        let zop = match (dc >> 4) & 7 {
-            0 => vk::CompareOp::NEVER,
-            1 => vk::CompareOp::LESS,
-            2 => vk::CompareOp::EQUAL,
-            3 => vk::CompareOp::LESS_OR_EQUAL,
-            4 => vk::CompareOp::GREATER,
-            5 => vk::CompareOp::NOT_EQUAL,
-            6 => vk::CompareOp::GREATER_OR_EQUAL,
-            _ => vk::CompareOp::ALWAYS,
+        let is_cohtml_clear = dc == 0x701 && gd.blend == 0x60010001 && gd.tex.is_none();
+        let is_cohtml_masked = dc == 0x701 && !is_cohtml_clear;
+        let zop = if is_cohtml_clear {
+            vk::CompareOp::ALWAYS
+        } else if is_cohtml_masked {
+            vk::CompareOp::EQUAL
+        } else {
+            match (dc >> 4) & 7 {
+                0 => vk::CompareOp::NEVER,
+                1 => vk::CompareOp::LESS,
+                2 => vk::CompareOp::EQUAL,
+                3 => vk::CompareOp::LESS_OR_EQUAL,
+                4 => vk::CompareOp::GREATER,
+                5 => vk::CompareOp::NOT_EQUAL,
+                6 => vk::CompareOp::GREATER_OR_EQUAL,
+                _ => vk::CompareOp::ALWAYS,
+            }
         };
         let dss = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(dc & 2 != 0)
-            .depth_write_enable(dc & 2 != 0 && dc & 4 != 0)
+            .depth_test_enable((dc & 2 != 0) || dc == 0x701)
+            .depth_write_enable((dc & 2 != 0 && dc & 4 != 0) || is_cohtml_clear)
             .depth_compare_op(zop);
         let gp_ci = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -2555,7 +2672,11 @@ impl VkRenderer {
                         None,
                     )
                     .ok()?;
-                self.targets.insert(addr, VkTarget { image, memory, view, width, height });
+                if let Some(old) = self.targets.insert(addr, VkTarget { image, memory, view, width, height }) {
+                    self.device.destroy_image_view(old.view, None);
+                    self.device.destroy_image(old.image, None);
+                    self.device.free_memory(old.memory, None);
+                }
             }
         }
         self.targets.get(&addr)

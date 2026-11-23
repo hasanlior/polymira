@@ -691,7 +691,7 @@ pub extern "sysv64" fn create_prim_state(
     0
 }
 
-pub extern "sysv64" fn create_interpolant_mapping(regs: *mut u32, _gs: usize, _ps: usize) -> i32 {
+pub extern "sysv64" fn create_interpolant_mapping(regs: *mut u32, gs: usize, ps: usize) -> i32 {
     if regs.is_null() {
         return INVALID_ARG;
     }
@@ -699,6 +699,28 @@ pub extern "sysv64" fn create_interpolant_mapping(regs: *mut u32, _gs: usize, _p
         for i in 0..32u32 {
             *regs.add((i * 2) as usize) = 0x0191 + i; // SPI_PS_INPUT_CNTL_0 + i (CX-relative)
             *regs.add((i * 2 + 1) as usize) = i;
+        }
+        if is_committed(gs, 0x60) && is_committed(ps, 0x60) {
+            let gs_tab = *((gs + 0x38) as *const usize);
+            let gs_end = *((gs + 0x20) as *const usize);
+            let ps_tab = *((ps + 0x30) as *const usize);
+            let ps_end = *((ps + 0x20) as *const usize);
+            let gs_n = gs_end.saturating_sub(gs_tab) / 4;
+            let ps_n = ps_end.saturating_sub(ps_tab) / 4;
+            if gs_n > 0 && gs_n <= 32 && ps_n > 0 && ps_n <= 32 && is_committed(gs_tab, gs_n * 4) && is_committed(ps_tab, ps_n * 4) {
+                let ge = std::slice::from_raw_parts(gs_tab as *const u32, gs_n);
+                let pe = std::slice::from_raw_parts(ps_tab as *const u32, ps_n);
+                for (pi, &pw) in pe.iter().enumerate() {
+                    let sem = pw & 0xFF;
+                    if let Some(&gw) = ge.iter().find(|&&g| (g & 0xFF) == sem) {
+                        let param = (gw >> 8) & 0x1F;
+                        *regs.add(pi * 2 + 1) = param;
+                    } else if (pw & 0xF00) == 0 {
+                        // Default attribute vector (e.g. normal when omitted).
+                        *regs.add(pi * 2 + 1) = 0x20;
+                    }
+                }
+            }
         }
     }
     0
@@ -1193,9 +1215,11 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     }
     let blend = gpu.cx.get(&0x1E0).copied().unwrap_or(0);
     let dctl = gpu.cx.get(&0x200).copied().unwrap_or(0);
+    let is_cohtml_clear = dctl == 0x701 && blend == 0x60010001 && tex.is_none();
+    let dkey = (dctl & 0x77) | if is_cohtml_clear { 0x80 } else { 0 };
     let g = gpu.frame_gens.len() as u32;
     gpu.frame_gens.push(crate::vk::GenDraw {
-        key: (ps_addr ^ hash as usize, blend, wmask | (dctl & 0x76) << 8),
+        key: (ps_addr ^ hash as usize, blend, wmask | (dkey << 8)),
         wmask,
         spirv: tr.clone(),
         blend,
@@ -1210,9 +1234,24 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         depth: dctl,
         // Depth is cleared through HTILE metadata we do not see: start from the far plane of
         // the compare direction (1.0 for LESS-style tests, 0.0 for GREATER-style ones).
-        zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
+        zclear: if matches!((dctl >> 4) & 7, 4 | 6) || dctl == 0x701 { 0.0 } else { 1.0 },
     });
     gpu.frame_batches.push(crate::vk::DrawBatch { first_index: 0, index_count: 0, tex_addr: 0, tex_w: 0, tex_h: 0, tex_swiz: 0, gen: Some(g) });
+    if std::env::var_os("ORBIS_OREUI_LOG").is_some() && idx_cnt == 6 && info.slots.len() >= 10 {
+        static CL: AtomicU64 = AtomicU64::new(0);
+        if CL.fetch_add(1, Ordering::Relaxed) == 0 {
+            let mut lane = crate::rdna::interp::Lane::new();
+            lane.s[3] = 0x101;
+            lane.s[8..32].copy_from_slice(&vs_ud);
+            lane.v[5] = idxs[0];
+            let _ = crate::rdna::interp::run_compiled(&vs_sh, &mut lane, mem_ok);
+            let v0_base = (lane.s[4] as u64) | (((lane.s[5] & 0xFFFF) as u64) << 32);
+            if is_committed(v0_base as usize, 128) {
+                let d0 = unsafe { std::slice::from_raw_parts(v0_base as *const u32, 32) };
+                eprintln!("[comp-v0hex] cntl={cntl:?} @{v0_base:#x}: {d0:08x?}");
+            }
+        }
+    }
     if std::env::var_os("ORBIS_RT_LOG").is_some() {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
