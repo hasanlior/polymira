@@ -991,7 +991,12 @@ fn execute_stream(
             }
             OP_DRAW_INDEX_OFFSET_2 if len >= 5 => {
                 if trace {
-                    eprintln!("[orbis] GPU:   DRAW_INDEX_OFFSET_2 max={} off={} count={} init={:#x}", w[1], w[2], w[3], w[4]);
+                    let vs_ud: Vec<u32> = (0x8C..0x94).map(|r| *gpu.sh.get(&r).unwrap_or(&0)).collect();
+                    let ps_ud: Vec<u32> = (0x0C..0x14).map(|r| *gpu.sh.get(&r).unwrap_or(&0)).collect();
+                    eprintln!(
+                        "[orbis] GPU:   DRAW_INDEX_OFFSET_2 off={} count={} ib={:#x}({}) vs={vs_ud:x?} ps={ps_ud:x?}",
+                        w[2], w[3], gpu.index_base, gpu.index_count
+                    );
                 }
             }
             OP_DISPATCH_DIRECT if len >= 5 => {
@@ -1131,7 +1136,7 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
     let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let n = SUBMIT_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
     let trace = (std::env::var_os("ORBIS_TRACE_GPU").is_some() && n <= 3)
-        || (std::env::var_os("ORBIS_DUMP_DRAW").is_some() && n == 300);
+        || (std::env::var_os("ORBIS_DUMP_DRAW").is_some() && n == 180);
     let mut stats = BTreeMap::new();
     execute_stream(&mut gpu, addr, dwords, 0, trace, &mut stats);
     let draws = (*stats.get(&((OP_NOP << 8) | R_DRAW_INDEX_AUTO)).unwrap_or(&0)

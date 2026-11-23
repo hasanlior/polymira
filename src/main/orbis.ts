@@ -1,4 +1,4 @@
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 import type { Game, OrbisReport } from '@shared/types'
@@ -48,13 +48,37 @@ export async function analyzeGame(game: Game): Promise<OrbisReport> {
   return json
 }
 
-/** Starts the game in Orbis and returns what it printed (first lines). */
+/** Launches the game in a live POLYMIRA Orbis window (Vulkan / RTX) without a forced timeout. */
 export async function tryRunGame(game: Game): Promise<{ code: number; log: string }> {
+  const exe = orbisExe()
+  if (!exe) throw new Error('Orbis bu sürümde bulunamadı.')
   const file = executableOf(game)
   if (!file) throw new Error('Oyunun çalıştırılabilir dosyası (eboot.bin) bulunamadı.')
-  const r = await run(['run', file], 20000)
-  const log = (r.out + r.err).split(/\r?\n/).filter(Boolean).slice(0, 120).join('\n')
-  return { code: typeof r.code === 'number' ? r.code : 1, log }
+  const child = spawn(exe, ['run', file], {
+    env: { ...process.env, ORBIS_TITLE: game.title },
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const lines: string[] = []
+  const collect = (buf: Buffer) => {
+    for (const ln of String(buf).split(/\r?\n/)) {
+      if (ln && lines.length < 120) lines.push(ln)
+    }
+  }
+  child.stdout?.on('data', collect)
+  child.stderr?.on('data', collect)
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (code: number) => {
+      if (settled) return
+      settled = true
+      child.unref()
+      resolve({ code, log: lines.join('\n') || 'POLYMIRA Orbis penceresi açıldı.' })
+    }
+    child.on('exit', (c) => finish(typeof c === 'number' ? c : 0))
+    child.on('error', () => finish(1))
+    setTimeout(() => finish(0), 4000)
+  })
 }
 
 export async function orbisSelftest(): Promise<{ code: number; log: string }> {
