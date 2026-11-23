@@ -21,6 +21,13 @@ static BUFFERS: Mutex<[Buffer; 16]> = Mutex::new([Buffer { addr: 0, width: 0, he
 static FLIPS: AtomicU64 = AtomicU64::new(0);
 static LAST_ARG: AtomicU64 = AtomicU64::new(0);
 static CURRENT: AtomicU64 = AtomicU64::new(0);
+static CLEAR_RGBA: Mutex<[f32; 4]> = Mutex::new([0.0, 0.0, 0.0, 1.0]);
+
+pub fn set_clear_color(rgba: [f32; 4]) {
+    if let Ok(mut c) = CLEAR_RGBA.lock() {
+        *c = rgba;
+    }
+}
 
 /// The picture the window shows: BGRA pixels, width, height.
 static FRAME: Mutex<(Vec<u32>, u32, u32)> = Mutex::new((Vec::new(), 0, 0));
@@ -183,7 +190,8 @@ fn present(buf: &Buffer, n: u64) {
                 ).encode_utf16().collect();
                 windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, title.as_ptr());
             }
-            let presented_vk = crate::vk::with_renderer(|r| r.present_target(buf.addr, [0.0, 0.0, 0.0, 1.0])).unwrap_or(false);
+            let clear = CLEAR_RGBA.lock().map(|c| *c).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+            let presented_vk = crate::vk::with_renderer(|r| r.present_target(buf.addr, clear)).unwrap_or(false);
             if !presented_vk {
                 windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
             }

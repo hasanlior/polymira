@@ -716,9 +716,21 @@ struct GpuState {
     cx: BTreeMap<u32, u32>,
     sh: BTreeMap<u32, u32>,
     uc: BTreeMap<u32, u32>,
+    clear_rgba: [f32; 4],
+    bound_tex: Option<(usize, u32, u32)>,
+    index_base: u64,
+    index_count: u32,
 }
 
-static GPU: Mutex<GpuState> = Mutex::new(GpuState { cx: BTreeMap::new(), sh: BTreeMap::new(), uc: BTreeMap::new() });
+static GPU: Mutex<GpuState> = Mutex::new(GpuState {
+    cx: BTreeMap::new(),
+    sh: BTreeMap::new(),
+    uc: BTreeMap::new(),
+    clear_rgba: [0.0, 0.0, 0.0, 1.0],
+    bound_tex: None,
+    index_base: 0,
+    index_count: 0,
+});
 static SUBMIT_COUNT: AtomicU64 = AtomicU64::new(0);
 static LAST_DRAWS: AtomicU64 = AtomicU64::new(0);
 static LAST_DISPATCHES: AtomicU64 = AtomicU64::new(0);
@@ -831,10 +843,49 @@ fn execute_stream(
                     gpu.cx.insert(base + k as u32, v);
                 }
             }
+            OP_INDEX_BASE if len >= 3 => {
+                gpu.index_base = (w[1] as u64) | ((w[2] as u64) << 32);
+            }
+            OP_INDEX_BUFFER_SIZE if len >= 2 => {
+                gpu.index_count = w[1];
+            }
             OP_SET_SH_REG if len >= 3 => {
                 let base = w[1] & 0xFFFF;
-                for (k, &v) in w[2..].iter().enumerate() {
+                let vals = &w[2..];
+                for (k, &v) in vals.iter().enumerate() {
                     gpu.sh.insert(base + k as u32, v);
+                }
+                // Detect 8-dword T# image descriptor or 4-dword V# constant buffer bound at PS user-data 0x0C.
+                if base == 0x0C && vals.len() >= 8 {
+                    let addr = ((vals[0] as u64) | (((vals[1] & 0xFF) as u64) << 32)) << 8;
+                    let width = ((vals[1] >> 30) | ((vals[2] & 0xFFF) << 2)) + 1;
+                    let height = ((vals[2] >> 14) & 0x3FFF) + 1;
+                    if addr >= 0x1_0000_0000 && width <= 8192 && height <= 8192 {
+                        gpu.bound_tex = Some((addr as usize, width, height));
+                    }
+                } else if base == 0x0C && vals.len() == 4 && vals[2] <= 64 && (vals[1] & 0xFFFF) != 0 {
+                    let ptr = (vals[0] as u64) | (((vals[1] & 0xFFFF) as u64) << 32);
+                    if ptr >= 0x1_0000_0000 && ptr < 0x7FFF_FFFF_FFFF {
+                        #[cfg(windows)]
+                        let readable = unsafe {
+                            let mut mbi: windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+                            windows_sys::Win32::System::Memory::VirtualQuery(
+                                ptr as *const std::ffi::c_void,
+                                &mut mbi,
+                                std::mem::size_of::<windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION>(),
+                            ) != 0
+                                && mbi.State == windows_sys::Win32::System::Memory::MEM_COMMIT
+                        };
+                        #[cfg(not(windows))]
+                        let readable = false;
+                        if readable {
+                            let f = unsafe { std::slice::from_raw_parts(ptr as *const f32, 4) };
+                            if f.iter().all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0) && f[3] > 0.0 {
+                                gpu.clear_rgba = [f[0], f[1], f[2], f[3]];
+                                crate::video::set_clear_color(gpu.clear_rgba);
+                            }
+                        }
+                    }
                 }
             }
             OP_SET_UCONFIG_REG | OP_SET_UC_REG_INDEX if len >= 3 => {
@@ -1009,7 +1060,10 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
     if n <= 5 || n % 60 == 0 || std::env::var_os("ORBIS_TRACE_GPU").is_some() {
         let summary: Vec<String> = stats.iter().map(|(k, v)| format!("{k:#06x}:{v}")).collect();
         let nsh = crate::gpu::SHADERS.lock().map(|s| s.len()).unwrap_or(0);
-        eprintln!("[orbis] GPU: submit #{n} ({dwords} dwords @ {addr:#x}, {nsh} shaders) [{}]", summary.join(" "));
+        eprintln!(
+            "[orbis] GPU: submit #{n} ({dwords} dwords @ {addr:#x}, {nsh} shaders, clear={:.2?}, tex={:?}) [{}]",
+            gpu.clear_rgba, gpu.bound_tex, summary.join(" ")
+        );
     }
     0
 }
