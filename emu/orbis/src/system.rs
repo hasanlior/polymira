@@ -710,8 +710,6 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceSystemServiceParamGetInt", param_get_int as *const () as usize),
         ("sceSystemServiceHideSplashScreen", hide_splash_screen as *const () as usize),
         ("sceRandomGetRandomNumber", random as *const () as usize),
-        ("sceKernelReleaseDirectMemory", ok as *const () as usize),
-        ("sceKernelCheckedReleaseDirectMemory", ok as *const () as usize),
         ("sceNpCheckCallback", ok as *const () as usize),
         ("sceNetCtlCheckCallback", ok as *const () as usize),
         ("sceNpGetState", np_get_state as *const () as usize),

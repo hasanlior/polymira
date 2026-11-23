@@ -213,26 +213,145 @@ pub extern "sysv64" fn mprotect(addr: usize, len: usize, prot: i32) -> i32 {
     0
 }
 
-/// Direct memory: one counter, the "physical" offset handed back to the game.
-static DIRECT: Mutex<u64> = Mutex::new(0);
+/// Direct memory: coalescing, alignment-aware free-list over a 16 GiB PS5 physical pool.
 const DIRECT_SIZE: u64 = 16 << 30;
 
-/// sceKernelAllocateDirectMemory(start, end, len, align, type, out_offset)
-pub extern "sysv64" fn allocate_direct(_start: i64, _end: i64, len: u64, align: u64, _kind: i32, out: *mut u64) -> i32 {
-    let mut d = DIRECT.lock().unwrap();
-    let a = align.max(0x10000);
-    let off = (*d + a - 1) / a * a;
-    if off + len > DIRECT_SIZE {
-        eprintln!("[orbis] ENOMEM in allocate_direct(off={off:#x}, len={len:#x}, max={DIRECT_SIZE:#x})");
-        return SCE_KERNEL_ERROR_ENOMEM;
+struct DirectPool {
+    free: Vec<(u64, u64)>,
+}
+
+impl DirectPool {
+    fn new(size: u64) -> Self {
+        Self { free: vec![(0, size)] }
     }
-    *d = off + len;
-    unsafe { *out = off };
-    0
+
+    fn alloc(&mut self, search_start: u64, search_end: u64, len: u64, align: u64) -> Option<u64> {
+        if len == 0 {
+            return Some(0);
+        }
+        let a = align.max(0x10000);
+        let req_start = search_start.min(DIRECT_SIZE);
+        let req_end = if search_end == 0 || search_end > DIRECT_SIZE {
+            DIRECT_SIZE
+        } else {
+            search_end
+        };
+        if req_end <= req_start {
+            return None;
+        }
+        for i in 0..self.free.len() {
+            let (s, e) = self.free[i];
+            let lo = s.max(req_start);
+            let hi = e.min(req_end);
+            if lo >= hi {
+                continue;
+            }
+            let aligned = lo.checked_add(a - 1)?.checked_div(a)?.checked_mul(a)?;
+            let end = aligned.checked_add(len)?;
+            if end <= hi {
+                self.free.remove(i);
+                let mut pos = i;
+                if aligned > s {
+                    self.free.insert(pos, (s, aligned));
+                    pos += 1;
+                }
+                if end < e {
+                    self.free.insert(pos, (end, e));
+                }
+                return Some(aligned);
+            }
+        }
+        None
+    }
+
+    fn release(&mut self, start: u64, len: u64) {
+        if len == 0 || start >= DIRECT_SIZE {
+            return;
+        }
+        let end = start.saturating_add(len).min(DIRECT_SIZE);
+        if end <= start {
+            return;
+        }
+        let pos = self.free.partition_point(|&(s, _)| s < start);
+        self.free.insert(pos, (start, end));
+        // Coalesce overlapping or adjacent intervals.
+        let mut i = pos.saturating_sub(1);
+        while i + 1 < self.free.len() {
+            if self.free[i].1 >= self.free[i + 1].0 {
+                self.free[i].1 = self.free[i].1.max(self.free[i + 1].1);
+                self.free.remove(i + 1);
+            } else {
+                i += 1;
+                if i > pos + 1 {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn largest_free(&self, search_start: u64, search_end: u64, align: u64) -> (u64, u64) {
+        let a = align.max(0x10000);
+        let req_start = search_start.min(DIRECT_SIZE);
+        let req_end = if search_end == 0 || search_end > DIRECT_SIZE {
+            DIRECT_SIZE
+        } else {
+            search_end
+        };
+        let mut best = (0u64, 0u64);
+        for &(s, e) in &self.free {
+            let lo = s.max(req_start);
+            let hi = e.min(req_end);
+            if lo >= hi {
+                continue;
+            }
+            if let Some(aligned) = lo.checked_add(a - 1).and_then(|v| (v / a).checked_mul(a)) {
+                if aligned < hi {
+                    let sz = hi - aligned;
+                    if sz > best.1 {
+                        best = (aligned, sz);
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+fn direct_pool() -> &'static Mutex<DirectPool> {
+    static POOL: std::sync::OnceLock<Mutex<DirectPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(DirectPool::new(DIRECT_SIZE)))
+}
+
+/// sceKernelAllocateDirectMemory(start, end, len, align, type, out_offset)
+pub extern "sysv64" fn allocate_direct(start: i64, end: i64, len: u64, align: u64, _kind: i32, out: *mut u64) -> i32 {
+    let mut pool = direct_pool().lock().unwrap_or_else(|e| e.into_inner());
+    let s = start.max(0) as u64;
+    let e = if end <= 0 { DIRECT_SIZE } else { end as u64 };
+    let off = pool.alloc(s, e, len, align).or_else(|| pool.alloc(0, DIRECT_SIZE, len, align));
+    match off {
+        Some(off) => {
+            if !out.is_null() {
+                unsafe { *out = off };
+            }
+            0
+        }
+        None => {
+            eprintln!("[orbis] ENOMEM in allocate_direct(s={s:#x}, e={e:#x}, len={len:#x}, align={align:#x}, max={DIRECT_SIZE:#x})");
+            SCE_KERNEL_ERROR_ENOMEM
+        }
+    }
 }
 
 pub extern "sysv64" fn allocate_main_direct(len: u64, align: u64, kind: i32, out: *mut u64) -> i32 {
     allocate_direct(0, DIRECT_SIZE as i64, len, align, kind, out)
+}
+
+/// sceKernelReleaseDirectMemory(offset, len) / sceKernelCheckedReleaseDirectMemory(offset, len)
+pub extern "sysv64" fn release_direct(offset: i64, len: u64) -> i32 {
+    if offset >= 0 && len > 0 {
+        direct_pool().lock().unwrap_or_else(|e| e.into_inner()).release(offset as u64, len);
+    }
+    0
 }
 
 /// sceKernelMapDirectMemory(void** addr, len, prot, flags, offset, align)
@@ -257,14 +376,17 @@ pub extern "sysv64" fn available_flexible(out: *mut u64) -> i32 {
 }
 
 /// sceKernelAvailableDirectMemorySize(start, end, align, out_start, out_size)
-pub extern "sysv64" fn available_direct(_s: i64, _e: i64, _a: u64, out_start: *mut u64, out_size: *mut u64) -> i32 {
-    let used = *DIRECT.lock().unwrap();
+pub extern "sysv64" fn available_direct(s: i64, e: i64, a: u64, out_start: *mut u64, out_size: *mut u64) -> i32 {
+    let pool = direct_pool().lock().unwrap_or_else(|e| e.into_inner());
+    let start = s.max(0) as u64;
+    let end = if e <= 0 { DIRECT_SIZE } else { e as u64 };
+    let (best_start, best_size) = pool.largest_free(start, end, a);
     unsafe {
         if !out_start.is_null() {
-            *out_start = used;
+            *out_start = best_start;
         }
         if !out_size.is_null() {
-            *out_size = DIRECT_SIZE - used;
+            *out_size = best_size;
         }
     }
     0
@@ -1241,6 +1363,8 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceKernelMapNamedSystemFlexibleMemory", map_named_flexible as *const () as usize),
         ("sceKernelAllocateDirectMemory", allocate_direct as *const () as usize),
         ("sceKernelAllocateMainDirectMemory", allocate_main_direct as *const () as usize),
+        ("sceKernelReleaseDirectMemory", release_direct as *const () as usize),
+        ("sceKernelCheckedReleaseDirectMemory", release_direct as *const () as usize),
         ("sceKernelMapDirectMemory", map_direct as *const () as usize),
         ("sceKernelMapNamedDirectMemory", map_named_direct as *const () as usize),
         ("sceKernelGetDirectMemorySize", direct_memory_size as *const () as usize),
@@ -1452,5 +1576,23 @@ mod tests {
         assert_eq!(u1[8] & 0xC0, 0x80); // RFC 4122 variant
         assert_ne!(u1, u2);
         assert_eq!(sce_uuid_create(std::ptr::null_mut()), SCE_KERNEL_ERROR_EINVAL);
+    }
+
+    #[test]
+    fn direct_memory_free_list_reuses_and_coalesces_beyond_pool_size() {
+        let mut pool = DirectPool::new(128 << 20); // 128 MiB test pool
+        // Repeatedly allocate & release 32 MiB (2 MiB aligned) 20 times (= 640 MiB > 128 MiB pool).
+        for _ in 0..20 {
+            let a = pool.alloc(0, 128 << 20, 32 << 20, 2 << 20).expect("alloc a");
+            let b = pool.alloc(0, 128 << 20, 32 << 20, 2 << 20).expect("alloc b");
+            assert_eq!(a % (2 << 20), 0);
+            assert_eq!(b % (2 << 20), 0);
+            assert_ne!(a, b);
+            pool.release(b, 32 << 20);
+            pool.release(a, 32 << 20);
+        }
+        // Pool must have fully coalesced back to a single 128 MiB free block.
+        assert_eq!(pool.free, vec![(0, 128 << 20)]);
+        assert_eq!(pool.largest_free(0, 128 << 20, 2 << 20), (0, 128 << 20));
     }
 }
