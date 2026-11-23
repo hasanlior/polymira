@@ -560,7 +560,7 @@ const O_CREAT: i32 = 0x200;
 const O_TRUNC: i32 = 0x400;
 
 fn open_file(path: &str, flags: i32) -> Result<i32, i32> {
-    let host = host_path(path);
+    let host = if path == "/dev/urandom" || path == "/dev/random" { random_device() } else { host_path(path) };
     let mut o = std::fs::OpenOptions::new();
     let acc = flags & 3;
     o.read(acc != O_WRONLY).write(acc == O_WRONLY || acc == O_RDWR).append(flags & O_APPEND != 0).create(flags & O_CREAT != 0).truncate(flags & O_TRUNC != 0);
@@ -828,6 +828,129 @@ pub extern "sysv64" fn posix_unlink(path: *const c_char) -> i32 {
     if std::fs::remove_file(&p).is_ok() { 0 } else { -1 }
 }
 
+// ── rename, fsync, process id, random device ─────────────────────────
+
+pub extern "sysv64" fn sce_rename(from: *const c_char, to: *const c_char) -> i32 {
+    let (f, t) = (host_path(&text(from)), host_path(&text(to)));
+    if let Some(parent) = t.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::rename(&f, &t) {
+        Ok(()) => 0,
+        Err(_) => SCE_KERNEL_ERROR_ENOENT,
+    }
+}
+
+pub extern "sysv64" fn posix_rename(from: *const c_char, to: *const c_char) -> i32 {
+    if sce_rename(from, to) == 0 {
+        0
+    } else {
+        crate::hle_rt::set_errno(2);
+        -1
+    }
+}
+
+pub extern "sysv64" fn getpid() -> i32 {
+    1000
+}
+
+/// /dev/urandom and /dev/random: a fresh file of random bytes in the data folder.
+fn random_device() -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(format!("{}/dev_random.bin", data_root()));
+    let mut bytes = vec![0u8; 1 << 16];
+    crate::system::random(bytes.as_mut_ptr(), bytes.len());
+    let _ = std::fs::create_dir_all(data_root());
+    let _ = std::fs::write(&path, &bytes);
+    path
+}
+
+// ── POSIX semaphores (sem_t holds a pointer to an Orbis semaphore) ────
+
+struct Sem {
+    count: Mutex<u32>,
+    cv: std::sync::Condvar,
+}
+
+fn sem_of(s: *mut usize) -> Option<&'static Sem> {
+    if s.is_null() {
+        return None;
+    }
+    let p = unsafe { *s };
+    if p == 0 {
+        return None;
+    }
+    Some(unsafe { &*(p as *const Sem) })
+}
+
+pub extern "sysv64" fn sem_init(s: *mut usize, _pshared: i32, value: u32) -> i32 {
+    if s.is_null() {
+        return -1;
+    }
+    let sem = Box::leak(Box::new(Sem { count: Mutex::new(value), cv: std::sync::Condvar::new() }));
+    unsafe { *s = sem as *const Sem as usize };
+    0
+}
+
+pub extern "sysv64" fn sem_destroy(_s: *mut usize) -> i32 {
+    0
+}
+
+pub extern "sysv64" fn sem_post(s: *mut usize) -> i32 {
+    let Some(sem) = sem_of(s) else { return -1 };
+    *sem.count.lock().unwrap() += 1;
+    sem.cv.notify_one();
+    0
+}
+
+pub extern "sysv64" fn sem_wait(s: *mut usize) -> i32 {
+    let Some(sem) = sem_of(s) else { return -1 };
+    let mut c = sem.count.lock().unwrap();
+    while *c == 0 {
+        c = sem.cv.wait(c).unwrap();
+    }
+    *c -= 1;
+    0
+}
+
+pub extern "sysv64" fn sem_trywait(s: *mut usize) -> i32 {
+    let Some(sem) = sem_of(s) else { return -1 };
+    let mut c = sem.count.lock().unwrap();
+    if *c == 0 {
+        crate::hle_rt::set_errno(35); // EAGAIN
+        return -1;
+    }
+    *c -= 1;
+    0
+}
+
+/// sem_timedwait(s, abstime): absolute CLOCK_REALTIME.
+pub extern "sysv64" fn sem_timedwait(s: *mut usize, abs: *const [i64; 2]) -> i32 {
+    let Some(sem) = sem_of(s) else { return -1 };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let (sec, ns) = if abs.is_null() { (0, 0) } else { unsafe { ((*abs)[0], (*abs)[1]) } };
+    let target = std::time::Duration::new(sec.max(0) as u64, ns.clamp(0, 999_999_999) as u32);
+    let deadline = std::time::Instant::now() + target.saturating_sub(now);
+    let mut c = sem.count.lock().unwrap();
+    while *c == 0 {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            crate::hle_rt::set_errno(60); // ETIMEDOUT
+            return -1;
+        }
+        c = sem.cv.wait_timeout(c, left).unwrap().0;
+    }
+    *c -= 1;
+    0
+}
+
+pub extern "sysv64" fn sem_getvalue(s: *mut usize, out: *mut i32) -> i32 {
+    let Some(sem) = sem_of(s) else { return -1 };
+    if !out.is_null() {
+        unsafe { *out = *sem.count.lock().unwrap() as i32 };
+    }
+    0
+}
+
 /// (name, address) for everything here.
 pub fn functions() -> Vec<(&'static str, usize)> {
     vec![
@@ -922,6 +1045,26 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("fstat", sce_fstat as *const () as usize),
         ("sceKernelMkdir", sce_mkdir as *const () as usize),
         ("mkdir", sce_mkdir as *const () as usize),
+        ("sceKernelRename", sce_rename as *const () as usize),
+        ("rename", posix_rename as *const () as usize),
+        ("_rename", posix_rename as *const () as usize),
+        ("sceKernelFsync", zero as *const () as usize),
+        ("fsync", zero as *const () as usize),
+        ("_fsync", zero as *const () as usize),
+        ("fcntl", zero as *const () as usize),
+        ("_fcntl", zero as *const () as usize),
+        ("getpid", getpid as *const () as usize),
+        ("_getpid", getpid as *const () as usize),
+        ("sceKernelGetpid", getpid as *const () as usize),
+        ("pthread_condattr_setclock", zero as *const () as usize),
+        ("sceKernelAddReadEvent", zero as *const () as usize),
+        ("sem_init", sem_init as *const () as usize),
+        ("sem_destroy", sem_destroy as *const () as usize),
+        ("sem_post", sem_post as *const () as usize),
+        ("sem_wait", sem_wait as *const () as usize),
+        ("sem_trywait", sem_trywait as *const () as usize),
+        ("sem_timedwait", sem_timedwait as *const () as usize),
+        ("sem_getvalue", sem_getvalue as *const () as usize),
         ("sceKernelUnlink", sce_unlink as *const () as usize),
         ("unlink", posix_unlink as *const () as usize),
         ("sceKernelSync", zero as *const () as usize),
