@@ -78,30 +78,87 @@ pub extern "sysv64" fn virtual_query(addr: usize, flags: i32, info: *mut Virtual
     0
 }
 
+/// Commits [addr, addr+len), reserving any free parts first (the range may span several
+/// Windows reservations). Returns false if some part belongs to something else.
 #[cfg(windows)]
-fn vmem(addr: usize, len: usize) -> usize {
-    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE};
+fn commit_range(addr: usize, len: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RESERVE, PAGE_EXECUTE_READWRITE};
+    let end = addr + len;
+    let mut at = addr;
+    while at < end {
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { VirtualQuery(at as *const c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+            return false;
+        }
+        let region_end = (mbi.BaseAddress as usize + mbi.RegionSize).min(end);
+        let n = region_end - at;
+        let ok = unsafe {
+            if mbi.State == MEM_FREE {
+                // Reservations must start on 64 KB boundaries.
+                let base = at & !0xFFFF;
+                !VirtualAlloc(base as *const c_void, region_end - base, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE).is_null()
+                    || !VirtualAlloc(at as *const c_void, n, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE).is_null()
+            } else {
+                !VirtualAlloc(at as *const c_void, n, MEM_COMMIT, PAGE_EXECUTE_READWRITE).is_null()
+            }
+        };
+        if !ok {
+            return false;
+        }
+        at = region_end;
+    }
+    true
+}
+
+/// Maps memory for the game. `fixed`: exactly at `addr` or fail. `commit`: usable now
+/// (otherwise only reserved, committed later by mprotect/map).
+#[cfg(windows)]
+fn vmap(addr: usize, len: usize, fixed: bool, commit: bool) -> usize {
+    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_NOACCESS};
     let len = (len + 0x3FFF) & !0x3FFF;
     unsafe {
-        let mut p = if addr != 0 { VirtualAlloc(addr as *const c_void, len, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) } else { std::ptr::null_mut() };
-        if p.is_null() {
-            p = VirtualAlloc(std::ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if addr != 0 {
+            if commit {
+                if commit_range(addr, len) {
+                    record(addr, len, false);
+                    return addr;
+                }
+            } else {
+                let p = VirtualAlloc(addr as *const c_void, len, MEM_RESERVE, PAGE_NOACCESS);
+                if !p.is_null() || fixed {
+                    // Already reserved by the game counts as success for a fixed request.
+                    record(addr, len, false);
+                    return addr;
+                }
+            }
+            if fixed {
+                return 0;
+            }
         }
-        record(p as usize, len, false);
-        p as usize
+        let flags = if commit { MEM_COMMIT | MEM_RESERVE } else { MEM_RESERVE };
+        let p = VirtualAlloc(std::ptr::null(), len, flags, if commit { PAGE_EXECUTE_READWRITE } else { PAGE_NOACCESS }) as usize;
+        record(p, len, false);
+        p
     }
 }
 #[cfg(not(windows))]
-fn vmem(_addr: usize, _len: usize) -> usize {
+fn vmap(_addr: usize, _len: usize, _fixed: bool, _commit: bool) -> usize {
     0
 }
 
+fn vmem(addr: usize, len: usize) -> usize {
+    vmap(addr, len, false, true)
+}
+
 /// sceKernelMapFlexibleMemory(void** addr, size_t len, int prot, int flags)
-pub extern "sysv64" fn map_flexible(addr: *mut usize, len: usize, _prot: i32, _flags: i32) -> i32 {
+pub extern "sysv64" fn map_flexible(addr: *mut usize, len: usize, prot: i32, flags: i32) -> i32 {
     if addr.is_null() {
         return SCE_KERNEL_ERROR_ENOMEM;
     }
-    let p = vmem(unsafe { *addr }, len);
+    let p = vmap(unsafe { *addr }, len, flags & 0x10 != 0, true);
+    if std::env::var_os("ORBIS_TRACE_MEM").is_some() {
+        eprintln!("[orbis] map flexible({:#x}, {len:#x}, prot {prot:#x}, flags {flags:#x}) -> {p:#x}", unsafe { *addr });
+    }
     if p == 0 {
         return SCE_KERNEL_ERROR_ENOMEM;
     }
@@ -115,8 +172,20 @@ pub extern "sysv64" fn map_named_flexible(addr: *mut usize, len: usize, prot: i3
 }
 
 /// mmap(addr, len, prot, flags, fd, offset): anonymous mappings only for now.
-pub extern "sysv64" fn mmap(addr: usize, len: usize, _prot: i32, _flags: i32, _fd: i32, _off: i64) -> usize {
-    let p = vmem(addr, len);
+pub extern "sysv64" fn mmap(addr: usize, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> usize {
+    let p = vmap(addr, len, flags & 0x10 != 0, prot != 0);
+    if p != 0 && fd >= 3 && flags & 0x1000 == 0 {
+        // File mapping: copy the file's contents in.
+        use std::io::{Read, Seek, SeekFrom};
+        let buf = unsafe { std::slice::from_raw_parts_mut(p as *mut u8, len) };
+        with_file(fd, |f| {
+            let _ = f.seek(SeekFrom::Start(off.max(0) as u64));
+            let _ = f.read(buf);
+        });
+    }
+    if std::env::var_os("ORBIS_TRACE_MEM").is_some() {
+        eprintln!("[orbis] mmap({addr:#x}, {len:#x}, prot {prot:#x}, flags {flags:#x}, fd {fd}, off {off:#x}) -> {p:#x}");
+    }
     if p == 0 {
         usize::MAX
     } else {
@@ -124,11 +193,22 @@ pub extern "sysv64" fn mmap(addr: usize, len: usize, _prot: i32, _flags: i32, _f
     }
 }
 
-pub extern "sysv64" fn munmap(_addr: usize, _len: usize) -> i32 {
-    0 // memory is kept; games rarely depend on unmapping
+pub extern "sysv64" fn munmap(addr: usize, len: usize) -> i32 {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Memory::{VirtualFree, MEM_DECOMMIT};
+        VirtualFree(addr as *mut c_void, len, MEM_DECOMMIT);
+    }
+    let _ = (addr, len);
+    0
 }
 
-pub extern "sysv64" fn mprotect(_addr: usize, _len: usize, _prot: i32) -> i32 {
+pub extern "sysv64" fn mprotect(addr: usize, len: usize, prot: i32) -> i32 {
+    #[cfg(windows)]
+    if prot != 0 {
+        commit_range(addr & !0x3FFF, (len + (addr & 0x3FFF) + 0x3FFF) & !0x3FFF);
+    }
+    let _ = (addr, len, prot);
     0
 }
 
@@ -195,8 +275,11 @@ pub extern "sysv64" fn reserve_virtual_range(addr: *mut usize, len: usize, _flag
     }
     let want = unsafe { *addr };
     // Over-allocate to honour the alignment.
-    let a = align.max(0x4000);
-    let p = vmem(want, len + if want == 0 { a } else { 0 });
+    let a = align.max(0x10000);
+    let p = vmap(want, len + if want == 0 { a } else { 0 }, false, false);
+    if std::env::var_os("ORBIS_TRACE_MEM").is_some() {
+        eprintln!("[orbis] reserve({want:#x}, {len:#x}, align {align:#x}) -> {p:#x}");
+    }
     if p == 0 {
         return SCE_KERNEL_ERROR_ENOMEM;
     }
@@ -214,6 +297,108 @@ pub extern "sysv64" fn pthread_once(ctrl: *mut i32, f: extern "sysv64" fn()) -> 
             f();
             *ctrl = 2;
         }
+    }
+    0
+}
+
+/// sceKernelLoadStartModule(path, argc, argv, flags, opt, result): modules from the game folder
+/// are already loaded and linked at start-up; return their handle.
+pub extern "sysv64" fn load_start_module(path: *const c_char, _argc: usize, _argv: *const c_void, _flags: u32, _opt: *const c_void, result: *mut i32) -> i32 {
+    let p = text(path);
+    let file = p.rsplit('/').next().unwrap_or(&p).to_string();
+    let found = crate::loader::images().iter().position(|(n, _, _)| n.eq_ignore_ascii_case(&file));
+    eprintln!("[orbis] load module {p}: {}", if found.is_some() { "already loaded" } else { "not available" });
+    if !result.is_null() {
+        unsafe { *result = 0 };
+    }
+    match found {
+        Some(i) => i as i32 + 1,
+        None => SCE_KERNEL_ERROR_ENOENT,
+    }
+}
+
+// ── mspaces (sceLibcMspace*): heaps a game creates over its own memory ──
+// Orbis serves them from the PC heap; the region the game offers is left alone.
+
+use crate::hle_rt::{calloc as rt_calloc, free_any, memalign as rt_memalign};
+
+fn usable(p: *mut c_void) -> usize {
+    if p.is_null() {
+        return 0;
+    }
+    unsafe {
+        let tag = *((p as *mut u8).sub(16) as *const usize);
+        if tag == usize::MAX {
+            let raw = *((p as *mut u8).sub(8) as *const usize);
+            let raw_size = *((raw - 16) as *const usize);
+            raw + raw_size - p as usize
+        } else {
+            tag
+        }
+    }
+}
+
+pub extern "sysv64" fn mspace_create(name: *const c_char, base: usize, cap: usize, _flag: u32) -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0x5EED_0000);
+    let id = NEXT.fetch_add(0x100, std::sync::atomic::Ordering::SeqCst);
+    if std::env::var_os("ORBIS_TRACE").is_some() {
+        eprintln!("[orbis] mspace {} ({cap:#x} bytes at {base:#x})", text(name));
+    }
+    // A distinct non-null handle per mspace.
+    Box::leak(Box::new([id; 8])).as_ptr() as usize
+}
+pub extern "sysv64" fn mspace_destroy(_m: usize) -> i32 {
+    0
+}
+pub extern "sysv64" fn mspace_malloc(_m: usize, size: usize) -> *mut c_void {
+    rt_memalign(16, size.max(1))
+}
+pub extern "sysv64" fn mspace_free(_m: usize, p: *mut c_void) -> i32 {
+    free_any(p);
+    0
+}
+pub extern "sysv64" fn mspace_calloc(_m: usize, n: usize, size: usize) -> *mut c_void {
+    let total = n.saturating_mul(size).max(1);
+    let p = rt_memalign(16, total);
+    if !p.is_null() {
+        unsafe { std::ptr::write_bytes(p as *mut u8, 0, total) };
+    }
+    p
+}
+pub extern "sysv64" fn mspace_memalign(_m: usize, align: usize, size: usize) -> *mut c_void {
+    rt_memalign(align, size.max(1))
+}
+pub extern "sysv64" fn mspace_realloc(_m: usize, p: *mut c_void, size: usize) -> *mut c_void {
+    let n = rt_memalign(16, size.max(1));
+    if !p.is_null() && !n.is_null() {
+        unsafe { std::ptr::copy_nonoverlapping(p as *const u8, n as *mut u8, usable(p).min(size)) };
+        free_any(p);
+    }
+    n
+}
+pub extern "sysv64" fn mspace_reallocalign(m: usize, p: *mut c_void, size: usize, align: usize) -> *mut c_void {
+    let n = mspace_memalign(m, align, size);
+    if !p.is_null() && !n.is_null() {
+        unsafe { std::ptr::copy_nonoverlapping(p as *const u8, n as *mut u8, usable(p).min(size)) };
+        free_any(p);
+    }
+    n
+}
+pub extern "sysv64" fn mspace_posix_memalign(m: usize, out: *mut *mut c_void, align: usize, size: usize) -> i32 {
+    let p = mspace_memalign(m, align, size);
+    unsafe { *out = p };
+    if p.is_null() {
+        12
+    } else {
+        0
+    }
+}
+pub extern "sysv64" fn mspace_usable(p: *mut c_void) -> usize {
+    usable(p)
+}
+pub extern "sysv64" fn mspace_stats(_m: usize, stats: *mut u64) -> i32 {
+    if !stats.is_null() {
+        unsafe { std::ptr::write_bytes(stats as *mut u8, 0, 32) };
     }
     0
 }
@@ -534,6 +719,19 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceKernelGetDirectMemorySize", direct_memory_size as *const () as usize),
         ("sceKernelAvailableFlexibleMemorySize", available_flexible as *const () as usize),
         ("sceKernelAvailableDirectMemorySize", available_direct as *const () as usize),
+        ("sceLibcMspaceCreate", mspace_create as *const () as usize),
+        ("sceLibcMspaceDestroy", mspace_destroy as *const () as usize),
+        ("sceLibcMspaceMalloc", mspace_malloc as *const () as usize),
+        ("sceLibcMspaceFree", mspace_free as *const () as usize),
+        ("sceLibcMspaceCalloc", mspace_calloc as *const () as usize),
+        ("sceLibcMspaceMemalign", mspace_memalign as *const () as usize),
+        ("sceLibcMspaceRealloc", mspace_realloc as *const () as usize),
+        ("sceLibcMspaceReallocalign", mspace_reallocalign as *const () as usize),
+        ("sceLibcMspacePosixMemalign", mspace_posix_memalign as *const () as usize),
+        ("sceLibcMspaceMallocUsableSize", mspace_usable as *const () as usize),
+        ("sceLibcMspaceMallocStats", mspace_stats as *const () as usize),
+        ("sceLibcMspaceMallocStatsFast", mspace_stats as *const () as usize),
+        ("sceKernelLoadStartModule", load_start_module as *const () as usize),
         ("sceKernelVirtualQuery", virtual_query as *const () as usize),
         ("sceKernelReserveVirtualRange", reserve_virtual_range as *const () as usize),
         ("scePthreadOnce", pthread_once as *const () as usize),

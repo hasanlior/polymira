@@ -137,10 +137,19 @@ unsafe extern "system" fn on_unhandled(info: *const windows_sys::Win32::System::
 }
 
 /// Reserves stack for the crash report on the current thread (stack overflows).
+/// Also commits the whole stack up front: console code uses large stack frames without
+/// probing each page, which would jump over Windows' guard page.
 pub fn install_thread_guard() {
     #[cfg(windows)]
     unsafe {
-        let mut guarantee: u32 = 0x10000;
+        use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, PAGE_READWRITE};
+        let (mut low, mut high) = (0usize, 0usize);
+        windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits(&mut low, &mut high);
+        let keep = 0x10000; // leave the bottom as Windows' overflow guard
+        if high > low + keep * 2 {
+            VirtualAlloc((low + keep) as *const _, high - low - keep, MEM_COMMIT, PAGE_READWRITE);
+        }
+        let mut guarantee: u32 = 0x8000;
         windows_sys::Win32::System::Threading::SetThreadStackGuarantee(&mut guarantee);
     }
 }
@@ -231,6 +240,13 @@ pub fn describe(addr: usize) -> String {
     format!("{addr:#x}")
 }
 
+/// Exports of the game's modules by NID (for Orbis functions that wrap them).
+static EXPORTS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, u64>>> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+pub fn export_addr(name: &str) -> Option<usize> {
+    EXPORTS.lock().ok()?.get(&crate::nid::nid(name)).map(|&a| a as usize)
+}
+
 /// Every mapped image (name, base, size), sorted by base.
 pub fn images() -> Vec<(String, usize, usize)> {
     let mut v = IMAGES.lock().map(|v| v.clone()).unwrap_or_default();
@@ -309,6 +325,7 @@ pub fn load_with_modules(main_exe: Executable, main_path: Option<&std::path::Pat
         }
     }
 
+    *EXPORTS.lock().unwrap() = exports.clone();
     let table = hle::table();
     let total_relocs: usize = images.iter().map(|i| i.exe.relocations().len()).sum();
     let stubs = alloc_rwx(total_relocs.max(1) * 32);

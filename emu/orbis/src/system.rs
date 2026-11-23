@@ -91,8 +91,23 @@ pub extern "sysv64" fn video_open(_user: i32, _bus: i32, _index: i32, _param: *c
     1
 }
 
+/// sceSystemServiceReceiveEvent(event*): no system events (resume, URL open, ...) are ever pending.
+pub extern "sysv64" fn system_receive_event(_ev: *mut c_void) -> i32 {
+    0x80A1_0003u32 as i32 // SCE_SYSTEM_SERVICE_ERROR_NO_EVENT
+}
+
+/// sceSystemServiceGetStatus(status*): { int eventNum; bool overlaid, background, cpuMode7, ... }.
+pub extern "sysv64" fn system_get_status(st: *mut u8) -> i32 {
+    if !st.is_null() {
+        unsafe { std::ptr::write_bytes(st, 0, 16) };
+    }
+    0
+}
+
 pub fn functions() -> Vec<(&'static str, usize)> {
     vec![
+        ("sceSystemServiceReceiveEvent", system_receive_event as *const () as usize),
+        ("sceSystemServiceGetStatus", system_get_status as *const () as usize),
         ("sceUserServiceGetEvent", user_get_event as *const () as usize),
         ("sceUserServiceGetLoginUserIdList", user_login_list as *const () as usize),
         ("sceUserServiceGetInitialUser", user_initial as *const () as usize),
@@ -106,6 +121,5 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceKernelCheckedReleaseDirectMemory", ok as *const () as usize),
         ("sceNpCheckCallback", ok as *const () as usize),
         ("sceNetCtlCheckCallback", ok as *const () as usize),
-        ("sceVideoOutOpen", video_open as *const () as usize),
     ]
 }
