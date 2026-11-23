@@ -1,3 +1,4 @@
+import { app } from 'electron'
 import { execFile, spawn } from 'child_process'
 import fs from 'fs'
 import path from 'path'
@@ -54,27 +55,33 @@ export async function tryRunGame(game: Game): Promise<{ code: number; log: strin
   if (!exe) throw new Error('Orbis bu sürümde bulunamadı.')
   const file = executableOf(game)
   if (!file) throw new Error('Oyunun çalıştırılabilir dosyası (eboot.bin) bulunamadı.')
+  // Start it the way a terminal does: its own visible window, the log in a file (a pipe slows
+  // the game down, since Orbis logs every frame), the game folder as working directory.
+  const dataDir = path.join(app.getPath('userData'), 'orbis')
+  fs.mkdirSync(dataDir, { recursive: true })
+  const logFile = path.join(dataDir, 'orbis.log')
+  const logFd = fs.openSync(logFile, 'w')
   const child = spawn(exe, ['run', file], {
-    env: { ...process.env, ORBIS_TITLE: game.title },
+    env: { ...process.env, ORBIS_TITLE: game.title, ORBIS_DATA: dataDir },
+    cwd: path.dirname(file),
     detached: true,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', logFd, logFd],
   })
-  const lines: string[] = []
-  const collect = (buf: Buffer) => {
-    for (const ln of String(buf).split(/\r?\n/)) {
-      if (ln && lines.length < 120) lines.push(ln)
+  fs.closeSync(logFd)
+  const readLog = (): string => {
+    try {
+      return fs.readFileSync(logFile, 'utf8').split(/\r?\n/).filter(Boolean).slice(0, 120).join('\n')
+    } catch {
+      return ''
     }
   }
-  child.stdout?.on('data', collect)
-  child.stderr?.on('data', collect)
   return new Promise((resolve) => {
     let settled = false
     const finish = (code: number) => {
       if (settled) return
       settled = true
       child.unref()
-      resolve({ code, log: lines.join('\n') || 'POLYMIRA Orbis penceresi açıldı.' })
+      resolve({ code, log: readLog() || 'POLYMIRA Orbis penceresi açıldı.' })
     }
     child.on('exit', (c) => finish(typeof c === 'number' ? c : 0))
     child.on('error', () => finish(1))

@@ -20,6 +20,7 @@ mod shader;
 mod tiling;
 mod vk;
 mod video;
+mod savedata;
 mod system;
 mod thread;
 mod loader;

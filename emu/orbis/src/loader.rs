@@ -90,11 +90,19 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
         let mut n = 0u32;
         WriteFile(GetStdHandle(STD_ERROR_HANDLE), line.as_ptr(), line.len() as u32, &mut n, std::ptr::null_mut());
     }
-    let (base, size) = *GAME.lock().unwrap();
+    // A fault inside this report ends the process quietly instead of recursing.
+    static IN_REPORT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if IN_REPORT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        windows_sys::Win32::System::Threading::ExitProcess(3);
+    }
+    // Never use eprintln! here: the faulting thread may be inside a write to stderr already.
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let (base, size) = GAME.try_lock().map(|g| *g).unwrap_or((0, 0));
     let place = describe(rip);
     let what = match code {
         0xC000_0005 => {
-            let kind = if rec.NumberParameters >= 2 { if rec.ExceptionInformation[0] == 0 { "read" } else { "write" } } else { "access" };
+            let kind = if rec.NumberParameters >= 2 { if rec.ExceptionInformation[0] == 0 { "read" } else if rec.ExceptionInformation[0] == 8 { "execute" } else { "write" } } else { "access" };
             format!("access violation ({kind} of address {:#x})", if rec.NumberParameters >= 2 { rec.ExceptionInformation[1] } else { 0 })
         }
         0xC000_001D => "illegal instruction".to_string(),
@@ -103,17 +111,18 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
         c => format!("exception {c:#x}"),
     };
     let known = IMAGES.try_lock().map(|v| v.iter().any(|(_, b, s)| rip >= *b && rip + 16 <= b + s)).unwrap_or(false);
-    let bytes: Vec<String> = if (known || (rip >= base && rip + 16 <= base + size)) && readable(rip) {
-        (0..16).map(|i| format!("{:02x}", *(rip as *const u8).add(i))).collect()
-    } else {
-        vec![]
-    };
-    eprintln!("[orbis] the game stopped: {what}");
-    eprintln!("[orbis]   at {rip:#x} ({place})");
-    if !bytes.is_empty() {
-        eprintln!("[orbis]   instruction bytes: {}", bytes.join(" "));
+    let _ = writeln!(out, "[orbis] the game stopped: {what}");
+    let _ = writeln!(out, "[orbis]   at {rip:#x} ({place})");
+    if (known || (rip >= base && rip + 16 <= base + size)) && readable(rip) {
+        let bytes: Vec<String> = (0..16).map(|i| format!("{:02x}", *(rip as *const u8).add(i))).collect();
+        let _ = writeln!(out, "[orbis]   instruction bytes: {}", bytes.join(" "));
     }
-    eprintln!("[orbis]   registers: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} rsp={:#x}", ctx.Rax, ctx.Rbx, ctx.Rcx, ctx.Rdx, ctx.Rsi, ctx.Rdi, ctx.Rsp);
+    let _ = writeln!(out, "[orbis]   registers: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} rsp={:#x} rbp={:#x}", ctx.Rax, ctx.Rbx, ctx.Rcx, ctx.Rdx, ctx.Rsi, ctx.Rdi, ctx.Rsp, ctx.Rbp);
+    // A jump to a bad address (null function pointer): the caller's return address is at [rsp].
+    if !readable(rip) && readable(ctx.Rsp as usize) {
+        let ret = *(ctx.Rsp as usize as *const usize);
+        let _ = writeln!(out, "[orbis]   jumped here from the call before {}", describe(ret));
+    }
     // Call chain: follow saved frame pointers (games are built with them).
     let mut frames = vec![];
     let mut rbp = ctx.Rbp as usize;
@@ -130,11 +139,18 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
         rbp = next;
     }
     if !frames.is_empty() {
-        eprintln!("[orbis]   called from: {}", frames.join(" <- "));
+        let _ = writeln!(out, "[orbis]   called from: {}", frames.join(" <- "));
     }
-    let recent = RECENT.lock().map(|r| r.clone()).unwrap_or_default();
-    if !recent.is_empty() {
-        eprintln!("[orbis]   last system calls: {}", recent.join(" → "));
+    if let Ok(r) = RECENT.try_lock() {
+        if !r.is_empty() {
+            let _ = writeln!(out, "[orbis]   last system calls: {}", r.join(" → "));
+        }
+    }
+    {
+        use windows_sys::Win32::Storage::FileSystem::WriteFile;
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+        let mut n = 0u32;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), out.as_ptr(), out.len() as u32, &mut n, std::ptr::null_mut());
     }
     windows_sys::Win32::System::Threading::ExitProcess(3);
 }

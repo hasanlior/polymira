@@ -511,13 +511,27 @@ pub extern "sysv64" fn tsc_frequency() -> u64 {
 
 // ── files ─────────────────────────────────────────────────────────────
 // Console paths: /app0 is the game folder; /data, /temp0, /download0 map to a folder under
-// %LOCALAPPDATA%\POLYMIRA\orbis.
+// POLYMIRA's data folder (see data_root).
 
 pub static GAME_DIR: Mutex<String> = Mutex::new(String::new());
 
+/// Where Orbis keeps a game's files (saves, settings, downloads): POLYMIRA's own data folder,
+/// %APPDATA%\POLYMIRA\orbis, or ORBIS_DATA when POLYMIRA passes another one.
+pub fn data_root() -> String {
+    if let Ok(d) = std::env::var("ORBIS_DATA") {
+        if !d.is_empty() {
+            return d.replace('\\', "/");
+        }
+    }
+    std::env::var("APPDATA").map(|d| format!("{}/POLYMIRA/orbis", d.replace('\\', "/"))).unwrap_or_else(|_| "orbis-data".into())
+}
+
 fn host_path(p: &str) -> std::path::PathBuf {
+    if let Some(saved) = crate::savedata::resolve(p) {
+        return saved;
+    }
     let game = GAME_DIR.lock().unwrap().clone();
-    let data = std::env::var("LOCALAPPDATA").map(|d| format!("{d}/POLYMIRA/orbis")).unwrap_or_else(|_| "orbis-data".into());
+    let data = data_root();
     for (prefix, root) in [("/app0", game.clone()), ("/hostapp", game), ("/data", format!("{data}/data")), ("/temp0", format!("{data}/temp0")), ("/temp", format!("{data}/temp0")), ("/download0", format!("{data}/download0"))] {
         if let Some(rest) = p.strip_prefix(prefix) {
             if rest.is_empty() || rest.starts_with('/') {

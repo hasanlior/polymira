@@ -226,6 +226,9 @@ fn present(buf: &Buffer, n: u64) {
     let (w, h) = (buf.width as usize, buf.height as usize);
     let (verts, idxs, batches) = crate::agc::take_frame_draws();
     let has_draws = !verts.is_empty() && !idxs.is_empty();
+    if std::env::var_os("ORBIS_FRAME_STATS").is_some() && (n <= 3 || n % 120 == 0) {
+        eprintln!("[orbis] frame {n}: {} verts, {} indices, {} batches", verts.len(), idxs.len(), batches.len());
+    }
     let dump_dir = std::env::var("ORBIS_DUMP").ok();
     let mut has_pixels = false;
     if !has_draws || dump_dir.is_some() {
