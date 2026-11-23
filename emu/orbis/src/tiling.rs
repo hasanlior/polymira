@@ -210,6 +210,34 @@ fn untile_32bpp_raw(src: &[u8], width: u32, height: u32, swizzle_mode: u32, dst_
     dst
 }
 
+/// Byte offset of element (x, y) in array slice `slice` of a `width` x `height` surface with
+/// `bpe` bytes per element: linear (mode 0) or GFX10 64KB standard swizzle, using the same
+/// bit layouts as the untilers above. None for layouts it does not know.
+pub fn element_offset(x: usize, y: usize, slice: usize, width: usize, height: usize, bpe: usize, swizzle_mode: u32) -> Option<usize> {
+    if swizzle_mode == 0 {
+        return Some(((slice * height + y) * width + x) * bpe);
+    }
+    // (x bits, y bits) in element-index order inside one 64 KiB block, and block size.
+    let (xb, yb, bw, bh): (&[u32], &[u32], usize, usize) = match bpe {
+        1 => (&[0, 1, 2, 3, 9, 11, 13, 15], &[4, 5, 6, 7, 8, 10, 12, 14], 256, 256),
+        2 => (&[0, 1, 2, 5, 8, 10, 12, 14], &[3, 4, 6, 7, 9, 11, 13], 256, 128),
+        4 => (&[0, 1, 5, 7, 9, 11, 13], &[2, 3, 4, 6, 8, 10, 12], 128, 128),
+        _ => return None,
+    };
+    let (lx, ly) = (x % bw, y % bh);
+    let mut e = 0usize;
+    for (k, &b) in xb.iter().enumerate() {
+        e |= ((lx >> k) & 1) << b;
+    }
+    for (k, &b) in yb.iter().enumerate() {
+        e |= ((ly >> k) & 1) << b;
+    }
+    let tiles_x = (width + bw - 1) / bw;
+    let tiles_y = (height + bh - 1) / bh;
+    let block = slice * tiles_x * tiles_y + (y / bh) * tiles_x + x / bw;
+    Some(block * 65536 + e * bpe)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

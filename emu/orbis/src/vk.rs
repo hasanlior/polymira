@@ -125,6 +125,8 @@ pub struct VkRenderer {
     pub rt_fbs: HashMap<usize, vk::Framebuffer>,
     pub rt_dsets: HashMap<usize, vk::DescriptorSet>,
     pub rt_layouts: HashMap<usize, vk::ImageLayout>,
+    pub tex_checked: HashMap<usize, u64>,
+    pub frame_no: u64,
     pub samplers: HashMap<u32, vk::Sampler>,
     pub rt_depth: HashMap<usize, (vk::Image, vk::DeviceMemory, vk::ImageView)>,
     pub rt_last_used: HashMap<usize, u64>,
@@ -354,6 +356,8 @@ impl VkRenderer {
             rt_fbs: HashMap::new(),
             rt_dsets: HashMap::new(),
             rt_layouts: HashMap::new(),
+            tex_checked: HashMap::new(),
+            frame_no: 0,
             samplers: HashMap::new(),
             rt_depth: HashMap::new(),
             rt_last_used: HashMap::new(),
@@ -893,6 +897,15 @@ impl VkRenderer {
         if addr == 0 || width == 0 || height == 0 || width > 4096 || height > 4096 {
             return self.desc_set;
         }
+        // Memory is compared at most once per frame per texture.
+        if self.tex_checked.get(&addr) == Some(&self.frame_no) {
+            if let Some((t, ds)) = self.tex_cache.get(&addr) {
+                if t.width == width && t.height == height {
+                    return *ds;
+                }
+            }
+        }
+        self.tex_checked.insert(addr, self.frame_no);
         let sw_mode = swiz & 0x1F;
         let fmt = (swiz >> 8) & 0x1FF;
         let (bpp, tile_w, tile_h): (usize, usize, usize) = match fmt {
@@ -1756,6 +1769,7 @@ impl VkRenderer {
         if !self.blit_ready || self.vbuf == vk::Buffer::null() || self.ibuf == vk::Buffer::null() || display.0 == 0 {
             return false;
         }
+        self.frame_no += 1;
         unsafe {
             if self.rt_passes().is_none() {
                 return false;

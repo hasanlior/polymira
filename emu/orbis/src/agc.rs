@@ -885,7 +885,32 @@ fn bound_shader_pair(gpu: &GpuState) -> (usize, usize) {
     (vs, ps)
 }
 
+/// Committed-memory check for the shader interpreters: remembers the last committed region
+/// (per thread) so repeated accesses skip the VirtualQuery system call.
 fn mem_ok(addr: usize, len: usize) -> bool {
+    thread_local! {
+        static REGION: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    }
+    let end = addr.saturating_add(len);
+    let (lo, hi) = REGION.with(|r| r.get());
+    if addr >= lo && end <= hi {
+        return true;
+    }
+    if addr < 0x1_0000_0000 || addr > 0x7FFF_FFFF_FFFF || len == 0 {
+        return false;
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+        let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+        if VirtualQuery(addr as *const std::ffi::c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) == 0 || mbi.State != MEM_COMMIT {
+            return false;
+        }
+        let (b, e) = (mbi.BaseAddress as usize, mbi.BaseAddress as usize + mbi.RegionSize);
+        REGION.with(|r| r.set((b, e)));
+        return end <= e;
+    }
+    #[allow(unreachable_code)]
     is_committed(addr, len)
 }
 
@@ -1245,6 +1270,116 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         }
     }
     GEN_STATS[0].fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Compute shaders that can run one thread at a time (no LDS, barriers or cross-lane ops).
+static CS_CACHE: LazyLock<Mutex<HashMap<usize, Option<std::sync::Arc<crate::rdna::interp::CompiledShader>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Runs a compute dispatch on the CPU, thread by thread (small dispatches only: glyph and
+/// texture uploads, buffer clears and copies). Returns false to leave it to other handling.
+fn cpu_dispatch(gpu: &GpuState, gx: u32, gy: u32, gz: u32) -> bool {
+    let cs_addr = (((*gpu.sh.get(&0x20C).unwrap_or(&0) as u64) | ((*gpu.sh.get(&0x20D).unwrap_or(&0) as u64) << 32)) << 8) as usize;
+    let tx = (*gpu.sh.get(&0x207).unwrap_or(&1) & 0xFFFF).max(1);
+    let ty = (*gpu.sh.get(&0x208).unwrap_or(&1) & 0xFFFF).max(1);
+    let tz = (*gpu.sh.get(&0x209).unwrap_or(&1) & 0xFFFF).max(1);
+    let total = gx as u64 * gy as u64 * gz as u64 * (tx * ty * tz) as u64;
+    if total == 0 || total > (1 << 17) {
+        return false;
+    }
+    let sh = {
+        let mut cache = CS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .entry(cs_addr)
+            .or_insert_with(|| {
+                let code = shader_words(cs_addr)?;
+                let c = crate::rdna::interp::CompiledShader::new(code);
+                let simple = c.insts.iter().all(|i| {
+                    i.fmt != crate::rdna::Fmt::Ds
+                        && i.name != "s_barrier"
+                        && !i.name.contains("readlane")
+                        && !i.name.contains("atomic")
+                        && i.ext != crate::rdna::Ext::Dpp16
+                        && i.ext != crate::rdna::Ext::Dpp8
+                });
+                let supported_mem = c.insts.iter().all(|i| match i.fmt {
+                    crate::rdna::Fmt::Flat | crate::rdna::Fmt::Global | crate::rdna::Fmt::Scratch => false,
+                    _ => true,
+                });
+                (simple && supported_mem).then(|| std::sync::Arc::new(c))
+            })
+            .clone()
+    };
+    let Some(sh) = sh else { return false };
+    if std::env::var_os("ORBIS_CS_LOG").is_some() {
+        static SEEN: Mutex<Vec<(usize, u64)>> = Mutex::new(Vec::new());
+        let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.contains(&(cs_addr, total)) && g.len() < 200 {
+            g.push((cs_addr, total));
+            let ops: std::collections::BTreeSet<&str> = sh.insts.iter().filter(|i| matches!(i.fmt, crate::rdna::Fmt::Mimg | crate::rdna::Fmt::Mubuf | crate::rdna::Fmt::Mtbuf)).map(|i| i.name).collect();
+            let ud: Vec<String> = (0..16u32).map(|k| format!("{:x}", gpu.sh.get(&(0x240 + k)).unwrap_or(&0))).collect();
+            if let (Ok(dir), Some(code)) = (std::env::var("ORBIS_GEN_DUMP"), shader_words(cs_addr)) {
+                let n = crate::rdna::decode_shader(code).last().map(|i| i.pc as usize / 4 + i.words.len()).unwrap_or(0);
+                let b: Vec<u8> = code[..n].iter().flat_map(|w| w.to_le_bytes()).collect();
+                let _ = std::fs::write(format!("{dir}/cs_{cs_addr:x}.bin"), b);
+            }
+            eprintln!("[orbis] CS {cs_addr:#x} groups={gx}x{gy}x{gz} threads={total} ops={ops:?} ud={}", ud.join(","));
+        }
+    }
+    let t0 = std::time::Instant::now();
+    struct Timer(std::time::Instant, u64);
+    impl Drop for Timer {
+        fn drop(&mut self) {
+            static NS: AtomicU64 = AtomicU64::new(0);
+            static CNT: AtomicU64 = AtomicU64::new(0);
+            let ns = NS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            let c = CNT.fetch_add(1, Ordering::Relaxed);
+            if std::env::var_os("ORBIS_CS_LOG").is_some() && c % 500 == 499 {
+                eprintln!("[orbis] CPU compute: {} dispatches, {} ms total, last {} threads", c + 1, ns / 1_000_000, self.1);
+            }
+        }
+    }
+    let _timer = Timer(t0, total);
+    let rsrc2 = *gpu.sh.get(&0x213).unwrap_or(&0);
+    let user = ((rsrc2 >> 1) & 0x1F) as usize;
+    let user_data: Vec<u32> = (0..user as u32).map(|k| *gpu.sh.get(&(0x240 + k)).unwrap_or(&0)).collect();
+    let mut lane = crate::rdna::interp::Lane::new();
+    for z in 0..gz {
+        for y in 0..gy {
+            for x in 0..gx {
+                for k in 0..tz {
+                    for j in 0..ty {
+                        for i in 0..tx {
+                            lane.reset();
+                            lane.stores = true;
+                            lane.s[..user].copy_from_slice(&user_data);
+                            let mut n = user;
+                            for (bit, id) in [(7, x), (8, y), (9, z)] {
+                                if rsrc2 & (1 << bit) != 0 {
+                                    lane.s[n] = id;
+                                    n += 1;
+                                }
+                            }
+                            if rsrc2 & (1 << 10) != 0 {
+                                lane.s[n] = tx * ty * tz;
+                            }
+                            lane.v[0] = i;
+                            lane.v[1] = j;
+                            lane.v[2] = k;
+                            if let Err(e) = crate::rdna::interp::run_compiled(&sh, &mut lane, mem_ok) {
+                                static LOGGED: AtomicU64 = AtomicU64::new(0);
+                                if LOGGED.fetch_add(1, Ordering::Relaxed) < 20 {
+                                    eprintln!("[orbis] CPU compute {cs_addr:#x}: {e}");
+                                }
+                                CS_CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(cs_addr, None);
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     true
 }
 
@@ -1820,6 +1955,7 @@ fn execute_stream(
                         let src_t: [u32; 8] = std::array::from_fn(|k| *gpu.sh.get(&(0x240 + k as u32)).unwrap_or(&0));
                         let dst_tp = ((*gpu.sh.get(&0x24C).unwrap_or(&0) as u64)
                             | (((*gpu.sh.get(&0x24D).unwrap_or(&0) & 0xFFFF) as u64) << 32)) as usize;
+                        let mut copied_fast = false;
                         if dst_tp >= 0x1_0000_0000 && is_committed(dst_tp, 32) {
                             let dst_t: [u32; 8] = unsafe { *(dst_tp as *const [u32; 8]) };
                             let decode_t = |t: &[u32; 8]| -> (usize, u32, u32, u32, u32, usize) {
@@ -1836,6 +1972,7 @@ fn execute_stream(
                             if sa >= 0x1_0000_0000
                                 && da >= 0x1_0000_0000
                                 && sfmt == dfmt
+                                && sfmt >= 32
                                 && sw == dw
                                 && sh == dh
                                 && sswiz == dswiz
@@ -1855,8 +1992,12 @@ fn execute_stream(
                                     unsafe {
                                         std::ptr::copy(src_at as *const u8, dst_at as *mut u8, slice_bytes);
                                     }
+                                    copied_fast = true;
                                 }
                             }
+                        }
+                        if !copied_fast {
+                            let _ = cpu_dispatch(gpu, w[1], w[2], w[3]);
                         }
                         if std::env::var_os("ORBIS_DUMP_DRAW").is_some() {
                             static IMG_LOG: AtomicU64 = AtomicU64::new(0);

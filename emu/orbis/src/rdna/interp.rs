@@ -18,6 +18,8 @@ pub struct Lane {
     pub v: Vec<u32>,
     pub scc: bool,
     pub exports: Vec<Export>,
+    /// Memory writes (buffer/image stores) take effect: compute shaders only.
+    pub stores: bool,
 }
 
 #[derive(Debug)]
@@ -53,7 +55,7 @@ pub type MemCheck = fn(usize, usize) -> bool;
 
 impl Lane {
     pub fn new() -> Lane {
-        let mut l = Lane { s: [0; 128], v: vec![0; 256], scc: false, exports: Vec::with_capacity(16) };
+        let mut l = Lane { s: [0; 128], v: vec![0; 256], scc: false, exports: Vec::with_capacity(16), stores: false };
         l.set64(EXEC, 1);
         l
     }
@@ -483,9 +485,44 @@ fn step(inst: &Inst, l: &mut Lane, ok: MemCheck) -> Result<Flow, Error> {
                     l.v[vdata + k] = read_u32(addr + k as u64 * 4, ok)?;
                 }
             } else if n.starts_with("buffer_store") || n.starts_with("tbuffer_store") {
-                // Vertex shaders do not store; ignore.
+                if l.stores {
+                    if n.contains("store_format") {
+                        let mut vals = [0u32; 4];
+                        for k in 0..comps {
+                            vals[k] = l.v[vdata + k];
+                        }
+                        let (bytes, bpe) = pack_element(&vals, fmt).ok_or(Error::Unsupported("buffer format", fmt))?;
+                        write_bytes(addr, &bytes[..bpe], ok)?;
+                    } else if n.starts_with("buffer_store_byte") {
+                        write_bytes(addr, &[l.v[vdata] as u8], ok)?;
+                    } else if n.starts_with("buffer_store_short") {
+                        write_bytes(addr, &(l.v[vdata] as u16).to_le_bytes(), ok)?;
+                    } else {
+                        let cnt = if n.ends_with("x4") { 4 } else if n.ends_with("x3") { 3 } else if n.ends_with("x2") { 2 } else { 1 };
+                        let mut b = [0u8; 16];
+                        for k in 0..cnt {
+                            b[k * 4..k * 4 + 4].copy_from_slice(&l.v[vdata + k].to_le_bytes());
+                        }
+                        write_bytes(addr, &b[..cnt * 4], ok)?;
+                    }
+                }
+            } else if n.starts_with("buffer_load_ubyte") {
+                if !ok(addr as usize, 1) {
+                    return Err(Error::Memory(addr));
+                }
+                l.v[vdata] = unsafe { *(addr as *const u8) } as u32;
+            } else if n.starts_with("buffer_load_ushort") {
+                if !ok(addr as usize, 2) {
+                    return Err(Error::Memory(addr));
+                }
+                l.v[vdata] = unsafe { (addr as *const u16).read_unaligned() } as u32;
             } else {
                 return un();
+            }
+        }
+        Fmt::Mimg if n.starts_with("image_load") || n.starts_with("image_store") => {
+            if l.exec_on() {
+                image_op(inst, l, ok)?;
             }
         }
         Fmt::Exp => {
@@ -917,4 +954,166 @@ pub fn trace_ps_compiled(sh: &CompiledShader, lane: &mut Lane, attrs: &[[f32; 4]
 pub fn trace_ps(code: &[u32], lane: &mut Lane, attrs: &[[f32; 4]; 8], ok: MemCheck) -> Result<(Vec<u32>, ScalarInfo), Error> {
     let sh = CompiledShader::new(code);
     trace_ps_compiled(&sh, lane, attrs, ok)
+}
+
+// ── memory writes and image access (compute shaders run on the CPU) ─────────────────────
+
+/// Bytes per element, component count and component kind of a GFX10 unified format.
+#[derive(Clone, Copy, PartialEq)]
+enum Comp {
+    Unorm8,
+    Uint8,
+    Unorm16,
+    Uint16,
+    F16,
+    Raw32,
+}
+
+fn format_info(fmt: u32) -> Option<(usize, usize, Comp)> {
+    Some(match fmt {
+        1 | 2 => (1, 1, Comp::Unorm8),
+        5 | 6 => (1, 1, Comp::Uint8),
+        7 | 8 => (2, 1, Comp::Unorm16),
+        11 | 12 => (2, 1, Comp::Uint16),
+        13 => (2, 1, Comp::F16),
+        14 | 15 => (2, 2, Comp::Unorm8),
+        18 | 19 => (2, 2, Comp::Uint8),
+        20 | 21 | 22 => (4, 1, Comp::Raw32),
+        23 | 24 => (4, 2, Comp::Unorm16),
+        27 | 28 => (4, 2, Comp::Uint16),
+        29 => (4, 2, Comp::F16),
+        56 | 57 => (4, 4, Comp::Unorm8),
+        60 | 61 => (4, 4, Comp::Uint8),
+        64 | 65 | 66 => (8, 2, Comp::Raw32),
+        69 | 70 => (8, 4, Comp::Uint16),
+        71 => (8, 4, Comp::F16),
+        72 | 73 | 74 => (12, 3, Comp::Raw32),
+        75 | 76 | 77 => (16, 4, Comp::Raw32),
+        _ => return None,
+    })
+}
+
+/// Packs register values into one element of `fmt` (little endian), `bytes` long.
+fn pack_element(vals: &[u32; 4], fmt: u32) -> Option<([u8; 16], usize)> {
+    let (bpe, n, kind) = format_info(fmt)?;
+    let mut out = [0u8; 16];
+    let csz = bpe / n;
+    for k in 0..n {
+        let v = vals[k];
+        match kind {
+            Comp::Unorm8 => out[k] = (f(v).clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+            Comp::Uint8 => out[k] = v as u8,
+            Comp::Unorm16 => out[k * 2..k * 2 + 2].copy_from_slice(&((f(v).clamp(0.0, 1.0) * 65535.0 + 0.5) as u16).to_le_bytes()),
+            Comp::Uint16 => out[k * 2..k * 2 + 2].copy_from_slice(&(v as u16).to_le_bytes()),
+            Comp::F16 => out[k * 2..k * 2 + 2].copy_from_slice(&half::f16::from_f32(f(v)).to_bits().to_le_bytes()),
+            Comp::Raw32 => out[k * 4..k * 4 + 4].copy_from_slice(&v.to_le_bytes()),
+        }
+        let _ = csz;
+    }
+    Some((out, bpe))
+}
+
+/// Unpacks one element of `fmt` into register values (missing components: 0, 0, 0, 1).
+fn unpack_element(b: &[u8], fmt: u32) -> Option<[u32; 4]> {
+    let (_, n, kind) = format_info(fmt)?;
+    let mut out = [0, 0, 0, u(1.0)];
+    if matches!(kind, Comp::Uint8 | Comp::Uint16 | Comp::Raw32) {
+        out[3] = 1;
+    }
+    for k in 0..n {
+        out[k] = match kind {
+            Comp::Unorm8 => u(b[k] as f32 / 255.0),
+            Comp::Uint8 => b[k] as u32,
+            Comp::Unorm16 => u(u16::from_le_bytes([b[k * 2], b[k * 2 + 1]]) as f32 / 65535.0),
+            Comp::Uint16 => u16::from_le_bytes([b[k * 2], b[k * 2 + 1]]) as u32,
+            Comp::F16 => u(half::f16::from_bits(u16::from_le_bytes([b[k * 2], b[k * 2 + 1]])).to_f32()),
+            Comp::Raw32 => u32::from_le_bytes([b[k * 4], b[k * 4 + 1], b[k * 4 + 2], b[k * 4 + 3]]),
+        };
+    }
+    Some(out)
+}
+
+fn write_bytes(addr: u64, data: &[u8], ok: MemCheck) -> Result<(), Error> {
+    if !ok(addr as usize, data.len()) {
+        return Err(Error::Memory(addr));
+    }
+    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), addr as *mut u8, data.len()) };
+    Ok(())
+}
+
+/// Byte address of texel (x, y, slice) of the image a T# describes.
+fn image_texel_addr(t: &[u32], x: u32, y: u32, slice: u32) -> Option<(u64, u32)> {
+    let base = ((t[0] as u64) | (((t[1] & 0xFF) as u64) << 32)) << 8;
+    let width = ((t[1] >> 30) | ((t[2] & 0xFFF) << 2)) + 1;
+    let height = ((t[2] >> 14) & 0x3FFF) + 1;
+    let fmt = (t[1] >> 20) & 0x1FF;
+    let swiz = (t[3] >> 20) & 0x1F;
+    if x >= width || y >= height {
+        return None;
+    }
+    let (bpe, _, _) = format_info(fmt)?;
+    let off = crate::tiling::element_offset(x as usize, y as usize, slice as usize, width as usize, height as usize, bpe, swiz)?;
+    Some((base + off as u64, fmt))
+}
+
+/// image_load / image_store for one lane.
+fn image_op(inst: &Inst, l: &mut Lane, ok: MemCheck) -> Result<(), Error> {
+    let w0 = inst.w0();
+    let w1 = inst.w1();
+    let dmask = (w0 >> 8) & 0xF;
+    let dim = (w0 >> 3) & 7;
+    let vdata = ((w1 >> 8) & 0xFF) as usize;
+    let srsrc = (((w1 >> 16) & 0x1F) * 4) as usize;
+    // Address VGPRs: vaddr, then (NSA) one byte per extra address.
+    let mut addrs = vec![(w1 & 0xFF) as usize];
+    for w in inst.words.iter().skip(2) {
+        for k in 0..4 {
+            addrs.push(((w >> (k * 8)) & 0xFF) as usize);
+        }
+    }
+    let coord = |i: usize| -> u32 {
+        let r = if addrs.len() > 1 { addrs.get(i).copied().unwrap_or(0) } else { addrs[0] + i };
+        l.v[r]
+    };
+    let (x, y, slice) = match dim {
+        0 => (coord(0), 0, 0),
+        4 => (coord(0), 0, coord(1)),
+        1 | 6 => (coord(0), coord(1), 0),
+        _ => (coord(0), coord(1), coord(2)),
+    };
+    let t: [u32; 8] = std::array::from_fn(|k| l.s[srsrc + k]);
+    let Some((addr, fmt)) = image_texel_addr(&t, x, y, slice) else { return Ok(()) };
+    let n = inst.name;
+    if n.starts_with("image_store") {
+        if !l.stores {
+            return Ok(());
+        }
+        let mut vals = [0u32; 4];
+        let mut r = vdata;
+        for k in 0..4 {
+            if dmask & (1 << k) != 0 {
+                vals[k] = l.v[r];
+                r += 1;
+            }
+        }
+        let Some((bytes, bpe)) = pack_element(&vals, fmt) else { return Err(Error::Unsupported("image format", fmt)) };
+        write_bytes(addr, &bytes[..bpe], ok)
+    } else if n.starts_with("image_load") {
+        let (bpe, _, _) = format_info(fmt).ok_or(Error::Unsupported("image format", fmt))?;
+        if !ok(addr as usize, bpe) {
+            return Err(Error::Memory(addr));
+        }
+        let b = unsafe { std::slice::from_raw_parts(addr as *const u8, bpe) };
+        let vals = unpack_element(b, fmt).ok_or(Error::Unsupported("image format", fmt))?;
+        let mut r = vdata;
+        for k in 0..4 {
+            if dmask & (1 << k) != 0 {
+                l.v[r] = vals[k];
+                r += 1;
+            }
+        }
+        Ok(())
+    } else {
+        Err(Error::Unsupported(n, inst.pc))
+    }
 }
