@@ -724,6 +724,7 @@ struct GpuState {
     frame_verts: Vec<crate::vk::Vertex>,
     frame_idxs: Vec<u32>,
     frame_batches: Vec<crate::vk::DrawBatch>,
+    pending_flip: Option<(i32, i32, i32, i64)>,
 }
 
 static GPU: Mutex<GpuState> = Mutex::new(GpuState {
@@ -738,6 +739,7 @@ static GPU: Mutex<GpuState> = Mutex::new(GpuState {
     frame_verts: Vec::new(),
     frame_idxs: Vec::new(),
     frame_batches: Vec::new(),
+    pending_flip: None,
 });
 
 static READY_DRAWS: Mutex<(Vec<crate::vk::Vertex>, Vec<u32>, Vec<crate::vk::DrawBatch>)> =
@@ -1454,7 +1456,7 @@ fn execute_stream(
                         gpu.frame_idxs.clear();
                         gpu.frame_batches.clear();
                     }
-                    crate::video::submit_flip(handle, index, mode, arg);
+                    gpu.pending_flip = Some((handle, index, mode, arg));
                 }
                 _ => {}
             },
@@ -1472,28 +1474,34 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
     if dwords > 0xF_FFFF {
         return INVALID_ARG;
     }
-    let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
-    let n = SUBMIT_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-    let trace = (std::env::var_os("ORBIS_TRACE_GPU").is_some() && n <= 3)
-        || (std::env::var_os("ORBIS_DUMP_DRAW").is_some() && (n == 60 || n == 600));
-    let mut stats = BTreeMap::new();
-    execute_stream(&mut gpu, addr, dwords, 0, trace, &mut stats);
-    let draws = (*stats.get(&((OP_NOP << 8) | R_DRAW_INDEX_AUTO)).unwrap_or(&0)
-        + *stats.get(&(OP_DRAW_INDEX_OFFSET_2 << 8)).unwrap_or(&0)
-        + *stats.get(&(OP_DRAW_INDIRECT_MULTI << 8)).unwrap_or(&0)
-        + *stats.get(&(OP_DRAW_INDEX_INDIRECT_MULTI << 8)).unwrap_or(&0)) as u64;
-    let dispatches = (*stats.get(&(OP_DISPATCH_DIRECT << 8)).unwrap_or(&0)
-        + *stats.get(&(OP_DISPATCH_INDIRECT << 8)).unwrap_or(&0)) as u64;
-    LAST_DRAWS.store(draws, Ordering::Relaxed);
-    LAST_DISPATCHES.store(dispatches, Ordering::Relaxed);
-    crate::equeue::trigger_gpu(0);
-    if n <= 5 || n % 60 == 0 || std::env::var_os("ORBIS_TRACE_GPU").is_some() {
-        let summary: Vec<String> = stats.iter().map(|(k, v)| format!("{k:#06x}:{v}")).collect();
-        let nsh = crate::gpu::SHADERS.lock().map(|s| s.len()).unwrap_or(0);
-        eprintln!(
-            "[orbis] GPU: submit #{n} ({dwords} dwords @ {addr:#x}, {nsh} shaders, clear={:.2?}, tex={:?}) [{}]",
-            gpu.clear_rgba, gpu.bound_tex, summary.join(" ")
-        );
+    let flip = {
+        let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+        let n = SUBMIT_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+        let trace = (std::env::var_os("ORBIS_TRACE_GPU").is_some() && n <= 3)
+            || (std::env::var_os("ORBIS_DUMP_DRAW").is_some() && (n == 60 || n == 600));
+        let mut stats = BTreeMap::new();
+        execute_stream(&mut gpu, addr, dwords, 0, trace, &mut stats);
+        let draws = (*stats.get(&((OP_NOP << 8) | R_DRAW_INDEX_AUTO)).unwrap_or(&0)
+            + *stats.get(&(OP_DRAW_INDEX_OFFSET_2 << 8)).unwrap_or(&0)
+            + *stats.get(&(OP_DRAW_INDIRECT_MULTI << 8)).unwrap_or(&0)
+            + *stats.get(&(OP_DRAW_INDEX_INDIRECT_MULTI << 8)).unwrap_or(&0)) as u64;
+        let dispatches = (*stats.get(&(OP_DISPATCH_DIRECT << 8)).unwrap_or(&0)
+            + *stats.get(&(OP_DISPATCH_INDIRECT << 8)).unwrap_or(&0)) as u64;
+        LAST_DRAWS.store(draws, Ordering::Relaxed);
+        LAST_DISPATCHES.store(dispatches, Ordering::Relaxed);
+        crate::equeue::trigger_gpu(0);
+        if n <= 5 || n % 60 == 0 || std::env::var_os("ORBIS_TRACE_GPU").is_some() {
+            let summary: Vec<String> = stats.iter().map(|(k, v)| format!("{k:#06x}:{v}")).collect();
+            let nsh = crate::gpu::SHADERS.lock().map(|s| s.len()).unwrap_or(0);
+            eprintln!(
+                "[orbis] GPU: submit #{n} ({dwords} dwords @ {addr:#x}, {nsh} shaders, clear={:.2?}, tex={:?}) [{}]",
+                gpu.clear_rgba, gpu.bound_tex, summary.join(" ")
+            );
+        }
+        gpu.pending_flip.take()
+    };
+    if let Some((handle, index, mode, arg)) = flip {
+        crate::video::submit_flip(handle, index, mode, arg);
     }
     0
 }

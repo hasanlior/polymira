@@ -398,5 +398,6 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("inet_pton", net_inet_pton as *const () as usize),
         ("sceNetInetPton", net_inet_pton as *const () as usize),
         ("#MmpF1XsQiHw", audio2_pace as *const () as usize), // libSceAudioOut2 frame pacing
+        ("#8XTArSPyWHk", audio2_pace as *const () as usize), // libSceAudioOut2 poll pacing
     ]
 }

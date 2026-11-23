@@ -88,6 +88,18 @@ static FRAME: Mutex<(Vec<u32>, u32, u32)> = Mutex::new((Vec::new(), 0, 0));
 pub extern "sysv64" fn open(_user: i32, _bus: i32, _index: i32, _param: *const c_void) -> i32 {
     eprintln!("[orbis] video out opened (display handle 1)");
     start_window();
+    #[cfg(windows)]
+    if std::env::var_os("ORBIS_HIDDEN").is_none() && std::env::var_os("ORBIS_HEADLESS").is_none() {
+        for _ in 0..50 {
+            let hwnd = WINDOW.load(Ordering::SeqCst) as *mut c_void;
+            if !hwnd.is_null() {
+                let inst = unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null()) } as *mut c_void;
+                crate::vk::init_window(hwnd, inst, 1280, 720);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
     1
 }
 
@@ -377,12 +389,7 @@ fn start_window() {
                 ShowWindow(hwnd, SW_SHOW);
                 ShowWindow(hwnd, SW_SHOWNORMAL);
                 SetForegroundWindow(hwnd);
-                crate::vk::init_window(hwnd as *mut c_void, inst as *mut c_void, 1280, 720);
-                if SPLASH_ACTIVE.load(Ordering::SeqCst) {
-                    if let Some((ref px, sw, sh)) = *SPLASH_IMG.lock().unwrap() {
-                        let _ = crate::vk::with_renderer(|r| r.upload_and_present_rgba(px, sw, sh));
-                    }
-                }
+                windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
             }
             let mut msg: MSG = std::mem::zeroed();
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
