@@ -710,9 +710,9 @@ pub extern "sysv64" fn create_interpolant_mapping(regs: *mut u32, gs: usize, ps:
             if gs_n > 0 && gs_n <= 32 && ps_n > 0 && ps_n <= 32 && is_committed(gs_tab, gs_n * 4) && is_committed(ps_tab, ps_n * 4) {
                 let ge = std::slice::from_raw_parts(gs_tab as *const u32, gs_n);
                 let pe = std::slice::from_raw_parts(ps_tab as *const u32, ps_n);
-                for (pi, &pw) in pe.iter().enumerate() {
+                for (pi, &pw) in pe.iter().take_while(|&&w| w != 0).enumerate() {
                     let sem = pw & 0xFF;
-                    if let Some(&gw) = ge.iter().find(|&&g| (g & 0xFF) == sem) {
+                    if let Some(&gw) = ge.iter().take_while(|&&w| w != 0).find(|&&g| (g & 0xFF) == sem) {
                         let param = (gw >> 8) & 0x1F;
                         *regs.add(pi * 2 + 1) = param;
                     } else if (pw & 0xF00) == 0 {
@@ -1112,7 +1112,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         let addr = (((t[0] as u64) | (((t[1] & 0xFF) as u64) << 32)) << 8) as usize;
         let w = ((t[1] >> 30) | ((t[2] & 0xFFF) << 2)) + 1;
         let h = ((t[2] >> 14) & 0x3FFF) + 1;
-        let swiz = (t[3] >> 20) & 0x1F;
+        let swiz = ((t[3] >> 20) & 0x1F) | (((t[1] >> 20) & 0x1FF) << 8) | ((t[3] & 0xFFF) << 20);
         (addr, w, h, swiz)
     });
     if cube && std::env::var_os("ORBIS_TEX_LOG").is_some() {
@@ -1237,21 +1237,6 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         zclear: if matches!((dctl >> 4) & 7, 4 | 6) || dctl == 0x701 { 0.0 } else { 1.0 },
     });
     gpu.frame_batches.push(crate::vk::DrawBatch { first_index: 0, index_count: 0, tex_addr: 0, tex_w: 0, tex_h: 0, tex_swiz: 0, gen: Some(g) });
-    if std::env::var_os("ORBIS_OREUI_LOG").is_some() && idx_cnt == 6 && info.slots.len() >= 10 {
-        static CL: AtomicU64 = AtomicU64::new(0);
-        if CL.fetch_add(1, Ordering::Relaxed) == 0 {
-            let mut lane = crate::rdna::interp::Lane::new();
-            lane.s[3] = 0x101;
-            lane.s[8..32].copy_from_slice(&vs_ud);
-            lane.v[5] = idxs[0];
-            let _ = crate::rdna::interp::run_compiled(&vs_sh, &mut lane, mem_ok);
-            let v0_base = (lane.s[4] as u64) | (((lane.s[5] & 0xFFFF) as u64) << 32);
-            if is_committed(v0_base as usize, 128) {
-                let d0 = unsafe { std::slice::from_raw_parts(v0_base as *const u32, 32) };
-                eprintln!("[comp-v0hex] cntl={cntl:?} @{v0_base:#x}: {d0:08x?}");
-            }
-        }
-    }
     if std::env::var_os("ORBIS_RT_LOG").is_some() {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
@@ -1566,13 +1551,13 @@ fn execute_stream(
                         let a = (((ps_ud[0] as u64) | (((ps_ud[1] & 0xFF) as u64) << 32)) << 8) as usize;
                         let tw = ((ps_ud[1] >> 30) | ((ps_ud[2] & 0xFFF) << 2)) + 1;
                         let th = ((ps_ud[2] >> 14) & 0x3FFF) + 1;
-                        let sw = (ps_ud[3] >> 20) & 0x1F;
+                        let sw = ((ps_ud[3] >> 20) & 0x1F) | (((ps_ud[1] >> 20) & 0x1FF) << 8) | ((ps_ud[3] & 0xFFF) << 20);
                         (a, tw, th, sw)
                     } else {
                         (0, 0, 0, 0)
                     };
                     // Skip final offscreen-render-target ScreenBlit (3840x2160 swiz>=24) since we draw directly to swapchain
-                    let is_rt_blit = ps_is_tex && tex_w >= 1920 && tex_h >= 1080 && tex_swiz >= 24;
+                    let is_rt_blit = ps_is_tex && tex_w >= 1920 && tex_h >= 1080 && (tex_swiz & 0x1F) >= 24;
                     let ps_col = if !ps_is_tex && ps_ud[2] > 0 && ps_ud[2] <= 8 && (ps_ud[1] & 0xFFFF) != 0 {
                         let p = (ps_ud[0] as u64 | (((ps_ud[1] & 0xFFFF) as u64) << 32)) as usize;
                         if is_committed(p, 32) {
@@ -1918,6 +1903,18 @@ fn execute_stream(
                     if trace {
                         eprintln!("[orbis] GPU:   DRAW_INDEX_AUTO count={}", w[1]);
                     }
+                }
+                R_SH_REGS_INDIRECT if len >= 4 => {
+                    let tbl = ((w[2] & !3) as u64) | ((w[3] as u64) << 32);
+                    apply_indirect_regs(&mut gpu.sh, tbl, w[1] & 0x3FFF, trace, "sh");
+                }
+                R_CX_REGS_INDIRECT if len >= 4 => {
+                    let tbl = ((w[2] & !3) as u64) | ((w[3] as u64) << 32);
+                    apply_indirect_regs(&mut gpu.cx, tbl, w[1] & 0x3FFF, trace, "cx");
+                }
+                R_UC_REGS_INDIRECT if len >= 4 => {
+                    let tbl = ((w[2] & !3) as u64) | ((w[3] as u64) << 32);
+                    apply_indirect_regs(&mut gpu.uc, tbl, w[1] & 0x3FFF, trace, "uc");
                 }
                 R_DMA_DATA if len >= 7 => {
                     let dst = (w[1] as u64) | ((w[2] as u64) << 32);

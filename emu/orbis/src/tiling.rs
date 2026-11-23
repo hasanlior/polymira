@@ -1,26 +1,173 @@
-//! PS5 (AMD GFX10 / RDNA2) texture untiling for 32-bpp surfaces.
+//! PS5 (AMD GFX10 / RDNA2) texture untiling for 8-bpp, 16-bpp, and 32-bpp surfaces.
 //!
 //! Converts linear and GFX10 64KB standard swizzle (`SW_64KB_S` / `SW_64KB_D` / `SW_64KB_R`)
-//! textures into linear RGBA8/BGRA8 rows suitable for Vulkan `vkCmdCopyBufferToImage`.
+//! textures into linear RGBA8 rows suitable for Vulkan `vkCmdCopyBufferToImage`.
 
-/// Untiles a 32-bpp (4 bytes/pixel) GFX10 surface into linear `width * height` u32 pixels.
+#[inline]
+fn map_dst_sel(ch: [u8; 4], dst_sel: u32) -> u32 {
+    if dst_sel == 0 {
+        return u32::from_le_bytes(ch);
+    }
+    let pick = |s: u32| -> u8 {
+        match s & 7 {
+            0 => 0,
+            1 => 255,
+            4 => ch[0],
+            5 => ch[1],
+            6 => ch[2],
+            7 => ch[3],
+            _ => 0,
+        }
+    };
+    u32::from_le_bytes([
+        pick(dst_sel),
+        pick(dst_sel >> 3),
+        pick(dst_sel >> 6),
+        pick(dst_sel >> 9),
+    ])
+}
+
+/// Untiles a GFX10 texture surface into linear `width * height` RGBA8 `u32` pixels.
 ///
-/// `swizzle_mode`:
-/// - `0` => linear
-/// - `1..=31` => GFX10 micro-tile (8×8 pixels = 256 B) + 64KB macro-tile (128×128 pixels)
-pub fn untile_32bpp(src: &[u8], width: u32, height: u32, swizzle_mode: u32) -> Vec<u32> {
+/// `swiz_pack`:
+/// - bits `0..5`: `swizzle_mode` (`0` = linear, `1..=31` = GFX10 64KB tiled)
+/// - bits `8..17`: T# unified `format` (`1 | 2 | 9` = 8-bpp R8, `16 | 17 | 25` = 16-bpp RG8, default = 32-bpp RGBA8)
+/// - bits `20..32`: T# `DST_SEL_XYZW` (12 bits from `T#[3] & 0xFFF`)
+pub fn untile_32bpp(src: &[u8], width: u32, height: u32, swiz_pack: u32) -> Vec<u32> {
+    let swizzle_mode = swiz_pack & 0x1F;
+    let fmt = (swiz_pack >> 8) & 0x1FF;
+    let dst_sel = (swiz_pack >> 20) & 0xFFF;
+    match fmt {
+        1..=14 => untile_8bpp(src, width, height, swizzle_mode, dst_sel),
+        15..=31 => untile_16bpp(src, width, height, swizzle_mode, dst_sel),
+        _ => untile_32bpp_raw(src, width, height, swizzle_mode, dst_sel),
+    }
+}
+
+/// Untiles an 8-bpp (1 byte/pixel, e.g. `R8_UNORM` font atlas) GFX10 surface into linear RGBA8 `u32` pixels.
+pub fn untile_8bpp(src: &[u8], width: u32, height: u32, swizzle_mode: u32, _dst_sel: u32) -> Vec<u32> {
+    let w = width as usize;
+    let h = height as usize;
+    let mut dst = vec![0u32; w * h];
+    if w == 0 || h == 0 || src.is_empty() {
+        return dst;
+    }
+    // Replicate the single 8-bit sample into (R, G, B, A) so both `.r`-sampling and `.a`-sampling
+    // font/mask shaders work regardless of T# DST_SEL_XYZW.
+    let expand = |v: u8| -> u32 {
+        u32::from_le_bytes([v, v, v, v])
+    };
+    if swizzle_mode == 0 {
+        let count = src.len().min(w * h);
+        for i in 0..count {
+            dst[i] = expand(src[i]);
+        }
+        return dst;
+    }
+    // GFX10 64KB standard swizzle (SW_64KB_S, mode 9) for 8-bpp (1 byte/pixel):
+    // Micro-tile: 16x16 pixels (256 bytes):
+    //   xBytesMask = 0xAAAF -> x0=0, x1=1, x2=2, x3=3, x4=9, x5=11, x6=13, x7=15
+    //   yMask      = 0x5550 -> y0=4, y1=5, y2=6, y3=7, y4=8, y5=10, y6=12, y7=14
+    let tiles_x = (w + 255) / 256;
+    for y in 0..h {
+        let ty = y >> 8;
+        let ly = y & 255;
+        for x in 0..w {
+            let tx = x >> 8;
+            let lx = x & 255;
+            let in_tile = (lx & 15)
+                | ((ly & 15) << 4)
+                | (((ly >> 4) & 1) << 8)
+                | (((lx >> 4) & 1) << 9)
+                | (((ly >> 5) & 1) << 10)
+                | (((lx >> 5) & 1) << 11)
+                | (((ly >> 6) & 1) << 12)
+                | (((lx >> 6) & 1) << 13)
+                | (((ly >> 7) & 1) << 14)
+                | (((lx >> 7) & 1) << 15);
+            let tile_idx = ty * tiles_x + tx;
+            let byte_off = (tile_idx * 65536) + in_tile;
+            if byte_off < src.len() {
+                dst[y * w + x] = expand(src[byte_off]);
+            }
+        }
+    }
+    dst
+}
+
+/// Untiles a 16-bpp (2 bytes/pixel, e.g. `R8G8_UNORM`) GFX10 surface into linear RGBA8 `u32` pixels.
+pub fn untile_16bpp(src: &[u8], width: u32, height: u32, swizzle_mode: u32, dst_sel: u32) -> Vec<u32> {
+    let w = width as usize;
+    let h = height as usize;
+    let mut dst = vec![0u32; w * h];
+    if w == 0 || h == 0 || src.len() < 2 {
+        return dst;
+    }
+    let expand = |r: u8, g: u8| -> u32 {
+        if dst_sel == 0 {
+            u32::from_le_bytes([r, g, 0, 255])
+        } else {
+            map_dst_sel([r, g, 0, 255], dst_sel)
+        }
+    };
+    if swizzle_mode == 0 {
+        let count = (src.len() / 2).min(w * h);
+        for i in 0..count {
+            dst[i] = expand(src[i * 2], src[i * 2 + 1]);
+        }
+        return dst;
+    }
+    // GFX10 64KB standard swizzle (SW_64KB_S, mode 9) for 16-bpp (2 bytes/pixel):
+    // Macro-tile: 256x128 pixels (65536 bytes), micro-tile: 16x8 pixels (256 bytes).
+    let tiles_x = (w + 255) / 256;
+    for y in 0..h {
+        let ty = y >> 7;
+        let ly = y & 127;
+        for x in 0..w {
+            let tx = x >> 8;
+            let lx = x & 255;
+            let in_tile = (lx & 7)
+                | ((ly & 3) << 3)
+                | (((lx >> 3) & 1) << 5)
+                | (((ly >> 2) & 1) << 6)
+                | (((ly >> 3) & 1) << 7)
+                | (((lx >> 4) & 1) << 8)
+                | (((ly >> 4) & 1) << 9)
+                | (((lx >> 5) & 1) << 10)
+                | (((ly >> 5) & 1) << 11)
+                | (((lx >> 6) & 1) << 12)
+                | (((ly >> 6) & 1) << 13)
+                | (((lx >> 7) & 1) << 14);
+            let tile_idx = ty * tiles_x + tx;
+            let byte_off = (tile_idx * 65536) + (in_tile * 2);
+            if byte_off + 2 <= src.len() {
+                dst[y * w + x] = expand(src[byte_off], src[byte_off + 1]);
+            }
+        }
+    }
+    dst
+}
+
+fn untile_32bpp_raw(src: &[u8], width: u32, height: u32, swizzle_mode: u32, dst_sel: u32) -> Vec<u32> {
     let w = width as usize;
     let h = height as usize;
     let mut dst = vec![0u32; w * h];
     if w == 0 || h == 0 || src.len() < 4 {
         return dst;
     }
+    let map_px = |b: [u8; 4]| -> u32 {
+        if dst_sel == 0 || dst_sel == 0xFAC {
+            u32::from_le_bytes(b)
+        } else {
+            map_dst_sel(b, dst_sel)
+        }
+    };
 
     if swizzle_mode == 0 {
         let count = (src.len() / 4).min(w * h);
         for i in 0..count {
             let b = i * 4;
-            dst[i] = u32::from_le_bytes([src[b], src[b + 1], src[b + 2], src[b + 3]]);
+            dst[i] = map_px([src[b], src[b + 1], src[b + 2], src[b + 3]]);
         }
         return dst;
     }
@@ -51,7 +198,7 @@ pub fn untile_32bpp(src: &[u8], width: u32, height: u32, swizzle_mode: u32) -> V
             let tile_idx = ty * tiles_x + tx;
             let byte_off = (tile_idx * 65536) + (in_tile * 4);
             if byte_off + 4 <= src.len() {
-                dst[y * w + x] = u32::from_le_bytes([
+                dst[y * w + x] = map_px([
                     src[byte_off],
                     src[byte_off + 1],
                     src[byte_off + 2],

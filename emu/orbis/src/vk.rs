@@ -888,15 +888,22 @@ impl VkRenderer {
         0
     }
 
-    /// Untiles and uploads a PS5 GFX10 32-bpp RGBA8 texture to a cached VkImage + VkDescriptorSet.
+    /// Untiles and uploads a PS5 GFX10 8/16/32-bpp texture to a cached VkImage + VkDescriptorSet.
     unsafe fn ensure_sampled_texture(&mut self, addr: usize, width: u32, height: u32, swiz: u32) -> vk::DescriptorSet {
         if addr == 0 || width == 0 || height == 0 || width > 4096 || height > 4096 {
             return self.desc_set;
         }
-        let want_src = if swiz == 0 {
-            (width as usize) * (height as usize) * 4
+        let sw_mode = swiz & 0x1F;
+        let fmt = (swiz >> 8) & 0x1FF;
+        let (bpp, tile_w, tile_h): (usize, usize, usize) = match fmt {
+            1..=14 => (1, 256, 256),
+            15..=31 => (2, 256, 128),
+            _ => (4, 128, 128),
+        };
+        let want_src = if sw_mode == 0 {
+            (width as usize) * (height as usize) * bpp
         } else {
-            (((width as usize) + 127) / 128) * (((height as usize) + 127) / 128) * 65536
+            (((width as usize) + tile_w - 1) / tile_w) * (((height as usize) + tile_h - 1) / tile_h) * 65536
         };
         let avail = Self::readable_bytes(addr, want_src);
         if avail < 64 {
@@ -906,9 +913,9 @@ impl VkRenderer {
         // checksum and upload again into the same image when it changed.
         let sum = {
             let words = avail / 8;
-            let step = (words / 512).max(1);
+            let step = if bpp == 1 { 1 } else { (words / 512).max(1) };
             let p = addr as *const u64;
-            let mut h = 0xcbf2_9ce4_8422_2325u64 ^ (width as u64) << 32 ^ height as u64;
+            let mut h = 0xcbf2_9ce4_8422_2325u64 ^ (width as u64) << 32 ^ height as u64 ^ ((swiz as u64) << 48);
             let mut k = 0;
             while k < words {
                 h = (h ^ p.add(k).read_unaligned()).wrapping_mul(0x100_0000_01b3);
@@ -1108,7 +1115,7 @@ impl VkRenderer {
             .image_info(&img_info)];
         self.device.update_descriptor_sets(&write, &[]);
 
-        eprintln!("[orbis] Vulkan: uploaded PS5 texture @{addr:#x} ({width}x{height}, swiz={swiz}) to GPU");
+        eprintln!("[orbis] Vulkan: uploaded PS5 texture @{addr:#x} ({width}x{height}, swiz={sw_mode}, fmt={fmt}) to GPU");
         self.tex_cache.insert(addr, (VkTarget { image: img, memory: mem, view, width, height }, dset));
         self.tex_sums.insert(addr, sum);
         dset
@@ -1120,7 +1127,8 @@ impl VkRenderer {
         if addr == 0 || width == 0 || height == 0 || width > 4096 || height > 4096 || layers > 6 {
             return self.desc_set;
         }
-        let slice = if swiz == 0 {
+        let sw_mode = swiz & 0x1F;
+        let slice = if sw_mode == 0 {
             (width as usize) * (height as usize) * 4
         } else {
             (((width as usize) + 127) / 128) * (((height as usize) + 127) / 128) * 65536
