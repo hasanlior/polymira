@@ -1688,7 +1688,9 @@ impl VkRenderer {
                 let _ = self.device.queue_submit(self.queue, &submit, self.fence);
                 let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
                 self.rt_layouts.insert(addr, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-                self.persistent_rts.insert(addr);
+                if w < 3840 && h < 2160 {
+                    self.persistent_rts.insert(addr);
+                }
             }
             use ash::vk::Handle;
             let old_raw = old.view.as_raw();
@@ -2022,13 +2024,13 @@ impl VkRenderer {
                     // The display buffer starts each frame cleared; persistent offscreen targets
                     // (Cohtml/OreUI RTs and promoted CPU texture atlases) keep their contents
                     // across partial dirty-rect updates.
-                    let is_cohtml = it.pipe != vk::Pipeline::null() && gens[it.gen].depth == 0x701;
-                    if a != display.0 && is_cohtml {
-                        self.persistent_rts.insert(a);
-                    }
-                    let is_cohtml_clear = is_cohtml
+                    let is_cohtml_clear = it.pipe != vk::Pipeline::null()
+                        && gens[it.gen].depth == 0x701
                         && gens[it.gen].blend == 0x60010001
                         && gens[it.gen].tex.is_none();
+                    if a != display.0 && is_cohtml_clear {
+                        self.persistent_rts.insert(a);
+                    }
                     let has_prev = *self.rt_layouts.get(&a).unwrap_or(&vk::ImageLayout::UNDEFINED) != vk::ImageLayout::UNDEFINED;
                     let is_persistent = a != display.0 && (is_cohtml_clear || self.persistent_rts.contains(&a));
                     let clear_now = !cleared.contains(&a)
