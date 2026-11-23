@@ -152,6 +152,62 @@ fn is_offscreen_or_headless() -> bool {
         || std::env::var_os("ORBIS_HEADLESS").is_some()
 }
 
+const AUTO_KEY_HOLD_SUBMITS: u64 = 12;
+
+fn parse_auto_keys(spec: &str) -> Vec<(u64, u32)> {
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let Some((at_s, btn_s)) = part.trim().split_once(':') else { continue };
+        let Ok(at) = at_s.trim().parse::<u64>() else { continue };
+        let bit = match btn_s.trim().to_ascii_lowercase().as_str() {
+            "up" => SCE_PAD_BUTTON_UP,
+            "down" => SCE_PAD_BUTTON_DOWN,
+            "left" => SCE_PAD_BUTTON_LEFT,
+            "right" => SCE_PAD_BUTTON_RIGHT,
+            "cross" | "x" | "a" => SCE_PAD_BUTTON_CROSS,
+            "circle" | "o" | "b" => SCE_PAD_BUTTON_CIRCLE,
+            "square" => SCE_PAD_BUTTON_SQUARE,
+            "triangle" => SCE_PAD_BUTTON_TRIANGLE,
+            "l1" => SCE_PAD_BUTTON_L1,
+            "r1" => SCE_PAD_BUTTON_R1,
+            "l2" => SCE_PAD_BUTTON_L2,
+            "r2" => SCE_PAD_BUTTON_R2,
+            "l3" => SCE_PAD_BUTTON_L3,
+            "r3" => SCE_PAD_BUTTON_R3,
+            "options" | "start" => SCE_PAD_BUTTON_OPTIONS,
+            "touchpad" | "touch" => SCE_PAD_BUTTON_TOUCH_PAD,
+            _ => continue,
+        };
+        out.push((at, bit));
+    }
+    out
+}
+
+/// Evaluates scheduled `ORBIS_AUTO_KEYS="800:cross,1100:down,..."` against `submit_count`.
+/// Returns `(buttons, l2, r2)` if any scheduled press is active at `submit_count`.
+fn eval_auto_keys(schedule: &[(u64, u32)], submit_count: u64) -> (u32, u8, u8) {
+    let mut btns = 0u32;
+    for &(start, bit) in schedule {
+        if submit_count >= start && submit_count < start.saturating_add(AUTO_KEY_HOLD_SUBMITS) {
+            btns |= bit;
+        }
+    }
+    let l2 = if btns & SCE_PAD_BUTTON_L2 != 0 { 0xFF } else { 0 };
+    let r2 = if btns & SCE_PAD_BUTTON_R2 != 0 { 0xFF } else { 0 };
+    (btns, l2, r2)
+}
+
+fn auto_keys_schedule() -> &'static [(u64, u32)] {
+    use std::sync::OnceLock;
+    static SCHEDULE: OnceLock<Vec<(u64, u32)>> = OnceLock::new();
+    SCHEDULE.get_or_init(|| {
+        std::env::var("ORBIS_AUTO_KEYS")
+            .ok()
+            .map(|s| parse_auto_keys(&s))
+            .unwrap_or_default()
+    })
+}
+
 /// Converts an XInput (x, y) thumbstick pair (i16, +Y up) into PS4/PS5 ScePadAnalogStick
 /// bytes (0x00..=0xFF, 0x80 center, 0x00 up / 0xFF down) with a smooth radial deadzone.
 fn xinput_stick_pair_to_ps(x: i16, y: i16, deadzone: f32) -> (u8, u8) {
@@ -197,18 +253,42 @@ fn poll_host_pad() -> (u32, u8, u8, u8, u8, u8, u8) {
     static KEYSTATE: OnceLock<Option<GetAsyncKeyStateFn>> = OnceLock::new();
     static LAST_MOUSE: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 
+    // Test-only ORBIS_AUTO_KEYS overrides offscreen/focus gating only for scheduled submit windows.
+    let auto_sched = auto_keys_schedule();
+    let (auto_btns, auto_l2, auto_r2) = if !auto_sched.is_empty() {
+        eval_auto_keys(auto_sched, crate::agc::stats().0)
+    } else {
+        (0, 0, 0)
+    };
+
     // Never inject host input in offscreen/hidden/headless mode or when our window is unfocused.
     if is_offscreen_or_headless() {
         if let Ok(mut last) = LAST_MOUSE.lock() {
             *last = None;
         }
-        return (0, PAD_STICK_CENTER, PAD_STICK_CENTER, PAD_STICK_CENTER, PAD_STICK_CENTER, 0, 0);
+        return (
+            auto_btns,
+            PAD_STICK_CENTER,
+            PAD_STICK_CENTER,
+            PAD_STICK_CENTER,
+            PAD_STICK_CENTER,
+            auto_l2,
+            auto_r2,
+        );
     }
     let Some(fg_hwnd) = foreground_orbis_hwnd() else {
         if let Ok(mut last) = LAST_MOUSE.lock() {
             *last = None;
         }
-        return (0, PAD_STICK_CENTER, PAD_STICK_CENTER, PAD_STICK_CENTER, PAD_STICK_CENTER, 0, 0);
+        return (
+            auto_btns,
+            PAD_STICK_CENTER,
+            PAD_STICK_CENTER,
+            PAD_STICK_CENTER,
+            PAD_STICK_CENTER,
+            auto_l2,
+            auto_r2,
+        );
     };
 
     let xget = *XINPUT.get_or_init(|| unsafe {
@@ -357,12 +437,18 @@ fn poll_host_pad() -> (u32, u8, u8, u8, u8, u8, u8) {
         }
     }
 
-    (btns, lx, ly, rx, ry, l2, r2)
+    (btns | auto_btns, lx, ly, rx, ry, l2.max(auto_l2), r2.max(auto_r2))
 }
 
 #[cfg(not(windows))]
 fn poll_host_pad() -> (u32, u8, u8, u8, u8, u8, u8) {
-    (0, PAD_STICK_CENTER, PAD_STICK_CENTER, PAD_STICK_CENTER, PAD_STICK_CENTER, 0, 0)
+    let auto_sched = auto_keys_schedule();
+    let (btns, l2, r2) = if !auto_sched.is_empty() {
+        eval_auto_keys(auto_sched, crate::agc::stats().0)
+    } else {
+        (0, 0, 0)
+    };
+    (btns, PAD_STICK_CENTER, PAD_STICK_CENTER, PAD_STICK_CENTER, PAD_STICK_CENTER, l2, r2)
 }
 
 /// scePadReadState(handle, data*): fills ScePadData (0x78 = 120 bytes) with live XInput/keyboard state.
@@ -415,11 +501,39 @@ pub extern "sysv64" fn pad_get_info(_handle: i32, info: *mut u8) -> i32 {
     0
 }
 
+const SCE_NP_ERROR_SIGNED_OUT: i32 = 0x8055_0006u32 as i32;
+
 pub extern "sysv64" fn np_get_state(_user: i32, state: *mut i32) -> i32 {
     if !state.is_null() {
         unsafe { *state = 1 }; // SCE_NP_STATE_SIGNED_OUT
     }
     0
+}
+
+/// sceNpGetAccountIdA(userId, accountId*): offline, write 0 and report signed out.
+pub extern "sysv64" fn np_get_account_id(_user: i32, account_id: *mut u64) -> i32 {
+    if !account_id.is_null() {
+        unsafe { *account_id = 0 };
+    }
+    SCE_NP_ERROR_SIGNED_OUT
+}
+
+/// sceNpGetAccountCountryA(userId, countryCode*): benign "us" SceNpCountryCode (4 bytes).
+pub extern "sysv64" fn np_get_account_country(_user: i32, country: *mut u8) -> i32 {
+    if !country.is_null() {
+        unsafe {
+            *country = b'u';
+            *country.add(1) = b's';
+            *country.add(2) = 0;
+            *country.add(3) = 0;
+        }
+    }
+    0
+}
+
+/// sceNpAuthCreateRequest(): offline, return signed-out error so caller does not use a bogus handle.
+pub extern "sysv64" fn np_auth_create_request() -> i32 {
+    SCE_NP_ERROR_SIGNED_OUT
 }
 
 pub extern "sysv64" fn netctl_get_state(state: *mut i32) -> i32 {
@@ -601,6 +715,10 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceNpCheckCallback", ok as *const () as usize),
         ("sceNetCtlCheckCallback", ok as *const () as usize),
         ("sceNpGetState", np_get_state as *const () as usize),
+        ("sceNpGetAccountIdA", np_get_account_id as *const () as usize),
+        ("#rbknaUjpqWo", np_get_account_id as *const () as usize), // sceNpGetAccountIdA
+        ("sceNpGetAccountCountryA", np_get_account_country as *const () as usize),
+        ("sceNpAuthCreateRequest", np_auth_create_request as *const () as usize),
         ("sceNetCtlGetState", netctl_get_state as *const () as usize),
         ("sceHttp2CreateRequestWithURL", http2_offline as *const () as usize),
         ("sceHttp2SendRequestAsync", http2_offline as *const () as usize),
@@ -698,5 +816,28 @@ mod tests {
         let mut kb = 0usize;
         assert_eq!(app_content_available_space_kb(mp.as_ptr(), &mut kb), 0);
         assert_eq!(kb, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn auto_keys_parses_and_holds_for_window() {
+        let sched = parse_auto_keys("800:cross, 1100:down, 1400:r2");
+        assert_eq!(sched.len(), 3);
+        assert_eq!(eval_auto_keys(&sched, 799), (0, 0, 0));
+        assert_eq!(eval_auto_keys(&sched, 800), (SCE_PAD_BUTTON_CROSS, 0, 0));
+        assert_eq!(eval_auto_keys(&sched, 811), (SCE_PAD_BUTTON_CROSS, 0, 0));
+        assert_eq!(eval_auto_keys(&sched, 812), (0, 0, 0));
+        assert_eq!(eval_auto_keys(&sched, 1105), (SCE_PAD_BUTTON_DOWN, 0, 0));
+        assert_eq!(eval_auto_keys(&sched, 1400), (SCE_PAD_BUTTON_R2, 0, 0xFF));
+    }
+
+    #[test]
+    fn np_offline_stubs_are_safe() {
+        let mut acct = 123u64;
+        assert_eq!(np_get_account_id(1, &mut acct), SCE_NP_ERROR_SIGNED_OUT);
+        assert_eq!(acct, 0);
+        let mut cc = [0xFFu8; 4];
+        assert_eq!(np_get_account_country(1, cc.as_mut_ptr()), 0);
+        assert_eq!(&cc, b"us\0\0");
+        assert_eq!(np_auth_create_request(), SCE_NP_ERROR_SIGNED_OUT);
     }
 }
