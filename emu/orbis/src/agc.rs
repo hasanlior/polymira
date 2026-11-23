@@ -885,15 +885,25 @@ fn bound_shader_pair(gpu: &GpuState) -> (usize, usize) {
     (vs, ps)
 }
 
-/// Committed-memory check for the shader interpreters: remembers the last committed region
-/// (per thread) so repeated accesses skip the VirtualQuery system call.
+/// Committed-memory check for the shader interpreters: keeps an 8-entry MRU cache of
+/// committed regions per thread so vertex shaders reading multiple buffers (CB + V# + VB)
+/// never thrash VirtualQuery syscalls.
 fn mem_ok(addr: usize, len: usize) -> bool {
     thread_local! {
-        static REGION: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+        static REGIONS: std::cell::Cell<[(usize, usize); 8]> = const { std::cell::Cell::new([(0, 0); 8]) };
+        static NEXT_SLOT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
     let end = addr.saturating_add(len);
-    let (lo, hi) = REGION.with(|r| r.get());
-    if addr >= lo && end <= hi {
+    let hit = REGIONS.with(|r| {
+        let arr = r.get();
+        for &(lo, hi) in &arr {
+            if addr >= lo && end <= hi {
+                return true;
+            }
+        }
+        false
+    });
+    if hit {
         return true;
     }
     if addr < 0x1_0000_0000 || addr > 0x7FFF_FFFF_FFFF || len == 0 {
@@ -907,11 +917,110 @@ fn mem_ok(addr: usize, len: usize) -> bool {
             return false;
         }
         let (b, e) = (mbi.BaseAddress as usize, mbi.BaseAddress as usize + mbi.RegionSize);
-        REGION.with(|r| r.set((b, e)));
+        REGIONS.with(|r| {
+            let mut arr = r.get();
+            let slot = NEXT_SLOT.with(|s| {
+                let i = s.get();
+                s.set((i + 1) & 7);
+                i
+            });
+            arr[slot] = (b, e);
+            r.set(arr);
+        });
         return end <= e;
     }
     #[allow(unreachable_code)]
     is_committed(addr, len)
+}
+
+struct VsJobSpec {
+    run: fn(usize, usize, usize),
+    ctx: usize,
+    total: usize,
+    chunk: usize,
+}
+
+struct VsPoolState {
+    lock: Mutex<(u64, Option<VsJobSpec>)>,
+    cvar: std::sync::Condvar,
+    next: std::sync::atomic::AtomicUsize,
+    remaining: std::sync::atomic::AtomicUsize,
+    n_workers: usize,
+}
+
+static VS_POOL: LazyLock<std::sync::Arc<VsPoolState>> = LazyLock::new(|| {
+    let n_threads = std::thread::available_parallelism().map(|n| n.get().min(12)).unwrap_or(8);
+    let n_workers = n_threads.saturating_sub(1);
+    let state = std::sync::Arc::new(VsPoolState {
+        lock: Mutex::new((0, None)),
+        cvar: std::sync::Condvar::new(),
+        next: std::sync::atomic::AtomicUsize::new(0),
+        remaining: std::sync::atomic::AtomicUsize::new(0),
+        n_workers,
+    });
+    for w in 0..n_workers {
+        let st = state.clone();
+        let _ = std::thread::Builder::new().name(format!("orbis-vs-{w}")).spawn(move || {
+            let mut seen_gen = 0u64;
+            loop {
+                let spec = {
+                    let mut g = st.lock.lock().unwrap_or_else(|e| e.into_inner());
+                    while g.0 == seen_gen {
+                        g = st.cvar.wait(g).unwrap_or_else(|e| e.into_inner());
+                    }
+                    seen_gen = g.0;
+                    g.1.as_ref().map(|j| (j.run, j.ctx, j.total, j.chunk))
+                };
+                if let Some((run, ctx, total, chunk)) = spec {
+                    loop {
+                        let start = st.next.fetch_add(chunk, Ordering::Relaxed);
+                        if start >= total {
+                            break;
+                        }
+                        run(ctx, start, (start + chunk).min(total));
+                    }
+                    st.remaining.fetch_sub(1, Ordering::Release);
+                }
+            }
+        });
+    }
+    state
+});
+
+fn vs_parallel_for<F: Fn(usize, usize) + Sync>(total: usize, f: F) {
+    let pool = &*VS_POOL;
+    if pool.n_workers == 0 || total < 128 {
+        f(0, total);
+        return;
+    }
+    fn trampoline<F: Fn(usize, usize) + Sync>(ctx: usize, start: usize, end: usize) {
+        let f = unsafe { &*(ctx as *const F) };
+        f(start, end);
+    }
+    let chunk = (total / ((pool.n_workers + 1) * 4)).clamp(32, 256);
+    pool.next.store(0, Ordering::Relaxed);
+    pool.remaining.store(pool.n_workers, Ordering::Release);
+    {
+        let mut g = pool.lock.lock().unwrap_or_else(|e| e.into_inner());
+        g.0 = g.0.wrapping_add(1);
+        g.1 = Some(VsJobSpec {
+            run: trampoline::<F>,
+            ctx: &f as *const F as usize,
+            total,
+            chunk,
+        });
+        pool.cvar.notify_all();
+    }
+    loop {
+        let start = pool.next.fetch_add(chunk, Ordering::Relaxed);
+        if start >= total {
+            break;
+        }
+        f(start, (start + chunk).min(total));
+    }
+    while pool.remaining.load(Ordering::Acquire) != 0 {
+        std::hint::spin_loop();
+    }
 }
 
 /// Runs the bound vertex (NGG) shader on the CPU for the vertices of a draw and prints the
@@ -984,6 +1093,11 @@ static PATH_CACHE: LazyLock<Mutex<PsCache>> = LazyLock::new(|| Mutex::new(HashMa
 static PS_CACHE: LazyLock<Mutex<PsCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static DECODED_CACHE: LazyLock<Mutex<DecodedCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static GEN_STATS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+static FRAME_STATS_ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("ORBIS_FRAME_STATS").is_some());
+static PERF_VS_NS: AtomicU64 = AtomicU64::new(0);
+static PERF_CS_NS: AtomicU64 = AtomicU64::new(0);
+static PERF_CS_CNT: AtomicU64 = AtomicU64::new(0);
+static PERF_CS_THR: AtomicU64 = AtomicU64::new(0);
 
 fn shader_hash(code: &[u32]) -> u64 {
     code.iter().take(64).fold(0xcbf2_9ce4_8422_2325u64, |h, &w| (h ^ w as u64).wrapping_mul(0x100_0000_01b3))
@@ -1121,51 +1235,65 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             remap.push(u);
         }
     }
-    let eval_chunk = |ixs: &[u32], out: &mut [crate::vk::GVertex]| -> bool {
+    // Run uniform scalar prefix of VS once per draw (hoists all CB/V# s_load instructions).
+    let mut prefix_lane = crate::rdna::interp::Lane::new();
+    prefix_lane.s[3] = 0x101;
+    prefix_lane.s[8..32].copy_from_slice(&vs_ud);
+    if vs_sh.scalar_prefix_len > 0
+        && crate::rdna::interp::run_compiled_prefix(&vs_sh, &mut prefix_lane, mem_ok).is_err()
+    {
+        GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let base_s = prefix_lane.s;
+    let base_scc = prefix_lane.scc;
+    let start_pc = vs_sh.scalar_prefix_len;
+    let mut verts = vec![crate::vk::GVertex::default(); unique.len()];
+    let verts_ptr = verts.as_mut_ptr() as usize;
+    let failed = std::sync::atomic::AtomicBool::new(false);
+    let t_vs = (*FRAME_STATS_ON).then(std::time::Instant::now);
+    vs_parallel_for(unique.len(), |start, end| {
+        if failed.load(Ordering::Relaxed) {
+            return;
+        }
         let mut lane = crate::rdna::interp::Lane::new();
-        for (&ix, dst) in ixs.iter().zip(out.iter_mut()) {
-            lane.reset();
-            lane.s[3] = 0x101;
-            lane.s[8..32].copy_from_slice(&vs_ud);
+        let out_slice = unsafe { std::slice::from_raw_parts_mut((verts_ptr as *mut crate::vk::GVertex).add(start), end - start) };
+        for (&ix, dst) in unique[start..end].iter().zip(out_slice.iter_mut()) {
+            lane.s = base_s;
+            lane.scc = base_scc;
+            lane.v.fill(0);
+            lane.exports.clear();
             lane.v[5] = ix;
             lane.v[8] = 0;
-            if crate::rdna::interp::run_compiled(&vs_sh, &mut lane, mem_ok).is_err() {
-                return false;
+            if crate::rdna::interp::run_compiled_from(&vs_sh, start_pc, &mut lane, mem_ok).is_err() {
+                failed.store(true, Ordering::Relaxed);
+                return;
             }
-            let Some(p) = lane.exports.iter().find(|e| e.target == 12).map(|e| e.value) else {
-                return false;
-            };
-            let mut params = [[0f32; 4]; 64];
+            let mut pos = None;
+            let mut attr = [[0f32; 4]; 8];
             for e in &lane.exports {
-                if (32..96).contains(&e.target) {
-                    params[(e.target - 32) as usize] = e.value;
+                if e.target == 12 {
+                    pos = Some(e.value);
+                } else if (32..96).contains(&e.target) {
+                    let p = e.target - 32;
+                    for n in 0..8 {
+                        if cntl[n] == p {
+                            attr[n] = e.value;
+                        }
+                    }
                 }
             }
-            let attr: [[f32; 4]; 8] = std::array::from_fn(|n| params[cntl[n] as usize]);
+            let Some(p) = pos else {
+                failed.store(true, Ordering::Relaxed);
+                return;
+            };
             *dst = crate::vk::GVertex { pos: to_target(p), attr };
         }
-        true
-    };
-    let mut verts = vec![crate::vk::GVertex::default(); unique.len()];
-    let vs_ok = if unique.len() < 128 {
-        eval_chunk(&unique, &mut verts)
-    } else {
-        let n_threads = std::thread::available_parallelism().map(|n| n.get().min(12)).unwrap_or(8);
-        let chunk_sz = (unique.len() + n_threads - 1) / n_threads;
-        let failed = std::sync::atomic::AtomicBool::new(false);
-        std::thread::scope(|s| {
-            for (ix_chunk, out_chunk) in unique.chunks(chunk_sz).zip(verts.chunks_mut(chunk_sz)) {
-                let failed = &failed;
-                s.spawn(move || {
-                    if !eval_chunk(ix_chunk, out_chunk) {
-                        failed.store(true, Ordering::Relaxed);
-                    }
-                });
-            }
-        });
-        !failed.load(Ordering::Relaxed)
-    };
-    if !vs_ok {
+    });
+    if let Some(t) = t_vs {
+        PERF_VS_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    if failed.load(Ordering::Relaxed) {
         GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
         return false;
     }
@@ -1373,19 +1501,28 @@ fn cpu_dispatch(gpu: &GpuState, gx: u32, gy: u32, gz: u32) -> bool {
         }
     }
     let t0 = std::time::Instant::now();
-    struct Timer(std::time::Instant, u64);
+    struct Timer(std::time::Instant, u64, usize);
     impl Drop for Timer {
         fn drop(&mut self) {
             static NS: AtomicU64 = AtomicU64::new(0);
             static CNT: AtomicU64 = AtomicU64::new(0);
-            let ns = NS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            let dt = self.0.elapsed().as_nanos() as u64;
+            if *FRAME_STATS_ON {
+                PERF_CS_NS.fetch_add(dt, Ordering::Relaxed);
+                PERF_CS_CNT.fetch_add(1, Ordering::Relaxed);
+                PERF_CS_THR.fetch_add(self.1, Ordering::Relaxed);
+                if dt >= 20_000_000 {
+                    eprintln!("[orbis] PERF slow CS {:#x}: {:.1}ms ({} threads)", self.2, dt as f64 / 1e6, self.1);
+                }
+            }
+            let ns = NS.fetch_add(dt, Ordering::Relaxed);
             let c = CNT.fetch_add(1, Ordering::Relaxed);
             if std::env::var_os("ORBIS_CS_LOG").is_some() && c % 500 == 499 {
                 eprintln!("[orbis] CPU compute: {} dispatches, {} ms total, last {} threads", c + 1, ns / 1_000_000, self.1);
             }
         }
     }
-    let _timer = Timer(t0, total);
+    let _timer = Timer(t0, total, cs_addr);
     let rsrc2 = *gpu.sh.get(&0x213).unwrap_or(&0);
     let user = ((rsrc2 >> 1) & 0x1F) as usize;
     let user_data: Vec<u32> = (0..user as u32).map(|k| *gpu.sh.get(&(0x240 + k)).unwrap_or(&0)).collect();
@@ -2209,7 +2346,14 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
     if dwords > 0xF_FFFF {
         return INVALID_ARG;
     }
-    let flip = {
+    let t_sub = (*FRAME_STATS_ON).then(std::time::Instant::now);
+    if *FRAME_STATS_ON {
+        PERF_VS_NS.store(0, Ordering::Relaxed);
+        PERF_CS_NS.store(0, Ordering::Relaxed);
+        PERF_CS_CNT.store(0, Ordering::Relaxed);
+        PERF_CS_THR.store(0, Ordering::Relaxed);
+    }
+    let (n, flip) = {
         flush_committed_cache();
         let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
         let n = SUBMIT_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2234,10 +2378,24 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
                 gpu.clear_rgba, gpu.bound_tex, summary.join(" ")
             );
         }
-        gpu.pending_flip.take()
+        (n, gpu.pending_flip.take())
     };
+    let t_flip = (*FRAME_STATS_ON).then(std::time::Instant::now);
     if let Some((handle, index, mode, arg)) = flip {
         crate::video::submit_flip(handle, index, mode, arg);
+    }
+    if let Some(t0) = t_sub {
+        let total_ms = t0.elapsed().as_nanos() as f64 / 1e6;
+        if n % 60 == 0 || total_ms >= 50.0 {
+            let vs_ms = PERF_VS_NS.load(Ordering::Relaxed) as f64 / 1e6;
+            let cs_ms = PERF_CS_NS.load(Ordering::Relaxed) as f64 / 1e6;
+            let cs_cnt = PERF_CS_CNT.load(Ordering::Relaxed);
+            let cs_thr = PERF_CS_THR.load(Ordering::Relaxed);
+            let flip_ms = t_flip.map(|tf| tf.elapsed().as_nanos() as f64 / 1e6).unwrap_or(0.0);
+            eprintln!(
+                "[orbis] PERF submit #{n}: total={total_ms:.1}ms vs={vs_ms:.1}ms cs={cs_ms:.1}ms({cs_cnt}x/{cs_thr}thr) flip={flip_ms:.1}ms"
+            );
+        }
     }
     0
 }

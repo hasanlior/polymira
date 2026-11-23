@@ -2142,7 +2142,9 @@ impl VkRenderer {
             let dump_dir = std::env::var("ORBIS_VK_DUMP").ok();
             let n = DUMP_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (ew, eh) = (self.swap_extent.width, self.swap_extent.height);
-            let dump = dump_dir.is_some() && (n % 120 == 60 || n % 120 == 61) && self.ensure_staging((ew * eh * 4) as usize);
+            let dump = dump_dir.is_some()
+                && (n % 120 == 60 || n % 120 == 61 || (gverts.len() > 5000 && n % 30 == 0))
+                && self.ensure_staging((ew * eh * 4) as usize);
             let mut swap_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
             if dump {
                 let b = [vk::ImageMemoryBarrier::default()

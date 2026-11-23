@@ -15,7 +15,7 @@ pub struct Export {
 
 pub struct Lane {
     pub s: [u32; 128],
-    pub v: Vec<u32>,
+    pub v: [u32; 256],
     pub scc: bool,
     pub exports: Vec<Export>,
     /// Memory writes (buffer/image stores) take effect: compute shaders only.
@@ -55,7 +55,7 @@ pub type MemCheck = fn(usize, usize) -> bool;
 
 impl Lane {
     pub fn new() -> Lane {
-        let mut l = Lane { s: [0; 128], v: vec![0; 256], scc: false, exports: Vec::with_capacity(16), stores: false };
+        let mut l = Lane { s: [0; 128], v: [0; 256], scc: false, exports: Vec::with_capacity(16), stores: false };
         l.set64(EXEC, 1);
         l
     }
@@ -205,6 +205,9 @@ pub struct CompiledShader {
     pub slots: Vec<[u16; 3]>,
     pub slot_lens: Vec<u8>,
     pub end_pc: u32,
+    /// Leading contiguous pure-scalar (VGPR-independent, branch-free) instructions that can be
+    /// evaluated once per draw and shared across all vertices.
+    pub scalar_prefix_len: usize,
 }
 
 impl CompiledShader {
@@ -233,7 +236,29 @@ impl CompiledShader {
             slots.push(s);
             slot_lens.push(len);
         }
-        Self { insts, pc_to_idx, slots, slot_lens, end_pc }
+        let mut scalar_prefix_len = 0usize;
+        for inst in &insts {
+            let pure_scalar = match inst.fmt {
+                Fmt::Sop1 | Fmt::Sop2 | Fmt::Sopc | Fmt::Sopk | Fmt::Smem => true,
+                Fmt::Sopp => !matches!(
+                    inst.name,
+                    "s_endpgm"
+                        | "s_branch"
+                        | "s_cbranch_scc0"
+                        | "s_cbranch_scc1"
+                        | "s_cbranch_vccz"
+                        | "s_cbranch_vccnz"
+                        | "s_cbranch_execz"
+                        | "s_cbranch_execnz"
+                ),
+                _ => false,
+            };
+            if !pure_scalar {
+                break;
+            }
+            scalar_prefix_len += 1;
+        }
+        Self { insts, pc_to_idx, slots, slot_lens, end_pc, scalar_prefix_len }
     }
 
     #[inline]
@@ -246,10 +271,21 @@ impl CompiledShader {
     }
 }
 
-/// Runs a pre-decoded shader for one lane until s_endpgm.
-pub fn run_compiled(sh: &CompiledShader, lane: &mut Lane, ok: MemCheck) -> Result<(), Error> {
+/// Runs the uniform scalar prefix `0..sh.scalar_prefix_len` once per draw.
+pub fn run_compiled_prefix(sh: &CompiledShader, lane: &mut Lane, ok: MemCheck) -> Result<(), Error> {
+    for inst in &sh.insts[..sh.scalar_prefix_len] {
+        match step(inst, lane, ok)? {
+            Flow::Next => {}
+            Flow::End | Flow::Branch(_) => break,
+        }
+    }
+    Ok(())
+}
+
+/// Runs a pre-decoded shader for one lane starting at instruction index `start` until s_endpgm.
+pub fn run_compiled_from(sh: &CompiledShader, start: usize, lane: &mut Lane, ok: MemCheck) -> Result<(), Error> {
     let insts = &sh.insts;
-    let mut i = 0usize;
+    let mut i = start;
     let mut steps = 0u32;
     while i < insts.len() {
         steps += 1;
@@ -268,6 +304,11 @@ pub fn run_compiled(sh: &CompiledShader, lane: &mut Lane, ok: MemCheck) -> Resul
         }
     }
     Ok(())
+}
+
+/// Runs a pre-decoded shader for one lane until s_endpgm.
+pub fn run_compiled(sh: &CompiledShader, lane: &mut Lane, ok: MemCheck) -> Result<(), Error> {
+    run_compiled_from(sh, 0, lane, ok)
 }
 
 /// Runs the shader for one lane until s_endpgm.
