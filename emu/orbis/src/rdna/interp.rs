@@ -434,7 +434,7 @@ fn step(inst: &Inst, l: &mut Lane, ok: MemCheck) -> Result<Flow, Error> {
             let mut value = [0f32; 4];
             if compr {
                 let lo = l.v[regs[0] as usize];
-                let hi = l.v[regs[1] as usize];
+                let hi = l.v[if regs[1] == regs[0] { regs[2] } else { regs[1] } as usize];
                 let h = |x: u32| half::f16::from_bits(x as u16).to_f32();
                 value = [h(lo), h(lo >> 16), h(hi), h(hi >> 16)];
             } else {
@@ -502,6 +502,10 @@ fn vop(inst: &Inst, l: &mut Lane) -> Result<(), Error> {
         let s = inst.words[1];
         let src0 = s & 0xFF;
         a = if s & (1 << 23) != 0 { l.src(src0 as u16, None) } else { l.v[src0 as usize] };
+        // S1: the second source is an SGPR / constant instead of a VGPR.
+        if s & (1 << 31) != 0 && inst.fmt != Fmt::Vop1 {
+            b = l.src(((w0 >> 9) & 0xFF) as u16, None);
+        }
         a = sdwa_sel(a, (s >> 16) & 7, s & (1 << 19) != 0);
         let s1sel = (s >> 24) & 7;
         b = sdwa_sel(b, s1sel, s & (1 << 27) != 0);
@@ -658,4 +662,109 @@ fn vop(inst: &Inst, l: &mut Lane) -> Result<(), Error> {
     }
     l.v[dst] = r;
     Ok(())
+}
+
+/// SGPR-like operand codes a vector instruction reads, in a fixed order. The pixel shader
+/// translator gives each one a push-constant slot; the scalar pass fills the slots.
+pub fn scalar_slots(inst: &Inst) -> Vec<u16> {
+    let is_sgpr = |c: u16| c <= 105 || c == 106 || c == 107 || c == 124;
+    let w0 = inst.w0();
+    let w1 = inst.w1();
+    let mut out = vec![];
+    match inst.fmt {
+        Fmt::Vop1 | Fmt::Vop2 | Fmt::Vopc => {
+            let s0 = if inst.ext == Ext::Sdwa {
+                let s = inst.words[1];
+                if s & (1 << 23) != 0 { (s & 0xFF) as u16 } else { 256 }
+            } else {
+                (w0 & 0x1FF) as u16
+            };
+            if is_sgpr(s0) {
+                out.push(s0);
+            }
+            if inst.ext == Ext::Sdwa && inst.fmt != Fmt::Vop1 && inst.words[1] & (1 << 31) != 0 {
+                let s1 = ((w0 >> 9) & 0xFF) as u16;
+                if is_sgpr(s1) {
+                    out.push(s1);
+                }
+            }
+        }
+        Fmt::Vop3 | Fmt::Vop3p => {
+            for k in 0..3 {
+                let c = ((w1 >> (k * 9)) & 0x1FF) as u16;
+                if is_sgpr(c) {
+                    out.push(c);
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// What the scalar pass learns about one draw's pixel shader.
+#[derive(Default, Clone)]
+pub struct ScalarInfo {
+    /// Values of the vector instructions' scalar operands, in slot order.
+    pub slots: Vec<u32>,
+    /// T# (8 dwords) and S# (4 dwords) of each image instruction, in program order.
+    pub images: Vec<([u32; 8], [u32; 4])>,
+}
+
+/// Runs only the scalar part of a shader (uniform for the whole draw).
+pub fn run_scalar(code: &[u32], lane: &mut Lane, ok: MemCheck) -> Result<ScalarInfo, Error> {
+    let insts = decode_shader(code);
+    let by_pc: std::collections::HashMap<u32, usize> = insts.iter().enumerate().map(|(i, x)| (x.pc, i)).collect();
+    let mut info = ScalarInfo::default();
+    let mut i = 0usize;
+    let mut steps = 0u32;
+    while i < insts.len() {
+        steps += 1;
+        if steps > 200_000 {
+            return Err(Error::Runaway);
+        }
+        let inst = &insts[i];
+        let next_pc = inst.pc + inst.words.len() as u32 * 4;
+        match inst.fmt {
+            Fmt::Vop1 | Fmt::Vop2 | Fmt::Vopc | Fmt::Vop3 | Fmt::Vop3p => {
+                for c in scalar_slots(inst) {
+                    info.slots.push(lane.src(c, inst.literal));
+                }
+                i += 1;
+                continue;
+            }
+            Fmt::Mimg => {
+                let w1 = inst.w1();
+                let srsrc = (((w1 >> 16) & 0x1F) * 4) as usize;
+                let ssamp = (((w1 >> 21) & 0x1F) * 4) as usize;
+                let mut t = [0u32; 8];
+                t.copy_from_slice(&lane.s[srsrc..srsrc + 8]);
+                let mut sm = [0u32; 4];
+                sm.copy_from_slice(&lane.s[ssamp..ssamp + 4]);
+                info.images.push((t, sm));
+                i += 1;
+                continue;
+            }
+            Fmt::Vintrp | Fmt::Exp | Fmt::Mubuf | Fmt::Mtbuf | Fmt::Ds | Fmt::Flat | Fmt::Global | Fmt::Scratch => {
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        match step(inst, lane, ok)? {
+            Flow::Next => i += 1,
+            Flow::End => break,
+            Flow::Branch(rel) => {
+                let target = (next_pc as i64 + rel as i64 * 4) as u32;
+                // A jump to the end skips pixels that were all discarded: the translated
+                // shader still runs the rest, so the slots must still be collected.
+                if target >= insts.last().map(|x| x.pc).unwrap_or(0) {
+                    i += 1;
+                } else {
+                    i = *by_pc.get(&target).ok_or(Error::Unsupported("branch target", target))?;
+                }
+            }
+        }
+    }
+    Ok(info)
 }

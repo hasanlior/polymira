@@ -6,7 +6,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 const INVALID_ARG: i32 = 0x8000_0001u32 as i32;
 
@@ -724,6 +725,8 @@ struct GpuState {
     frame_verts: Vec<crate::vk::Vertex>,
     frame_idxs: Vec<u32>,
     frame_batches: Vec<crate::vk::DrawBatch>,
+    frame_gverts: Vec<crate::vk::GVertex>,
+    frame_gens: Vec<crate::vk::GenDraw>,
     pending_flip: Option<(i32, i32, i32, i64)>,
 }
 
@@ -739,6 +742,8 @@ static GPU: Mutex<GpuState> = Mutex::new(GpuState {
     frame_verts: Vec::new(),
     frame_idxs: Vec::new(),
     frame_batches: Vec::new(),
+    frame_gverts: Vec::new(),
+    frame_gens: Vec::new(),
     pending_flip: None,
 });
 
@@ -747,6 +752,14 @@ static READY_DRAWS: Mutex<(Vec<crate::vk::Vertex>, Vec<u32>, Vec<crate::vk::Draw
 
 pub fn take_frame_draws() -> (Vec<crate::vk::Vertex>, Vec<u32>, Vec<crate::vk::DrawBatch>) {
     let mut g = READY_DRAWS.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *g)
+}
+
+static READY_GEN: Mutex<(Vec<crate::vk::GVertex>, Vec<crate::vk::GenDraw>)> = Mutex::new((Vec::new(), Vec::new()));
+
+/// Generic draws of the last finished frame (pairs with `take_frame_draws`).
+pub fn take_frame_gen() -> (Vec<crate::vk::GVertex>, Vec<crate::vk::GenDraw>) {
+    let mut g = READY_GEN.lock().unwrap_or_else(|e| e.into_inner());
     std::mem::take(&mut *g)
 }
 
@@ -861,7 +874,200 @@ fn vs_cpu_probe(gpu: &GpuState, idx_off: usize, idx_cnt: usize) {
             }
         }
     }
-    eprintln!("[orbis] VS-CPU vs={vs_addr:#x} n={idx_cnt}:{line}");
+    let (_, ps_addr) = bound_shader_pair(gpu);
+    let idx_of = |addr: usize| crate::gpu::SHADERS.lock().map(|l| l.iter().position(|(_, c, _)| *c == addr)).ok().flatten();
+    eprintln!("[orbis] VS-CPU vs={vs_addr:#x} (s{:?}) ps={ps_addr:#x} (s{:?}) n={idx_cnt}:{line}", idx_of(vs_addr), idx_of(ps_addr));
+}
+
+/// Shader code at a guest address, as long a slice as is mapped (decoding stops at s_endpgm).
+fn shader_words(addr: usize) -> Option<&'static [u32]> {
+    for n in [1usize << 14, 1 << 12, 1 << 10, 1 << 8] {
+        if is_committed(addr, n * 4) {
+            return Some(unsafe { std::slice::from_raw_parts(addr as *const u32, n) });
+        }
+    }
+    None
+}
+
+type PsCache = HashMap<(usize, u32, u64), Option<std::sync::Arc<Vec<u32>>>>;
+static PS_CACHE: LazyLock<Mutex<PsCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static GEN_STATS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+/// (generic draws, VS failures, PS untranslatable, skipped) since start.
+pub fn gen_stats() -> [u64; 4] {
+    std::array::from_fn(|k| GEN_STATS[k].load(Ordering::Relaxed))
+}
+
+/// Draws one indexed draw through the generic path: the bound NGG vertex shader runs on the
+/// CPU per vertex, the pixel shader is translated to SPIR-V. Returns false to let the older
+/// layout-guessing path try the draw.
+fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool {
+    let (vs_addr, ps_addr) = bound_shader_pair(gpu);
+    let (Some(vs_code), Some(ps_code)) = (shader_words(vs_addr), shader_words(ps_addr)) else {
+        return false;
+    };
+    let ib = (gpu.index_base as usize).saturating_add(idx_off * 2);
+    if idx_cnt < 3 || !is_committed(ib, idx_cnt * 2) || gpu.frame_gverts.len() + idx_cnt > 50_000 {
+        return false;
+    }
+    // Pixel shader translation (cached per address, input layout and code hash).
+    let input_addr = gpu.cx.get(&0x1B4).copied().filter(|&v| v != 0).or_else(|| gpu.cx.get(&0x1B3).copied()).unwrap_or(0x302);
+    let hash = ps_code.iter().take(64).fold(0xcbf2_9ce4_8422_2325u64, |h, &w| (h ^ w as u64).wrapping_mul(0x100_0000_01b3));
+    let tr = {
+        let mut cache = PS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .entry((ps_addr, input_addr, hash))
+            .or_insert_with(|| match crate::rdna::ps::translate(ps_code, input_addr) {
+                Ok(t) => Some(std::sync::Arc::new(t.spirv)),
+                Err(e) => {
+                    eprintln!("[orbis] PS {ps_addr:#x}: not translated ({e})");
+                    if let Ok(dir) = std::env::var("ORBIS_GEN_DUMP") {
+                        let n = crate::rdna::decode_shader(ps_code).last().map(|i| i.pc as usize / 4 + i.words.len()).unwrap_or(0);
+                        let b: Vec<u8> = ps_code[..n].iter().flat_map(|w| w.to_le_bytes()).collect();
+                        let _ = std::fs::write(format!("{dir}/bad_{ps_addr:x}.bin"), b);
+                    }
+                    None
+                }
+            })
+            .clone()
+    };
+    let Some(tr) = tr else {
+        GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
+        return false;
+    };
+    // Scalar pass of the pixel shader: push-constant slots and texture descriptors.
+    let mut lane = crate::rdna::interp::Lane::new();
+    for k in 0..32u32 {
+        lane.s[k as usize] = *gpu.sh.get(&(0x0C + k)).unwrap_or(&0);
+    }
+    let Ok(info) = crate::rdna::interp::run_scalar(ps_code, &mut lane, mem_ok) else {
+        GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
+        return false;
+    };
+    let tex = info.images.first().map(|(t, _)| {
+        let addr = (((t[0] as u64) | (((t[1] & 0xFF) as u64) << 32)) << 8) as usize;
+        let w = ((t[1] >> 30) | ((t[2] & 0xFFF) << 2)) + 1;
+        let h = ((t[2] >> 14) & 0x3FFF) + 1;
+        let swiz = (t[3] >> 20) & 0x1F;
+        (addr, w, h, swiz)
+    });
+    if std::env::var_os("ORBIS_TEX_LOG").is_some() {
+        static SEEN: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        if let Some((t, _)) = info.images.first() {
+            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            if !seen.contains(&(t[0] as usize)) {
+                seen.push(t[0] as usize);
+                eprintln!("[orbis] TEX ps={ps_addr:#x} fmt={} {tex:x?} T#={t:08x?}", (t[1] >> 20) & 0x1FF);
+            }
+        }
+    }
+    // The final copy of the offscreen render target to the display: we draw straight to the
+    // swapchain, so its source texture is not in guest memory. Drop the draw.
+    if let Some((_, w, h, swiz)) = tex {
+        if w >= 1920 && h >= 1080 && swiz >= 24 {
+            GEN_STATS[3].fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+    }
+    let mut slots = [0u32; 64];
+    for (k, &v) in info.slots.iter().take(64).enumerate() {
+        slots[k] = v;
+    }
+    // Vertex shader per unique index.
+    let idxs: Vec<u16> = unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt) }.to_vec();
+    let cntl: [u32; 8] = std::array::from_fn(|n| gpu.cx.get(&(0x191 + n as u32)).map(|v| v & 0x3F).unwrap_or(n as u32));
+    let (xs, xo) = (f32::from_bits(*gpu.cx.get(&0x10F).unwrap_or(&0)), f32::from_bits(*gpu.cx.get(&0x110).unwrap_or(&0)));
+    let (ys, yo) = (f32::from_bits(*gpu.cx.get(&0x111).unwrap_or(&0)), f32::from_bits(*gpu.cx.get(&0x112).unwrap_or(&0)));
+    let sx = if xo.abs() > 1.0 && xs.is_finite() { xs / xo } else { 1.0 };
+    let sy = if yo.abs() > 1.0 && ys.is_finite() { ys / yo } else { -1.0 };
+    let mut done: HashMap<u16, crate::vk::GVertex> = HashMap::new();
+    let vs_ud: Vec<u32> = (0..24u32).map(|k| *gpu.sh.get(&(0x8C + k)).unwrap_or(&0)).collect();
+    for &ix in &idxs {
+        if done.contains_key(&ix) {
+            continue;
+        }
+        let mut lane = crate::rdna::interp::Lane::new();
+        lane.s[3] = 0x101;
+        for (k, &v) in vs_ud.iter().enumerate() {
+            lane.s[8 + k] = v;
+        }
+        lane.v[5] = ix as u32;
+        lane.v[8] = 0;
+        if crate::rdna::interp::run(vs_code, &mut lane, mem_ok).is_err() {
+            GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        let Some(p) = lane.exports.iter().find(|e| e.target == 12).map(|e| e.value) else {
+            GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
+            return false;
+        };
+        let mut params = [[0f32; 4]; 64];
+        for e in &lane.exports {
+            if (32..96).contains(&e.target) {
+                params[(e.target - 32) as usize] = e.value;
+            }
+        }
+        let mut gv = crate::vk::GVertex { pos: [p[0] * sx, p[1] * sy, p[2], p[3]], attr: [[0.0; 4]; 8] };
+        for n in 0..8 {
+            gv.attr[n] = params[cntl[n] as usize];
+        }
+        done.insert(ix, gv);
+    }
+    // Primitive type: triangle list (default) or rect list (3 corners → 2 triangles).
+    let prim = gpu.uc.get(&0x242).copied().map(|v| if v > 0xFF { v >> 8 } else { v }).unwrap_or(4);
+    let first_vertex = gpu.frame_gverts.len() as u32;
+    if prim == 0x11 {
+        for tri in idxs.chunks_exact(3) {
+            let (a, b, c) = (done[&tri[0]], done[&tri[1]], done[&tri[2]]);
+            let mut d = a;
+            d.pos = std::array::from_fn(|k| b.pos[k] + c.pos[k] - a.pos[k]);
+            for n in 0..8 {
+                d.attr[n] = std::array::from_fn(|k| b.attr[n][k] + c.attr[n][k] - a.attr[n][k]);
+            }
+            gpu.frame_gverts.extend_from_slice(&[a, b, c, c, b, d]);
+        }
+    } else {
+        for &ix in &idxs[..idxs.len() / 3 * 3] {
+            gpu.frame_gverts.push(done[&ix]);
+        }
+    }
+    let vertex_count = gpu.frame_gverts.len() as u32 - first_vertex;
+        if let Ok(dir) = std::env::var("ORBIS_GEN_DUMP").map(|d| d).and_then(|d| if std::path::Path::new(&format!("{d}/ps_{ps_addr:x}.bin")).exists() { Err(std::env::VarError::NotPresent) } else { Ok(d) }) {
+            let n = crate::rdna::decode_shader(ps_code).last().map(|i| i.pc as usize / 4 + i.words.len()).unwrap_or(0);
+            let b: Vec<u8> = ps_code[..n].iter().flat_map(|w| w.to_le_bytes()).collect();
+            let _ = std::fs::write(format!("{dir}/ps_{ps_addr:x}.bin"), b);
+            let _ = std::fs::write(format!("{dir}/ps_{ps_addr:x}.spv"), tr.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>());
+            eprintln!("[orbis] GEN slots {ps_addr:#x}: {:x?} blend={:#x} input={input_addr:#x}", info.slots, gpu.cx.get(&0x1E0).copied().unwrap_or(0));
+        }
+    if std::env::var_os("ORBIS_GEN_LOG").is_some() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) < 60 {
+            let v: Vec<String> = gpu.frame_gverts[first_vertex as usize..].iter().take(3).map(|g| format!("({:.2},{:.2},{:.2},{:.2}) a0=({:.2},{:.2},{:.2},{:.2})", g.pos[0], g.pos[1], g.pos[2], g.pos[3], g.attr[0][0], g.attr[0][1], g.attr[0][2], g.attr[0][3])).collect();
+            eprintln!("[orbis] GEN ps={ps_addr:#x} prim={prim:#x} n={vertex_count} vp=({xs},{xo},{ys},{yo}) tex={tex:x?} slots={} cntl={cntl:?} {}", info.slots.len(), v.join(" "));
+        }
+    }
+    // CB_TARGET_MASK (MRT0 bits): nothing written → stencil/depth-only pass, skip it.
+    let wmask = gpu.cx.get(&0x8E).copied().unwrap_or(0xF) & 0xF;
+    if wmask == 0 {
+        gpu.frame_gverts.truncate(first_vertex as usize);
+        GEN_STATS[3].fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    let blend = gpu.cx.get(&0x1E0).copied().unwrap_or(0);
+    let g = gpu.frame_gens.len() as u32;
+    gpu.frame_gens.push(crate::vk::GenDraw {
+        key: (ps_addr ^ hash as usize, blend, wmask),
+        wmask,
+        spirv: tr.clone(),
+        blend,
+        first_vertex,
+        vertex_count,
+        slots,
+        tex,
+    });
+    gpu.frame_batches.push(crate::vk::DrawBatch { first_index: 0, index_count: 0, tex_addr: 0, tex_w: 0, tex_h: 0, tex_swiz: 0, gen: Some(g) });
+    GEN_STATS[0].fetch_add(1, Ordering::Relaxed);
+    true
 }
 
 fn compile_bound_graphics_pipeline(gpu: &GpuState) {
@@ -1126,7 +1332,9 @@ fn execute_stream(
                 let mvp_ptr = (vs_ud[0] as u64 | (((vs_ud[1] & 0xFFFF) as u64) << 32)) as usize;
                 let vt_ptr = (vs_ud[4] as u64 | (((vs_ud[5] & 0xFFFF) as u64) << 32)) as usize;
                 let ib_ptr = (gpu.index_base as usize).saturating_add(idx_off * 2);
-                if idx_cnt >= 3
+                let generic_done = std::env::var_os("ORBIS_NO_GENERIC").is_none() && try_generic_draw(gpu, idx_off, idx_cnt);
+                if !generic_done
+                    && idx_cnt >= 3
                     && gpu.frame_verts.len() < 12000
                     && is_committed(mvp_ptr, 64)
                     && is_committed(vt_ptr, 64)
@@ -1291,6 +1499,7 @@ fn execute_stream(
                                         tex_w,
                                         tex_h,
                                         tex_swiz,
+                                        gen: None,
                                     });
                                 } else {
                                     gpu.frame_verts.truncate(base_v as usize);
@@ -1502,16 +1711,22 @@ fn execute_stream(
                     if trace {
                         eprintln!("[orbis] GPU:   flip handle={handle} index={index} mode={mode} arg={arg:#x} verts={} idxs={}", gpu.frame_verts.len(), gpu.frame_idxs.len());
                     }
-                    if !gpu.frame_verts.is_empty() && !gpu.frame_idxs.is_empty() {
+                    if (!gpu.frame_verts.is_empty() && !gpu.frame_idxs.is_empty()) || !gpu.frame_gens.is_empty() {
                         if let Ok(mut rd) = READY_DRAWS.lock() {
                             rd.0 = std::mem::take(&mut gpu.frame_verts);
                             rd.1 = std::mem::take(&mut gpu.frame_idxs);
                             rd.2 = std::mem::take(&mut gpu.frame_batches);
+                            if let Ok(mut rg) = READY_GEN.lock() {
+                                rg.0 = std::mem::take(&mut gpu.frame_gverts);
+                                rg.1 = std::mem::take(&mut gpu.frame_gens);
+                            }
                         }
                     } else {
                         gpu.frame_verts.clear();
                         gpu.frame_idxs.clear();
                         gpu.frame_batches.clear();
+                        gpu.frame_gverts.clear();
+                        gpu.frame_gens.clear();
                     }
                     gpu.pending_flip = Some((handle, index, mode, arg));
                 }

@@ -91,7 +91,7 @@ pub extern "sysv64" fn open(_user: i32, _kind: i32, _index: i32, len: u32, freq:
 
     let mut wave = 0usize;
     #[cfg(windows)]
-    if std::env::var_os("ORBIS_HIDDEN").is_none() {
+    if std::env::var_os("ORBIS_HIDDEN").is_none() && std::env::var_os("ORBIS_OFFSCREEN").is_none() {
         if let Some(mm) = winmm() {
             let wf = WaveFormatEx {
                 w_format_tag: if is_float { 3 } else { 1 }, // IEEE_FLOAT or PCM

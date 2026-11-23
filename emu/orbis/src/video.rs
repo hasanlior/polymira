@@ -225,9 +225,10 @@ pub extern "sysv64" fn wait_vblank(_handle: i32) -> i32 {
 fn present(buf: &Buffer, n: u64) {
     let (w, h) = (buf.width as usize, buf.height as usize);
     let (verts, idxs, batches) = crate::agc::take_frame_draws();
-    let has_draws = !verts.is_empty() && !idxs.is_empty();
+    let (gverts, gens) = crate::agc::take_frame_gen();
+    let has_draws = (!verts.is_empty() && !idxs.is_empty()) || !gens.is_empty();
     if std::env::var_os("ORBIS_FRAME_STATS").is_some() && (n <= 3 || n % 120 == 0) {
-        eprintln!("[orbis] frame {n}: {} verts, {} indices, {} batches", verts.len(), idxs.len(), batches.len());
+        eprintln!("[orbis] frame {n}: {} verts, {} indices, {} batches, {} generic ({} gverts) totals={:?}", verts.len(), idxs.len(), batches.len(), gens.len(), gverts.len(), crate::agc::gen_stats());
     }
     let dump_dir = std::env::var("ORBIS_DUMP").ok();
     let mut has_pixels = false;
@@ -278,7 +279,7 @@ fn present(buf: &Buffer, n: u64) {
                 SPLASH_ACTIVE.store(false, Ordering::SeqCst);
             }
             let presented_vk = if has_draws {
-                crate::vk::with_renderer(|r| r.present_indexed_draws(clear, &verts, &idxs, &batches)).unwrap_or(false)
+                crate::vk::with_renderer(|r| r.present_indexed_draws(clear, &verts, &idxs, &batches, &gverts, &gens)).unwrap_or(false)
             } else if SPLASH_ACTIVE.load(Ordering::SeqCst) {
                 let sp = SPLASH_IMG.lock().unwrap();
                 if let Some((ref px, sw, sh)) = *sp {
@@ -371,13 +372,16 @@ fn start_window() {
             wc.lpszClassName = class.as_ptr();
             wc.hCursor = LoadCursorW(std::ptr::null_mut(), IDC_ARROW);
             RegisterClassW(&wc);
+            // ORBIS_OFFSCREEN=1: a real window (so Vulkan presents) placed off every monitor,
+            // never activated and kept off the taskbar, for automated test runs.
+            let offscreen = std::env::var_os("ORBIS_OFFSCREEN").is_some();
             let hwnd = CreateWindowExW(
-                0,
+                if offscreen { WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE } else { 0 },
                 class.as_ptr(),
                 title.as_ptr(),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
+                if offscreen { WS_POPUP | WS_VISIBLE } else { WS_OVERLAPPEDWINDOW | WS_VISIBLE },
+                if offscreen { -30000 } else { CW_USEDEFAULT },
+                if offscreen { -30000 } else { CW_USEDEFAULT },
                 1296,
                 759,
                 std::ptr::null_mut(),
@@ -389,9 +393,13 @@ fn start_window() {
             if std::env::var_os("ORBIS_HIDDEN").is_none() && std::env::var_os("ORBIS_HEADLESS").is_none() {
                 // First ShowWindow obeys STARTUPINFO.wShowWindow (which may be SW_HIDE);
                 // calling ShowWindow twice guarantees the window becomes visible.
-                ShowWindow(hwnd, SW_SHOW);
-                ShowWindow(hwnd, SW_SHOWNORMAL);
-                SetForegroundWindow(hwnd);
+                if offscreen {
+                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                } else {
+                    ShowWindow(hwnd, SW_SHOW);
+                    ShowWindow(hwnd, SW_SHOWNORMAL);
+                    SetForegroundWindow(hwnd);
+                }
                 windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
             }
             let mut msg: MSG = std::mem::zeroed();

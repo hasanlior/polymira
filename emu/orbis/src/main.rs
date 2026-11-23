@@ -129,6 +129,11 @@ fn main() -> ExitCode {
             }
         }),
         Some("run") if args.len() >= 2 => (|| {
+            // The game folder (save data name, /app0, modules) comes from this path: make it absolute.
+            let mut args = args.clone();
+            if let Ok(abs) = std::path::absolute(&args[1]) {
+                args[1] = abs.to_string_lossy().into_owned();
+            }
             let bytes = std::fs::read(&args[1]).map_err(|e| e.to_string())?;
             let exe = Executable::parse(&bytes).map_err(|e| e.to_string())?;
             let mut kinds = std::collections::BTreeMap::new();
@@ -157,6 +162,37 @@ fn main() -> ExitCode {
             }
             Ok(())
         })(),
+        // ps-spv <dir>: translates every dumped pixel shader (*_k1.bin) and validates the SPIR-V.
+        Some("ps-spv") if args.len() >= 2 => (|| {
+            let mut ok = 0;
+            let mut fails: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut names: Vec<_> = std::fs::read_dir(&args[1]).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with("_k1.bin")).collect();
+            names.sort();
+            for p in names {
+                let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+                let code: Vec<u32> = bytes.chunks(4).map(|c| { let mut b = [0u8; 4]; b[..c.len()].copy_from_slice(c); u32::from_le_bytes(b) }).collect();
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                match rdna::ps::translate(&code, 0x302) {
+                    Err(e) => { println!("{name}: unsupported {e}"); *fails.entry(e).or_default() += 1; }
+                    Ok(t) => {
+                        let opts = naga::front::spv::Options::default();
+                        match naga::front::spv::parse_u8_slice(bytemuck_words(&t.spirv), &opts) {
+                            Err(e) => { println!("{name}: parse {e:?}"); if std::env::var("DIS").is_ok() { use rspirv::binary::Disassemble; println!("{}", rspirv::dr::load_words(&t.spirv).unwrap().disassemble()); } *fails.entry("parse".into()).or_default() += 1; }
+                            Ok(m) => {
+                                let mut v = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());
+                                match v.validate(&m) {
+                                    Err(e) => { println!("{name}: invalid {:?}", e.into_inner()); *fails.entry("invalid".into()).or_default() += 1; }
+                                    Ok(_) => { ok += 1; println!("{name}: ok slots={} images={}", t.slots, t.images); }
+                                }
+                            }
+                        }
+                        if let Some(out) = args.get(2) { let _ = std::fs::write(format!("{out}/{name}.spv"), bytemuck_words(&t.spirv)); }
+                    }
+                }
+            }
+            println!("ok {ok}; {fails:?}");
+            Ok(())
+        })(),
         Some("sample") if args.len() >= 2 => std::fs::write(&args[1], selftest::wrap_self(&selftest::build_elf())).map_err(|e| e.to_string()),
         _ => Err("usage: orbis analyze <eboot.bin> [--json] | orbis run <eboot.bin> | orbis selftest".into()),
     };
@@ -171,4 +207,8 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn bytemuck_words(w: &[u32]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, w.len() * 4) }
 }

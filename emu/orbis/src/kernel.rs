@@ -489,6 +489,64 @@ pub extern "sysv64" fn gettimeofday(tv: *mut Timeval, _tz: *mut c_void) -> i32 {
     0
 }
 
+/// Host time zone: (seconds west of UTC, daylight-saving seconds currently in effect).
+fn host_timezone() -> (i64, i64) {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+        let mut tz: TIME_ZONE_INFORMATION = std::mem::zeroed();
+        let r = GetTimeZoneInformation(&mut tz);
+        let dst = if r == 2 { -(tz.DaylightBias as i64) * 60 } else { 0 };
+        return (tz.Bias as i64 * 60, dst);
+    }
+    #[allow(unreachable_code)]
+    (0, 0)
+}
+
+#[repr(C)]
+pub struct KernelTimesec {
+    t: i64,
+    west_sec: u32,
+    dst_sec: u32,
+}
+
+/// sceKernelConvertUtcToLocaltime(utc, *local, *timesec, *dst_sec)
+pub extern "sysv64" fn convert_utc_to_localtime(utc: i64, local: *mut i64, ts: *mut KernelTimesec, dst: *mut u64) -> i32 {
+    let (west, dst_s) = host_timezone();
+    unsafe {
+        if !local.is_null() {
+            *local = utc - west + dst_s;
+        }
+        if !ts.is_null() {
+            (*ts).t = utc;
+            (*ts).west_sec = west as u32;
+            (*ts).dst_sec = dst_s as u32;
+        }
+        if !dst.is_null() {
+            *dst = dst_s as u64;
+        }
+    }
+    0
+}
+
+/// sceKernelConvertLocaltimeToUtc(local, unused, *utc, *timezone{west, dst}, *dst_sec)
+pub extern "sysv64" fn convert_localtime_to_utc(local: i64, _x: i64, utc: *mut i64, tz: *mut [i32; 2], dst: *mut i32) -> i32 {
+    let (west, dst_s) = host_timezone();
+    unsafe {
+        if !utc.is_null() {
+            *utc = local + west - dst_s;
+        }
+        if !tz.is_null() {
+            (*tz)[0] = (west / 60) as i32;
+            (*tz)[1] = (dst_s / 60) as i32;
+        }
+        if !dst.is_null() {
+            *dst = dst_s as i32;
+        }
+    }
+    0
+}
+
 pub extern "sysv64" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> i32 {
     if !req.is_null() {
         let (s, n) = unsafe { ((*req).sec, (*req).nsec) };
@@ -1018,6 +1076,8 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceKernelClockGettime", clock_gettime as *const () as usize),
         ("gettimeofday", gettimeofday as *const () as usize),
         ("sceKernelGettimeofday", gettimeofday as *const () as usize),
+        ("sceKernelConvertUtcToLocaltime", convert_utc_to_localtime as *const () as usize),
+        ("sceKernelConvertLocaltimeToUtc", convert_localtime_to_utc as *const () as usize),
         ("nanosleep", nanosleep as *const () as usize),
         ("_nanosleep", nanosleep as *const () as usize),
         ("sceKernelNanosleep", nanosleep as *const () as usize),

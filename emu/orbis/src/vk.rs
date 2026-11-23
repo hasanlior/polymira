@@ -26,7 +26,34 @@ pub struct DrawBatch {
     pub tex_w: u32,
     pub tex_h: u32,
     pub tex_swiz: u32,
+    /// Index into the frame's generic draws (CPU-run vertex shader + translated pixel shader).
+    pub gen: Option<u32>,
 }
+
+/// Vertex of a generic draw: clip position plus the pixel shader's 8 interpolants.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct GVertex {
+    pub pos: [f32; 4],
+    pub attr: [[f32; 4]; 8],
+}
+
+/// A draw whose pixel shader was translated to SPIR-V (`rdna::ps`).
+#[derive(Clone)]
+pub struct GenDraw {
+    /// Pipeline cache key (pixel shader address + blend state).
+    pub key: (usize, u32, u32),
+    /// CB_TARGET_MASK bits for MRT0 (R, G, B, A).
+    pub wmask: u32,
+    pub spirv: std::sync::Arc<Vec<u32>>,
+    pub blend: u32,
+    pub first_vertex: u32,
+    pub vertex_count: u32,
+    pub slots: [u32; 64],
+    pub tex: Option<(usize, u32, u32, u32)>,
+}
+
+const GVBUF_BYTES: usize = 8 << 20;
 
 pub struct VkTarget {
     pub image: vk::Image,
@@ -79,6 +106,12 @@ pub struct VkRenderer {
     pub imem: vk::DeviceMemory,
     pub upload_tex: Option<VkTarget>,
     pub tex_cache: HashMap<usize, (VkTarget, vk::DescriptorSet)>,
+    pub tex_sums: HashMap<usize, u64>,
+    pub gen_layout: vk::PipelineLayout,
+    pub gen_vs: vk::ShaderModule,
+    pub gen_pipes: HashMap<(usize, u32, u32), vk::Pipeline>,
+    pub gvbuf: vk::Buffer,
+    pub gvmem: vk::DeviceMemory,
 }
 
 unsafe impl Send for VkRenderer {}
@@ -214,7 +247,7 @@ impl VkRenderer {
             .image_color_space(fmt.color_space)
             .image_extent(swap_extent)
             .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(caps.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -290,6 +323,12 @@ impl VkRenderer {
             imem: vk::DeviceMemory::null(),
             upload_tex: None,
             tex_cache: HashMap::new(),
+            tex_sums: HashMap::new(),
+            gen_layout: vk::PipelineLayout::null(),
+            gen_vs: vk::ShaderModule::null(),
+            gen_pipes: HashMap::new(),
+            gvbuf: vk::Buffer::null(),
+            gvmem: vk::DeviceMemory::null(),
         };
         if let Err(e) = r.init_blit_pipeline() {
             eprintln!("[orbis] Vulkan: blit pipeline init warning: {e}");
@@ -389,12 +428,12 @@ impl VkRenderer {
             .map_err(|e| format!("sampler: {e}"))?;
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 128,
+            descriptor_count: 1024,
         }];
         let desc_pool = self
             .device
             .create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default().max_sets(128).pool_sizes(&pool_sizes),
+                &vk::DescriptorPoolCreateInfo::default().max_sets(1024).pool_sizes(&pool_sizes),
                 None,
             )
             .map_err(|e| format!("desc_pool: {e}"))?;
@@ -664,14 +703,6 @@ impl VkRenderer {
         if addr == 0 || width == 0 || height == 0 || width > 4096 || height > 4096 {
             return self.desc_set;
         }
-        if let Some((t, ds)) = self.tex_cache.get(&addr) {
-            if t.width == width && t.height == height {
-                return *ds;
-            }
-        }
-        if self.tex_cache.len() >= 120 {
-            return self.desc_set;
-        }
         let want_src = if swiz == 0 {
             (width as usize) * (height as usize) * 4
         } else {
@@ -679,6 +710,35 @@ impl VkRenderer {
         };
         let avail = Self::readable_bytes(addr, want_src);
         if avail < 64 {
+            return self.desc_set;
+        }
+        // The game may fill or reuse a texture after we first uploaded it: compare a sampled
+        // checksum and upload again into the same image when it changed.
+        let sum = {
+            let words = avail / 8;
+            let step = (words / 512).max(1);
+            let p = addr as *const u64;
+            let mut h = 0xcbf2_9ce4_8422_2325u64 ^ (width as u64) << 32 ^ height as u64;
+            let mut k = 0;
+            while k < words {
+                h = (h ^ p.add(k).read_unaligned()).wrapping_mul(0x100_0000_01b3);
+                k += step;
+            }
+            h
+        };
+        if let Some((t, ds)) = self.tex_cache.get(&addr) {
+            if t.width == width && t.height == height {
+                let (ds, img) = (*ds, t.image);
+                if self.tex_sums.get(&addr) != Some(&sum) {
+                    let src = std::slice::from_raw_parts(addr as *const u8, avail);
+                    let pixels = crate::tiling::untile_32bpp(src, width, height, swiz);
+                    self.reupload_texture(img, width, height, &pixels);
+                    self.tex_sums.insert(addr, sum);
+                }
+                return ds;
+            }
+        }
+        if self.tex_cache.len() >= 900 {
             return self.desc_set;
         }
         let src = std::slice::from_raw_parts(addr as *const u8, avail);
@@ -849,7 +909,51 @@ impl VkRenderer {
 
         eprintln!("[orbis] Vulkan: uploaded PS5 texture @{addr:#x} ({width}x{height}, swiz={swiz}) to GPU");
         self.tex_cache.insert(addr, (VkTarget { image: img, memory: mem, view, width, height }, dset));
+        self.tex_sums.insert(addr, sum);
         dset
+    }
+
+    /// Copies new pixels into an already sampled texture image.
+    unsafe fn reupload_texture(&mut self, img: vk::Image, width: u32, height: u32, pixels: &[u32]) {
+        let byte_len = pixels.len() * 4;
+        if byte_len < (width * height * 4) as usize || !self.ensure_staging(byte_len) {
+            return;
+        }
+        let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+        let Ok(mapped) = self.device.map_memory(self.staging_mem, 0, byte_len as u64, vk::MemoryMapFlags::empty()) else {
+            return;
+        };
+        std::ptr::copy_nonoverlapping(pixels.as_ptr() as *const u8, mapped as *mut u8, byte_len);
+        self.device.unmap_memory(self.staging_mem);
+        let _ = self.device.reset_fences(&[self.fence]);
+        let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
+        let _ = self.device.begin_command_buffer(self.cmd_buf, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+        let sub = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+        let to_dst = [vk::ImageMemoryBarrier::default()
+            .image(img)
+            .subresource_range(sub)
+            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::SHADER_READ)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+        self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &to_dst);
+        let region = [vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
+            .image_extent(vk::Extent3D { width, height, depth: 1 })];
+        self.device.cmd_copy_buffer_to_image(self.cmd_buf, self.staging_buf, img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &region);
+        let to_read = [vk::ImageMemoryBarrier::default()
+            .image(img)
+            .subresource_range(sub)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)];
+        self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &to_read);
+        let _ = self.device.end_command_buffer(self.cmd_buf);
+        let cmds = [self.cmd_buf];
+        let submit = [vk::SubmitInfo::default().command_buffers(&cmds)];
+        let _ = self.device.queue_submit(self.queue, &submit, self.fence);
+        let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
     }
 
     /// Renders per-draw indexed batches (each with its own PS5 texture) directly into the swapchain framebuffer on the RTX 4060.
@@ -859,6 +963,8 @@ impl VkRenderer {
         vertices: &[Vertex],
         indices: &[u32],
         batches: &[DrawBatch],
+        gverts: &[GVertex],
+        gens: &[GenDraw],
     ) -> bool {
         if !self.blit_ready || self.quad_pipe == vk::Pipeline::null() || self.vbuf == vk::Buffer::null() || self.ibuf == vk::Buffer::null() {
             return false;
@@ -866,19 +972,42 @@ impl VkRenderer {
         let v_bytes = (vertices.len() * std::mem::size_of::<Vertex>()).min(524288);
         let i_bytes = (indices.len() * std::mem::size_of::<u32>()).min(131072);
         let max_idx_count = (i_bytes / 4) as u32;
-        if v_bytes == 0 || max_idx_count == 0 {
+        if (v_bytes == 0 || max_idx_count == 0) && gens.is_empty() {
             return false;
         }
+        let g_bytes = (gverts.len() * std::mem::size_of::<GVertex>()).min(GVBUF_BYTES);
+        let g_max = (g_bytes / std::mem::size_of::<GVertex>()) as u32;
         unsafe {
-            // Pre-upload any newly seen PS5 textures before beginning the swapchain render pass
-            let mut resolved: Vec<(u32, u32, vk::DescriptorSet)> = Vec::with_capacity(batches.len().max(1));
+            if !gens.is_empty() && self.gvbuf == vk::Buffer::null() {
+                if let Some((b, m)) = self.alloc_host_buffer(GVBUF_BYTES, vk::BufferUsageFlags::VERTEX_BUFFER) {
+                    self.gvbuf = b;
+                    self.gvmem = m;
+                }
+            }
+            // Pre-upload newly seen PS5 textures and build generic pipelines before beginning the
+            // swapchain render pass. A generic item carries its pipeline (non-null) and GenDraw index.
+            let mut resolved: Vec<(u32, u32, vk::DescriptorSet, vk::Pipeline, usize)> = Vec::with_capacity(batches.len().max(1));
             if batches.is_empty() {
-                resolved.push((0, max_idx_count, self.desc_set));
+                resolved.push((0, max_idx_count, self.desc_set, vk::Pipeline::null(), 0));
             } else {
                 for b in batches {
-                    if b.first_index.saturating_add(b.index_count) <= max_idx_count && b.index_count > 0 {
+                    if let Some(g) = b.gen {
+                        let Some(gd) = gens.get(g as usize) else { continue };
+                        if self.gvbuf == vk::Buffer::null() || gd.first_vertex.saturating_add(gd.vertex_count) > g_max || gd.vertex_count == 0 {
+                            continue;
+                        }
+                        let pipe = self.ensure_gen_pipeline(gd);
+                        if pipe == vk::Pipeline::null() {
+                            continue;
+                        }
+                        let ds = match gd.tex {
+                            Some((a, w, h, sw)) => self.ensure_sampled_texture(a, w, h, sw),
+                            None => self.desc_set,
+                        };
+                        resolved.push((gd.first_vertex, gd.vertex_count, ds, pipe, g as usize));
+                    } else if b.first_index.saturating_add(b.index_count) <= max_idx_count && b.index_count > 0 {
                         let ds = self.ensure_sampled_texture(b.tex_addr, b.tex_w, b.tex_h, b.tex_swiz);
-                        resolved.push((b.first_index, b.index_count, ds));
+                        resolved.push((b.first_index, b.index_count, ds, vk::Pipeline::null(), 0));
                     }
                 }
             }
@@ -887,13 +1016,23 @@ impl VkRenderer {
             }
 
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
-            if let Ok(vp) = self.device.map_memory(self.vmem, 0, v_bytes as u64, vk::MemoryMapFlags::empty()) {
-                std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const u8, vp as *mut u8, v_bytes);
-                self.device.unmap_memory(self.vmem);
+            if g_bytes > 0 && self.gvbuf != vk::Buffer::null() {
+                if let Ok(gp) = self.device.map_memory(self.gvmem, 0, g_bytes as u64, vk::MemoryMapFlags::empty()) {
+                    std::ptr::copy_nonoverlapping(gverts.as_ptr() as *const u8, gp as *mut u8, g_bytes);
+                    self.device.unmap_memory(self.gvmem);
+                }
             }
-            if let Ok(ip) = self.device.map_memory(self.imem, 0, i_bytes as u64, vk::MemoryMapFlags::empty()) {
-                std::ptr::copy_nonoverlapping(indices.as_ptr() as *const u8, ip as *mut u8, i_bytes);
-                self.device.unmap_memory(self.imem);
+            if v_bytes > 0 {
+                if let Ok(vp) = self.device.map_memory(self.vmem, 0, v_bytes as u64, vk::MemoryMapFlags::empty()) {
+                    std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const u8, vp as *mut u8, v_bytes);
+                    self.device.unmap_memory(self.vmem);
+                }
+            }
+            if i_bytes > 0 {
+                if let Ok(ip) = self.device.map_memory(self.imem, 0, i_bytes as u64, vk::MemoryMapFlags::empty()) {
+                    std::ptr::copy_nonoverlapping(indices.as_ptr() as *const u8, ip as *mut u8, i_bytes);
+                    self.device.unmap_memory(self.imem);
+                }
             }
             let Ok((img_idx, _)) = self.swapchain_loader.acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null()) else {
                 return false;
@@ -926,21 +1065,63 @@ impl VkRenderer {
             self.device.cmd_bind_vertex_buffers(self.cmd_buf, 0, &[self.vbuf], &[0]);
             self.device.cmd_bind_index_buffer(self.cmd_buf, self.ibuf, 0, vk::IndexType::UINT32);
             let mut last_ds = vk::DescriptorSet::null();
-            for &(first_idx, cnt, ds) in &resolved {
+            let mut cur_pipe = self.quad_pipe;
+            for &(first, cnt, ds, pipe, g) in &resolved {
+                let generic = pipe != vk::Pipeline::null();
+                let want = if generic { pipe } else { self.quad_pipe };
+                if want != cur_pipe {
+                    self.device.cmd_bind_pipeline(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, want);
+                    if generic != (cur_pipe != self.quad_pipe) {
+                        let vb = if generic { self.gvbuf } else { self.vbuf };
+                        self.device.cmd_bind_vertex_buffers(self.cmd_buf, 0, &[vb], &[0]);
+                        last_ds = vk::DescriptorSet::null();
+                    }
+                    cur_pipe = want;
+                }
+                let layout = if generic { self.gen_layout } else { self.blit_layout };
                 if ds != last_ds {
-                    self.device.cmd_bind_descriptor_sets(
-                        self.cmd_buf,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        self.blit_layout,
-                        0,
-                        &[ds],
-                        &[],
-                    );
+                    self.device.cmd_bind_descriptor_sets(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, layout, 0, &[ds], &[]);
                     last_ds = ds;
                 }
-                self.device.cmd_draw_indexed(self.cmd_buf, cnt, 1, first_idx, 0, 0);
+                if generic {
+                    let slots = &gens[g].slots;
+                    let bytes = std::slice::from_raw_parts(slots.as_ptr() as *const u8, 256);
+                    self.device.cmd_push_constants(self.cmd_buf, self.gen_layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
+                    self.device.cmd_draw(self.cmd_buf, cnt, 1, first, 0);
+                } else {
+                    self.device.cmd_draw_indexed(self.cmd_buf, cnt, 1, first, 0, 0);
+                }
             }
             self.device.cmd_end_render_pass(self.cmd_buf);
+            // ORBIS_VK_DUMP=<dir>: copy every 120th presented frame back for checking.
+            static DUMP_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let dump_dir = std::env::var("ORBIS_VK_DUMP").ok();
+            let n = DUMP_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (ew, eh) = (self.swap_extent.width, self.swap_extent.height);
+            let dump = dump_dir.is_some() && n % 120 == 60 && self.ensure_staging((ew * eh * 4) as usize);
+            if dump {
+                let img = self.swap_images[img_idx as usize];
+                let range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+                let to_src = [vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .image(img)
+                    .subresource_range(range)];
+                self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &to_src);
+                let region = [vk::BufferImageCopy::default()
+                    .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
+                    .image_extent(vk::Extent3D { width: ew, height: eh, depth: 1 })];
+                self.device.cmd_copy_image_to_buffer(self.cmd_buf, img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, self.staging_buf, &region);
+                let to_present = [vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .image(img)
+                    .subresource_range(range)];
+                self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &to_present);
+            }
             let _ = self.device.end_command_buffer(self.cmd_buf);
 
             let wait_sems = [self.image_avail];
@@ -962,8 +1143,143 @@ impl VkRenderer {
                 .swapchains(&scs)
                 .image_indices(&idxs);
             let _ = self.swapchain_loader.queue_present(self.queue, &present);
+            if dump {
+                let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+                let bytes = (ew * eh * 4) as usize;
+                if let Ok(p) = self.device.map_memory(self.staging_mem, 0, bytes as u64, vk::MemoryMapFlags::empty()) {
+                    let px = std::slice::from_raw_parts(p as *const u8, bytes);
+                    let mut bmp = Vec::with_capacity(54 + bytes);
+                    bmp.extend_from_slice(b"BM");
+                    bmp.extend_from_slice(&((54 + bytes) as u32).to_le_bytes());
+                    bmp.extend_from_slice(&0u32.to_le_bytes());
+                    bmp.extend_from_slice(&54u32.to_le_bytes());
+                    bmp.extend_from_slice(&40u32.to_le_bytes());
+                    bmp.extend_from_slice(&(ew as i32).to_le_bytes());
+                    bmp.extend_from_slice(&(-(eh as i32)).to_le_bytes());
+                    bmp.extend_from_slice(&1u16.to_le_bytes());
+                    bmp.extend_from_slice(&32u16.to_le_bytes());
+                    bmp.extend_from_slice(&[0u8; 24]);
+                    bmp.extend_from_slice(px);
+                    self.device.unmap_memory(self.staging_mem);
+                    let dir = dump_dir.unwrap_or_default();
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::fs::write(format!("{dir}/vk{n:05}.bmp"), bmp);
+                }
+            }
             true
         }
+    }
+
+    /// Pipeline for a generic draw: pass-through vertex shader + the translated pixel shader.
+    /// Failures are cached as a null pipeline (the draw is then skipped).
+    unsafe fn ensure_gen_pipeline(&mut self, gd: &GenDraw) -> vk::Pipeline {
+        if let Some(&p) = self.gen_pipes.get(&gd.key) {
+            return p;
+        }
+        let p = self.create_gen_pipeline(gd).unwrap_or_else(|e| {
+            eprintln!("[orbis] Vulkan: generic pipeline for ps {:#x}: {e}", gd.key.0);
+            vk::Pipeline::null()
+        });
+        self.gen_pipes.insert(gd.key, p);
+        p
+    }
+
+    unsafe fn create_gen_pipeline(&mut self, gd: &GenDraw) -> Result<vk::Pipeline, String> {
+        if self.gen_layout == vk::PipelineLayout::null() {
+            let dsls = [self.blit_dset_layout];
+            let pcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::FRAGMENT, offset: 0, size: 256 }];
+            self.gen_layout = self
+                .device
+                .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&dsls).push_constant_ranges(&pcr), None)
+                .map_err(|e| format!("layout: {e}"))?;
+        }
+        if self.gen_vs == vk::ShaderModule::null() {
+            let code = crate::rdna::ps::passthrough_vs();
+            self.gen_vs = self
+                .device
+                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)
+                .map_err(|e| format!("vs: {e}"))?;
+        }
+        let fs_mod = self
+            .device
+            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&gd.spirv), None)
+            .map_err(|e| format!("fs: {e}"))?;
+        let entry = c"main";
+        let stages = [
+            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(self.gen_vs).name(entry),
+            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fs_mod).name(entry),
+        ];
+        let vbind = [vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: std::mem::size_of::<GVertex>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }];
+        let vattr: Vec<vk::VertexInputAttributeDescription> = (0..9u32)
+            .map(|k| vk::VertexInputAttributeDescription { location: k, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: k * 16 })
+            .collect();
+        let vi = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&vbind)
+            .vertex_attribute_descriptions(&vattr);
+        let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+        let rs = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .line_width(1.0);
+        let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        // CB_BLEND0_CONTROL → Vulkan blend state.
+        let bc = gd.blend;
+        let fac = |f: u32| match f {
+            0 => vk::BlendFactor::ZERO,
+            1 => vk::BlendFactor::ONE,
+            2 => vk::BlendFactor::SRC_COLOR,
+            3 => vk::BlendFactor::ONE_MINUS_SRC_COLOR,
+            4 => vk::BlendFactor::SRC_ALPHA,
+            5 => vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            6 => vk::BlendFactor::DST_ALPHA,
+            7 => vk::BlendFactor::ONE_MINUS_DST_ALPHA,
+            8 => vk::BlendFactor::DST_COLOR,
+            9 => vk::BlendFactor::ONE_MINUS_DST_COLOR,
+            10 => vk::BlendFactor::SRC_ALPHA_SATURATE,
+            _ => vk::BlendFactor::ONE,
+        };
+        let op = |f: u32| match f {
+            1 => vk::BlendOp::SUBTRACT,
+            2 => vk::BlendOp::MIN,
+            3 => vk::BlendOp::MAX,
+            4 => vk::BlendOp::REVERSE_SUBTRACT,
+            _ => vk::BlendOp::ADD,
+        };
+        let enable = bc & (1 << 30) != 0;
+        let separate = bc & (1 << 29) != 0;
+        let (cs, cf, cd) = (bc & 0x1F, (bc >> 5) & 7, (bc >> 8) & 0x1F);
+        let (a_s, a_f, a_d) = if separate { ((bc >> 16) & 0x1F, (bc >> 21) & 7, (bc >> 24) & 0x1F) } else { (cs, cf, cd) };
+        let cba = [vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(enable)
+            .src_color_blend_factor(fac(cs))
+            .dst_color_blend_factor(fac(cd))
+            .color_blend_op(op(cf))
+            .src_alpha_blend_factor(fac(a_s))
+            .dst_alpha_blend_factor(fac(a_d))
+            .alpha_blend_op(op(a_f))
+            .color_write_mask(vk::ColorComponentFlags::from_raw(gd.wmask & 0xF))];
+        let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&cba);
+        let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let ds = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+        let gp_ci = [vk::GraphicsPipelineCreateInfo::default()
+            .stages(&stages)
+            .vertex_input_state(&vi)
+            .input_assembly_state(&ia)
+            .viewport_state(&vp)
+            .rasterization_state(&rs)
+            .multisample_state(&ms)
+            .color_blend_state(&cb)
+            .dynamic_state(&ds)
+            .layout(self.gen_layout)
+            .render_pass(self.swap_rp)];
+        let r = self.device.create_graphics_pipelines(vk::PipelineCache::null(), &gp_ci, None).map_err(|(_, e)| format!("pipeline: {e}"));
+        self.device.destroy_shader_module(fs_mod, None);
+        Ok(r?[0])
     }
 
     unsafe fn create_quad_pipeline(&self, rp: vk::RenderPass, pl: vk::PipelineLayout) -> Result<vk::Pipeline, String> {

@@ -6,6 +6,7 @@
 
 mod ops;
 pub mod interp;
+pub mod ps;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fmt {
