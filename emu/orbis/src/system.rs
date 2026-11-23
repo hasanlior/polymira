@@ -351,6 +351,11 @@ pub extern "sysv64" fn audio2_pace() -> i32 {
     0
 }
 
+pub extern "sysv64" fn hide_splash_screen() -> i32 {
+    crate::video::hide_os_splash();
+    0
+}
+
 pub fn functions() -> Vec<(&'static str, usize)> {
     vec![
         ("sceSystemServiceReceiveEvent", system_receive_event as *const () as usize),
@@ -370,7 +375,7 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceUserServiceInitialize", ok as *const () as usize),
         ("sceUserServiceInitialize2", ok as *const () as usize),
         ("sceSystemServiceParamGetInt", param_get_int as *const () as usize),
-        ("sceSystemServiceHideSplashScreen", ok as *const () as usize),
+        ("sceSystemServiceHideSplashScreen", hide_splash_screen as *const () as usize),
         ("sceRandomGetRandomNumber", random as *const () as usize),
         ("sceKernelReleaseDirectMemory", ok as *const () as usize),
         ("sceKernelCheckedReleaseDirectMemory", ok as *const () as usize),

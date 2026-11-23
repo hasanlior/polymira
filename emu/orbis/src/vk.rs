@@ -1144,17 +1144,6 @@ impl VkRenderer {
                 self.upload_tex = Some(VkTarget { image: img, memory: mem, view, width, height });
             }
             let tex_img = self.upload_tex.as_ref().unwrap().image;
-            let tex_view = self.upload_tex.as_ref().unwrap().view;
-            let img_info = [vk::DescriptorImageInfo::default()
-                .sampler(self.sampler)
-                .image_view(tex_view)
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-            let write = [vk::WriteDescriptorSet::default()
-                .dst_set(self.desc_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&img_info)];
-            self.device.update_descriptor_sets(&write, &[]);
 
             let Ok((img_idx, _)) = self.swapchain_loader.acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null()) else {
                 return false;

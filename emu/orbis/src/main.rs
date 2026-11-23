@@ -135,7 +135,9 @@ fn main() -> ExitCode {
             }
             eprintln!("[orbis] {} ({}), {} relocations by type: {:?}", args[1], exe.container, kinds.values().sum::<usize>(), kinds);
             let path = std::path::Path::new(&args[1]);
-            *kernel::GAME_DIR.lock().unwrap() = path.parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+            let game_dir = path.parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+            *kernel::GAME_DIR.lock().unwrap() = game_dir.clone();
+            video::show_os_splash(&game_dir);
             loader::install_crash_report();
             let loaded = loader::load_with_modules(exe, Some(path))?;
             eprintln!("[orbis] loaded at {:p} with {} game modules; {} imports bound, {} stubbed; starting at entry {:#x}", loaded.base, loaded.modules.len(), loaded.bound, loaded.stubbed, loaded.entry - loaded.base as u64);

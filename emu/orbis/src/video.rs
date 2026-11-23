@@ -4,7 +4,7 @@
 //! BMP file there (for testing without a visible window).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -22,10 +22,62 @@ static FLIPS: AtomicU64 = AtomicU64::new(0);
 static LAST_ARG: AtomicU64 = AtomicU64::new(0);
 static CURRENT: AtomicU64 = AtomicU64::new(0);
 static CLEAR_RGBA: Mutex<[f32; 4]> = Mutex::new([0.12, 0.12, 0.12, 1.0]);
+static SPLASH_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SPLASH_IMG: Mutex<Option<(Vec<u32>, u32, u32)>> = Mutex::new(None);
 
 pub fn set_clear_color(rgba: [f32; 4]) {
     if let Ok(mut c) = CLEAR_RGBA.lock() {
         *c = rgba;
+    }
+}
+
+/// POLYMIRA OS Splash Screen: loads `<game_dir>/sce_sys/pic0.png` (like PS5 OS boot splash)
+/// and displays it immediately on Vulkan until `sceSystemServiceHideSplashScreen` + first game draw.
+pub fn show_os_splash(game_dir: &str) {
+    if std::env::var_os("ORBIS_HIDDEN").is_some() || std::env::var_os("ORBIS_HEADLESS").is_some() {
+        return;
+    }
+    let candidates = [
+        format!("{game_dir}/sce_sys/pic0.png"),
+        format!("{game_dir}/sce_sys/pic1.png"),
+        format!("{game_dir}/sce_sys/icon0.png"),
+    ];
+    for p in &candidates {
+        let Ok(file) = std::fs::File::open(p) else { continue };
+        let mut dec = png::Decoder::new(std::io::BufReader::new(file));
+        dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let Ok(mut reader) = dec.read_info() else { continue };
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let Ok(info) = reader.next_frame(&mut buf) else { continue };
+        let (w, h) = (info.width, info.height);
+        let mut bgra = Vec::with_capacity((w * h) as usize);
+        match info.color_type {
+            png::ColorType::Rgba => {
+                for ch in buf[..info.buffer_size()].chunks_exact(4) {
+                    bgra.push(u32::from_le_bytes([ch[2], ch[1], ch[0], ch[3]]));
+                }
+            }
+            png::ColorType::Rgb => {
+                for ch in buf[..info.buffer_size()].chunks_exact(3) {
+                    bgra.push(u32::from_le_bytes([ch[2], ch[1], ch[0], 0xFF]));
+                }
+            }
+            _ => continue,
+        }
+        if bgra.len() == (w * h) as usize {
+            eprintln!("[orbis] POLYMIRA OS splash: loaded {p} ({w}x{h})");
+            *FRAME.lock().unwrap() = (bgra.clone(), w, h);
+            *SPLASH_IMG.lock().unwrap() = Some((bgra, w, h));
+            SPLASH_ACTIVE.store(true, Ordering::SeqCst);
+            start_window();
+            break;
+        }
+    }
+}
+
+pub fn hide_os_splash() {
+    if SPLASH_ACTIVE.swap(false, Ordering::SeqCst) {
+        eprintln!("[orbis] POLYMIRA OS splash: hidden by game (sceSystemServiceHideSplashScreen)");
     }
 }
 
@@ -206,9 +258,19 @@ fn present(buf: &Buffer, n: u64) {
                 ).encode_utf16().collect();
                 windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, title.as_ptr());
             }
-            let clear = CLEAR_RGBA.lock().map(|c| *c).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+            let clear = CLEAR_RGBA.lock().map(|c| *c).unwrap_or([0.12, 0.12, 0.12, 1.0]);
+            if has_draws {
+                SPLASH_ACTIVE.store(false, Ordering::SeqCst);
+            }
             let presented_vk = if has_draws {
                 crate::vk::with_renderer(|r| r.present_indexed_draws(clear, &verts, &idxs, &batches)).unwrap_or(false)
+            } else if SPLASH_ACTIVE.load(Ordering::SeqCst) {
+                let sp = SPLASH_IMG.lock().unwrap();
+                if let Some((ref px, sw, sh)) = *sp {
+                    crate::vk::with_renderer(|r| r.upload_and_present_rgba(px, sw, sh)).unwrap_or(false)
+                } else {
+                    crate::vk::with_renderer(|r| r.present_target(buf.addr, clear)).unwrap_or(false)
+                }
             } else if has_pixels {
                 let frame = FRAME.lock().unwrap();
                 crate::vk::with_renderer(|r| r.upload_and_present_rgba(&frame.0, frame.1, frame.2)).unwrap_or(false)
@@ -309,13 +371,18 @@ fn start_window() {
                 std::ptr::null(),
             );
             WINDOW.store(hwnd as u64, Ordering::SeqCst);
-            if std::env::var_os("ORBIS_HIDDEN").is_none() {
+            if std::env::var_os("ORBIS_HIDDEN").is_none() && std::env::var_os("ORBIS_HEADLESS").is_none() {
                 // First ShowWindow obeys STARTUPINFO.wShowWindow (which may be SW_HIDE);
                 // calling ShowWindow twice guarantees the window becomes visible.
                 ShowWindow(hwnd, SW_SHOW);
                 ShowWindow(hwnd, SW_SHOWNORMAL);
                 SetForegroundWindow(hwnd);
                 crate::vk::init_window(hwnd as *mut c_void, inst as *mut c_void, 1280, 720);
+                if SPLASH_ACTIVE.load(Ordering::SeqCst) {
+                    if let Some((ref px, sw, sh)) = *SPLASH_IMG.lock().unwrap() {
+                        let _ = crate::vk::with_renderer(|r| r.upload_and_present_rgba(px, sw, sh));
+                    }
+                }
             }
             let mut msg: MSG = std::mem::zeroed();
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
