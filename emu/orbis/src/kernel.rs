@@ -95,7 +95,7 @@ fn commit_range(addr: usize, len: usize) -> bool {
         let ok = unsafe {
             if mbi.State == MEM_FREE {
                 // Reservations must start on 64 KB boundaries.
-                let base = at & !0xFFFF;
+                let base = (at & !0xFFFF).max(mbi.BaseAddress as usize);
                 !VirtualAlloc(base as *const c_void, region_end - base, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE).is_null()
                     || !VirtualAlloc(at as *const c_void, n, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE).is_null()
             } else {
@@ -160,6 +160,7 @@ pub extern "sysv64" fn map_flexible(addr: *mut usize, len: usize, prot: i32, fla
         eprintln!("[orbis] map flexible({:#x}, {len:#x}, prot {prot:#x}, flags {flags:#x}) -> {p:#x}", unsafe { *addr });
     }
     if p == 0 {
+        eprintln!("[orbis] ENOMEM in map_flexible(want={:#x}, len={len:#x}, flags={flags:#x})", unsafe { *addr });
         return SCE_KERNEL_ERROR_ENOMEM;
     }
     unsafe { *addr = p };
@@ -214,7 +215,7 @@ pub extern "sysv64" fn mprotect(addr: usize, len: usize, prot: i32) -> i32 {
 
 /// Direct memory: one counter, the "physical" offset handed back to the game.
 static DIRECT: Mutex<u64> = Mutex::new(0);
-const DIRECT_SIZE: u64 = 13 << 30;
+const DIRECT_SIZE: u64 = 16 << 30;
 
 /// sceKernelAllocateDirectMemory(start, end, len, align, type, out_offset)
 pub extern "sysv64" fn allocate_direct(_start: i64, _end: i64, len: u64, align: u64, _kind: i32, out: *mut u64) -> i32 {
@@ -222,6 +223,7 @@ pub extern "sysv64" fn allocate_direct(_start: i64, _end: i64, len: u64, align: 
     let a = align.max(0x10000);
     let off = (*d + a - 1) / a * a;
     if off + len > DIRECT_SIZE {
+        eprintln!("[orbis] ENOMEM in allocate_direct(off={off:#x}, len={len:#x}, max={DIRECT_SIZE:#x})");
         return SCE_KERNEL_ERROR_ENOMEM;
     }
     *d = off + len;
@@ -249,7 +251,7 @@ pub extern "sysv64" fn direct_memory_size() -> u64 {
 /// sceKernelAvailableFlexibleMemorySize(size_t* out)
 pub extern "sysv64" fn available_flexible(out: *mut u64) -> i32 {
     if !out.is_null() {
-        unsafe { *out = 2 << 30 }; // 2 GiB flexible RAM for world generation
+        unsafe { *out = 8 << 30 }; // 8 GiB PS5-class flexible RAM for 3D world chunks & structures
     }
     0
 }
@@ -281,6 +283,7 @@ pub extern "sysv64" fn reserve_virtual_range(addr: *mut usize, len: usize, _flag
         eprintln!("[orbis] reserve({want:#x}, {len:#x}, align {align:#x}) -> {p:#x}");
     }
     if p == 0 {
+        eprintln!("[orbis] ENOMEM in reserve_virtual_range(want={want:#x}, len={len:#x}, align={align:#x})");
         return SCE_KERNEL_ERROR_ENOMEM;
     }
     unsafe { *addr = if want == 0 { (p + a - 1) / a * a } else { p } };
