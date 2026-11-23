@@ -152,6 +152,46 @@ fn emulate_sse4a(code: &[u8], xmm: &mut [(u64, u64); 16]) -> Option<usize> {
     }
 }
 
+/// Demand-commits a page inside an already-reserved (`MEM_RESERVE`) game virtual arena
+/// (e.g. ranges reserved by `sceKernelReserveVirtualRange` or decommitted by `munmap`).
+/// Never commits `MEM_FREE`, low addresses (< 4 GiB), or the current thread's stack.
+#[cfg(windows)]
+unsafe fn try_demand_commit_reserved(fault_addr: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{
+        VirtualAlloc, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE,
+    };
+    if fault_addr < 0x1_0000_0000 {
+        return false;
+    }
+    let (mut low, mut high) = (0usize, 0usize);
+    windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits(&mut low, &mut high);
+    if fault_addr >= low && fault_addr < high {
+        return false;
+    }
+    let mut mbi = std::mem::MaybeUninit::<MEMORY_BASIC_INFORMATION>::zeroed();
+    if VirtualQuery(
+        fault_addr as *const std::ffi::c_void,
+        mbi.as_mut_ptr(),
+        std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+    ) == 0
+    {
+        return false;
+    }
+    let mbi = mbi.assume_init();
+    if mbi.State != MEM_RESERVE {
+        return false;
+    }
+    let page = fault_addr & !0xFFFF;
+    let base = page.max(mbi.BaseAddress as usize);
+    let region_end = (mbi.BaseAddress as usize).saturating_add(mbi.RegionSize);
+    let len = region_end.saturating_sub(base).min(0x10000);
+    if len == 0 {
+        return false;
+    }
+    !VirtualAlloc(base as *const std::ffi::c_void, len, MEM_COMMIT, PAGE_EXECUTE_READWRITE).is_null()
+}
+
 /// Reports where the game stopped (address, offset in the game, instruction bytes, the last
 /// system calls) and ends the process, instead of a silent crash.
 #[cfg(windows)]
@@ -159,6 +199,13 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
     let rec = &*(*info).ExceptionRecord;
     let ctx = &mut *(*info).ContextRecord;
     let code = rec.ExceptionCode as u32;
+    // Demand-commit reserved (MEM_RESERVE) game arena pages on read/write AV (e.g. mimalloc/libc arenas).
+    if code == 0xC000_0005 && rec.NumberParameters >= 2 && rec.ExceptionInformation[0] != 8 {
+        let fault_addr = rec.ExceptionInformation[1];
+        if try_demand_commit_reserved(fault_addr) {
+            return -1; // EXCEPTION_CONTINUE_EXECUTION
+        }
+    }
     // Emulate AMD SSE4a (INSERTQ / EXTRQ) on Intel CPUs transparently.
     if code == 0xC000_001D {
         let rip = ctx.Rip as usize;
@@ -651,5 +698,25 @@ mod tests {
         xmm[1] = (0, 0); // len=0 (64), idx=0
         assert_eq!(emulate_sse4a(&[0x66, 0x0F, 0x79, 0xC1], &mut xmm), Some(4));
         assert_eq!(xmm[0].0, 0x0123_4567_89AB_CDEF);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn demand_commit_commits_reserved_high_page_and_rejects_null_or_stack() {
+        use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS};
+        unsafe {
+            assert!(!try_demand_commit_reserved(0));
+            assert!(!try_demand_commit_reserved(0x1000));
+            let stack_var = 0u64;
+            assert!(!try_demand_commit_reserved(&stack_var as *const u64 as usize));
+
+            let p = VirtualAlloc(0x95_0000_0000usize as *const std::ffi::c_void, 0x20000, MEM_RESERVE, PAGE_NOACCESS);
+            if !p.is_null() {
+                assert!(try_demand_commit_reserved(p as usize + 0x10));
+                *(p.add(0x10) as *mut u64) = 0x1234_5678_9ABC_DEF0;
+                assert_eq!(*(p.add(0x10) as *const u64), 0x1234_5678_9ABC_DEF0);
+                VirtualFree(p, 0, MEM_RELEASE);
+            }
+        }
     }
 }
