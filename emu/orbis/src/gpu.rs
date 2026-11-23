@@ -3,18 +3,6 @@
 //! For now this accepts the game's set-up calls so it can continue; command buffers are not
 //! executed yet. The next stage is translating AGC command buffers and shaders to Vulkan.
 
-/// Register-defaults table the game searches by hash: entries at +0x30, count at +0x38.
-#[repr(C)]
-struct RegisterDefaults {
-    header: [u64; 6],
-    entries: usize,
-    count: u32,
-    pad: u32,
-}
-
-static mut DEFAULTS: RegisterDefaults = RegisterDefaults { header: [0; 6], entries: 0, count: 0, pad: 0 };
-static mut DEFAULT_ENTRY: [u32; 3] = [0; 3];
-
 /// sceAgcInit(state*, version): { version, 0 }.
 pub extern "sysv64" fn init(state: *mut u32, version: u32) -> i32 {
     eprintln!("[orbis] GPU: AGC initialised (version {version:#x})");
@@ -27,13 +15,84 @@ pub extern "sysv64" fn init(state: *mut u32, version: u32) -> i32 {
     0
 }
 
-/// sceAgcGetRegisterDefaults2(version): an empty table (no overrides).
-pub extern "sysv64" fn register_defaults(_version: u32) -> usize {
-    unsafe {
-        let d = std::ptr::addr_of_mut!(DEFAULTS);
-        (*d).entries = std::ptr::addr_of!(DEFAULT_ENTRY) as usize;
-        d as usize
+/// Register defaults the driver hands to the game's (statically linked) AGC library. The
+/// library looks up each register group (render target, blend, viewport, ...) by a type hash
+/// and takes the register offsets from here; without them every offset stays 0xFFFFFFFF.
+///
+/// Data file (`agc_regdefs_v12.bin`): "RDEF", then for the public and the internal set nine
+/// u32 arrays (count + values): registers 0..3 (offset/value pairs) each followed by its
+/// group-start indices (pair index of each group), then the types (hash, id, count) triples.
+///
+/// Blob layout: +0x00..0x18 pointers to the four group pointer tables (0 when empty),
+/// +0x20..0x2C pair counts, +0x30 pointer to the types, +0x38 number of types.
+fn build_register_defaults(internal: bool) -> usize {
+    static DATA: &[u8] = include_bytes!("agc_regdefs_v12.bin");
+    let mut pos = 4usize;
+    let mut read_set = || -> Vec<Vec<u32>> {
+        (0..9)
+            .map(|_| {
+                let n = u32::from_le_bytes(DATA[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4;
+                let v = (0..n).map(|k| u32::from_le_bytes(DATA[pos + k * 4..pos + k * 4 + 4].try_into().unwrap())).collect();
+                pos += n * 4;
+                v
+            })
+            .collect()
+    };
+    let public = read_set();
+    let internal_set = read_set();
+    let set = if internal { internal_set } else { public };
+    let (regs, starts): (Vec<&Vec<u32>>, Vec<&Vec<u32>>) = ((0..4).map(|t| &set[t * 2]).collect(), (0..4).map(|t| &set[t * 2 + 1]).collect());
+    let types = &set[8];
+    let align8 = |x: usize| (x + 7) & !7;
+    let mut table_off = [0usize; 4];
+    let mut at = 0x40;
+    for t in 0..4 {
+        table_off[t] = at;
+        at += starts[t].len() * 8;
     }
+    let mut regs_off = [0usize; 4];
+    at = align8(at);
+    for t in 0..4 {
+        regs_off[t] = at;
+        at += regs[t].len() * 4;
+    }
+    let types_off = (at + 3) & !3;
+    let len = types_off + types.len() * 4;
+    let blob: &'static mut [u8] = Box::leak(vec![0u8; len + 16].into_boxed_slice());
+    let base = blob.as_ptr() as usize;
+    let put64 = |b: &mut [u8], o: usize, v: u64| b[o..o + 8].copy_from_slice(&v.to_le_bytes());
+    let put32 = |b: &mut [u8], o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    for t in 0..4 {
+        if !starts[t].is_empty() {
+            put64(blob, t * 8, (base + table_off[t]) as u64);
+        }
+        put32(blob, 0x20 + t * 4, (regs[t].len() / 2) as u32);
+        for (k, &first_pair) in starts[t].iter().enumerate() {
+            put64(blob, table_off[t] + k * 8, (base + regs_off[t] + first_pair as usize * 8) as u64);
+        }
+        for (k, &v) in regs[t].iter().enumerate() {
+            put32(blob, regs_off[t] + k * 4, v);
+        }
+    }
+    put64(blob, 0x30, (base + types_off) as u64);
+    put32(blob, 0x38, (types.len() / 3) as u32);
+    for (k, &v) in types.iter().enumerate() {
+        put32(blob, types_off + k * 4, v);
+    }
+    base
+}
+
+/// sceAgcGetRegisterDefaults2(version)
+pub extern "sysv64" fn register_defaults(_version: u32) -> usize {
+    static P: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *P.get_or_init(|| build_register_defaults(false))
+}
+
+/// sceAgcGetRegisterDefaults2Internal(version)
+pub extern "sysv64" fn register_defaults_internal(_version: u32) -> usize {
+    static P: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *P.get_or_init(|| build_register_defaults(true))
 }
 
 /// Shaders the game created: (header, code, type).
@@ -137,7 +196,7 @@ pub fn functions() -> Vec<(&'static str, usize)> {
     vec![
         ("#23LRUSvYu1M", init as *const () as usize),              // sceAgcInit
         ("#2JtWUUiYBXs", register_defaults as *const () as usize), // sceAgcGetRegisterDefaults2
-        ("#wRbq6ZjNop4", register_defaults as *const () as usize), // sceAgcGetRegisterDefaults2Internal
+        ("#wRbq6ZjNop4", register_defaults_internal as *const () as usize), // sceAgcGetRegisterDefaults2Internal
         ("#BfBDZGbti7A", zero as *const () as usize),              // sceAgcGetIsTrinityMode
         ("#f3dg2CSgRKY", create_shader as *const () as usize),     // sceAgcCreateShader
         ("#X-Nm5KLREeg", register_owner as *const () as usize),    // sceAgcDriverRegisterOwner

@@ -768,3 +768,77 @@ pub fn run_scalar(code: &[u32], lane: &mut Lane, ok: MemCheck) -> Result<ScalarI
     }
     Ok(info)
 }
+
+/// Runs a pixel shader for one pixel on the CPU and records the instructions it executes
+/// (`pcs`, in order) together with the scalar slot values and texture descriptors along that
+/// path. `attrs` are the interpolated attributes; texture reads return zero.
+pub fn trace_ps(code: &[u32], lane: &mut Lane, attrs: &[[f32; 4]; 8], ok: MemCheck) -> Result<(Vec<u32>, ScalarInfo), Error> {
+    let insts = decode_shader(code);
+    let by_pc: std::collections::HashMap<u32, usize> = insts.iter().enumerate().map(|(i, x)| (x.pc, i)).collect();
+    let end_pc = insts.last().map(|x| x.pc).unwrap_or(0);
+    let mut info = ScalarInfo::default();
+    let mut pcs = vec![];
+    let mut i = 0usize;
+    let mut steps = 0u32;
+    while i < insts.len() {
+        steps += 1;
+        if steps > 100_000 {
+            return Err(Error::Runaway);
+        }
+        let inst = &insts[i];
+        let next_pc = inst.pc + inst.words.len() as u32 * 4;
+        pcs.push(inst.pc);
+        match inst.fmt {
+            Fmt::Vop1 | Fmt::Vop2 | Fmt::Vopc | Fmt::Vop3 | Fmt::Vop3p => {
+                for c in scalar_slots(inst) {
+                    info.slots.push(lane.src(c, inst.literal));
+                }
+            }
+            Fmt::Vintrp => {
+                let w0 = inst.w0();
+                let vdst = ((w0 >> 18) & 0xFF) as usize;
+                let attr = ((w0 >> 10) & 0x3F) as usize;
+                let chan = ((w0 >> 8) & 3) as usize;
+                lane.v[vdst] = attrs.get(attr).map(|a| a[chan]).unwrap_or(0.0).to_bits();
+                i += 1;
+                continue;
+            }
+            Fmt::Mimg => {
+                let w0 = inst.w0();
+                let w1 = inst.w1();
+                let srsrc = (((w1 >> 16) & 0x1F) * 4) as usize;
+                let ssamp = (((w1 >> 21) & 0x1F) * 4) as usize;
+                let mut t = [0u32; 8];
+                t.copy_from_slice(&lane.s[srsrc..srsrc + 8]);
+                let mut sm = [0u32; 4];
+                sm.copy_from_slice(&lane.s[ssamp..ssamp + 4]);
+                info.images.push((t, sm));
+                let vdata = ((w1 >> 8) & 0xFF) as usize;
+                let n = ((w0 >> 8) & 0xF).count_ones() as usize;
+                for k in 0..n {
+                    lane.v[vdata + k] = 0;
+                }
+                i += 1;
+                continue;
+            }
+            Fmt::Exp | Fmt::Mubuf | Fmt::Mtbuf | Fmt::Ds | Fmt::Flat | Fmt::Global | Fmt::Scratch => {
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        match step(inst, lane, ok)? {
+            Flow::Next => i += 1,
+            Flow::End => break,
+            Flow::Branch(rel) => {
+                let target = (next_pc as i64 + rel as i64 * 4) as u32;
+                if target >= end_pc {
+                    i += 1; // "all pixels discarded" shortcut: the translated path keeps going
+                } else {
+                    i = *by_pc.get(&target).ok_or(Error::Unsupported("branch target", target))?;
+                }
+            }
+        }
+    }
+    Ok((pcs, info))
+}

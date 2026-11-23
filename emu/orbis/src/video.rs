@@ -279,7 +279,7 @@ fn present(buf: &Buffer, n: u64) {
                 SPLASH_ACTIVE.store(false, Ordering::SeqCst);
             }
             let presented_vk = if has_draws {
-                crate::vk::with_renderer(|r| r.present_indexed_draws(clear, &verts, &idxs, &batches, &gverts, &gens)).unwrap_or(false)
+                crate::vk::with_renderer(|r| r.present_frame(clear, &verts, &idxs, &batches, &gverts, &gens, (buf.addr, buf.width, buf.height))).unwrap_or(false)
             } else if SPLASH_ACTIVE.load(Ordering::SeqCst) {
                 let sp = SPLASH_IMG.lock().unwrap();
                 if let Some((ref px, sw, sh)) = *sp {

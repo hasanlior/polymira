@@ -49,6 +49,58 @@ pub struct Translated {
     pub spirv: Vec<u32>,
     pub slots: usize,
     pub images: usize,
+    /// The texture is a cube map (bind it as a 6-layer array).
+    pub cube: bool,
+}
+
+/// AMD cube-map helpers: which face a direction (x, y, z) hits, the face coordinates and
+/// twice the major axis. The pixel shader divides by |ma| itself.
+fn cube_op(t: &mut T, n: &str, x: Word, y: Word, z: Word) -> Word {
+    let (tf, tb) = (t.t_f32, t.t_bool);
+    let ax = t.ext(tf, glsl::FABS, &[x]);
+    let ay = t.ext(tf, glsl::FABS, &[y]);
+    let az = t.ext(tf, glsl::FABS, &[z]);
+    let zero = t.cf(0.0);
+    let zm1 = t.b.f_ord_greater_than_equal(tb, None, az, ax).unwrap();
+    let zm2 = t.b.f_ord_greater_than_equal(tb, None, az, ay).unwrap();
+    let zmaj = t.b.logical_and(tb, None, zm1, zm2).unwrap();
+    let ymaj = t.b.f_ord_greater_than_equal(tb, None, ay, ax).unwrap();
+    let xn = t.b.f_ord_less_than(tb, None, x, zero).unwrap();
+    let yn = t.b.f_ord_less_than(tb, None, y, zero).unwrap();
+    let zneg = t.b.f_ord_less_than(tb, None, z, zero).unwrap();
+    let sel = |t: &mut T, c: Word, a: Word, b: Word| t.b.select(tf, None, c, a, b).unwrap();
+    let neg = |t: &mut T, v: Word| t.b.f_negate(tf, None, v).unwrap();
+    match n {
+        "v_cubeid_f32" => {
+            let (c0, c1, c2, c3, c4, c5) = (t.cf(0.0), t.cf(1.0), t.cf(2.0), t.cf(3.0), t.cf(4.0), t.cf(5.0));
+            let fz = sel(t, zneg, c5, c4);
+            let fy = sel(t, yn, c3, c2);
+            let fx = sel(t, xn, c1, c0);
+            let r = sel(t, ymaj, fy, fx);
+            sel(t, zmaj, fz, r)
+        }
+        "v_cubesc_f32" => {
+            let nx = neg(t, x);
+            let nz = neg(t, z);
+            let sz = sel(t, zneg, nx, x);
+            let sx = sel(t, xn, z, nz);
+            let r = sel(t, ymaj, x, sx);
+            sel(t, zmaj, sz, r)
+        }
+        "v_cubetc_f32" => {
+            let ny = neg(t, y);
+            let nz = neg(t, z);
+            let ty = sel(t, yn, nz, z);
+            let r = sel(t, ymaj, ty, ny);
+            sel(t, zmaj, ny, r)
+        }
+        _ => {
+            let two = t.cf(2.0);
+            let r = sel(t, ymaj, y, x);
+            let m = sel(t, zmaj, z, r);
+            t.b.f_mul(tf, None, m, two).unwrap()
+        }
+    }
 }
 
 struct T {
@@ -158,7 +210,32 @@ fn inline_const(code: u16) -> Option<u32> {
 
 /// Translates a pixel shader. `ps_input_addr` is SPI_PS_INPUT_ADDR (which VGPRs hold what).
 pub fn translate(code: &[u32], ps_input_addr: u32) -> Result<Translated, String> {
-    let insts = decode_shader(code);
+    translate_insts(decode_shader(code), ps_input_addr, false)
+}
+
+/// Translates one execution path of a shader with branches: `pcs` are the instructions a
+/// CPU run of one pixel executed, in order (`interp::trace_ps`). Branches whose outcome is the
+/// same for the whole draw (they test draw constants and flat attributes) disappear this way.
+pub fn translate_path(code: &[u32], ps_input_addr: u32, pcs: &[u32]) -> Result<Translated, String> {
+    let all = decode_shader(code);
+    let by_pc: HashMap<u32, &Inst> = all.iter().map(|i| (i.pc, i)).collect();
+    let mut insts = vec![];
+    for pc in pcs {
+        let i = by_pc.get(pc).ok_or("path pc")?;
+        if i.fmt == Fmt::Sopp && (i.name.starts_with("s_cbranch") || i.name == "s_branch") {
+            continue;
+        }
+        insts.push((*i).clone());
+    }
+    if insts.last().map(|i| i.fmt == Fmt::Sopp && i.op == 1) != Some(true) {
+        if let Some(end) = all.last() {
+            insts.push(end.clone());
+        }
+    }
+    translate_insts(insts, ps_input_addr, true)
+}
+
+fn translate_insts(insts: Vec<Inst>, ps_input_addr: u32, path: bool) -> Result<Translated, String> {
     // Branches are only allowed when they skip to the end of the program ("every pixel was
     // discarded" shortcuts); per-pixel discard is done with OpKill instead.
     let end_pc = insts.last().map(|i| i.pc).unwrap_or(0);
@@ -166,7 +243,7 @@ pub fn translate(code: &[u32], ps_input_addr: u32) -> Result<Translated, String>
         if i.fmt == Fmt::Sopp && (i.name.starts_with("s_cbranch") || i.name == "s_branch") {
             let rel = (i.w0() & 0xFFFF) as u16 as i16 as i64;
             let target = i.pc as i64 + 4 + rel * 4;
-            if target < end_pc as i64 {
+            if target < end_pc as i64 && !path {
                 return Err("control flow".into());
             }
         }
@@ -213,7 +290,11 @@ pub fn translate(code: &[u32], ps_input_addr: u32) -> Result<Translated, String>
     let out_color = b.variable(p_out_v4, None, spirv::StorageClass::Output, None);
     b.decorate(out_color, spirv::Decoration::Location, [Operand::LiteralBit32(0)]);
 
-    let t_img = b.type_image(t_f32, spirv::Dim::Dim2D, 0, 0, 0, 1, spirv::ImageFormat::Unknown, None);
+    // A cube map is sampled as a 6-layer 2D array: the shader computes face and face
+    // coordinates itself (v_cubeid / v_cubesc / v_cubetc).
+    let cube = insts.iter().any(|i| i.fmt == Fmt::Mimg && ((i.w0() >> 3) & 7) == 3);
+    let t_v3f = b.type_vector(t_f32, 3);
+    let t_img = b.type_image(t_f32, spirv::Dim::Dim2D, 0, if cube { 1 } else { 0 }, 0, 1, spirv::ImageFormat::Unknown, None);
     let t_sampled = b.type_sampled_image(t_img);
     let p_tex = b.type_pointer(None, spirv::StorageClass::UniformConstant, t_sampled);
     let texture = b.variable(p_tex, None, spirv::StorageClass::UniformConstant, None);
@@ -322,7 +403,7 @@ pub fn translate(code: &[u32], ps_input_addr: u32) -> Result<Translated, String>
                     t.b.begin_block(Some(merge)).unwrap();
                 } else if d == 126 || d == 106 {
                     // other writes to exec/vcc would change which pixels run
-                    if !(inst.name == "s_wqm_b64") {
+                    if !(inst.name == "s_wqm_b64" || (path && d == 106)) {
                         return Err(format!("{} to exec/vcc", inst.name));
                     }
                 }
@@ -368,10 +449,19 @@ pub fn translate(code: &[u32], ps_input_addr: u32) -> Result<Translated, String>
                 let xx = t.f(xx);
                 let yy = t.get_v(cy);
                 let yy = t.f(yy);
-                let coord = t.b.composite_construct(t_v2f, None, [xx, yy]).unwrap();
+                let coord = if cube {
+                    let one = t.cf(1.0);
+                    let u = t.b.f_sub(t_f32, None, xx, one).unwrap();
+                    let v = t.b.f_sub(t_f32, None, yy, one).unwrap();
+                    let face = t.get_v(cy + 1);
+                    let face = t.f(face);
+                    t.b.composite_construct(t_v3f, None, [u, v, face]).unwrap()
+                } else {
+                    t.b.composite_construct(t_v2f, None, [xx, yy]).unwrap()
+                };
                 let si = t.b.load(t.t_sampled, None, t.texture, None, []).unwrap();
                 let texel = if n == "image_sample_l" {
-                    let lod = t.get_v(vaddr + 2);
+                    let lod = t.get_v(cy + if cube { 2 } else { 1 });
                     let lod = t.f(lod);
                     t.b.image_sample_explicit_lod(t_v4f, None, si, coord, spirv::ImageOperands::LOD, [Operand::IdRef(lod)]).unwrap()
                 } else if n == "image_sample_lz" {
@@ -446,7 +536,7 @@ pub fn translate(code: &[u32], ps_input_addr: u32) -> Result<Translated, String>
     t.b.execution_mode(main, spirv::ExecutionMode::OriginUpperLeft, []);
     let module = t.b.module();
     use rspirv::binary::Assemble;
-    Ok(Translated { spirv: module.assemble(), slots: slot, images })
+    Ok(Translated { spirv: module.assemble(), slots: slot, images, cube })
 }
 
 /// Reads a vector-instruction source operand (raw 32-bit value).
@@ -690,6 +780,7 @@ fn vop(t: &mut T, inst: &Inst, base: usize, slots_here: &[u16]) -> Result<(), St
             let x = t.b.f_mul(tf, None, fa, tau).unwrap();
             fr!(t.ext(tf, if n == "v_sin_f32" { glsl::SIN } else { glsl::COS }, &[x]))
         }
+        "v_cubeid_f32" | "v_cubesc_f32" | "v_cubetc_f32" | "v_cubema_f32" => fr!(cube_op(t, n, fa, fb, fc)),
         "v_cvt_f32_i32" => fr!(t.b.convert_s_to_f(tf, None, a).unwrap()),
         "v_cvt_f32_u32" => fr!(t.b.convert_u_to_f(tf, None, a).unwrap()),
         "v_cvt_f32_f16" => fr!(t.half_lo(a)),

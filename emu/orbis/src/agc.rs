@@ -889,7 +889,10 @@ fn shader_words(addr: usize) -> Option<&'static [u32]> {
     None
 }
 
-type PsCache = HashMap<(usize, u32, u64), Option<std::sync::Arc<Vec<u32>>>>;
+type PsCache = HashMap<(usize, u32, u64), Option<(std::sync::Arc<Vec<u32>>, bool)>>;
+/// Shaders with real branches: translated per execution path (key: shader, path hash).
+static PATH_SHADERS: LazyLock<Mutex<std::collections::HashSet<usize>>> = LazyLock::new(|| Mutex::new(Default::default()));
+static PATH_CACHE: LazyLock<Mutex<PsCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static PS_CACHE: LazyLock<Mutex<PsCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static GEN_STATS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 
@@ -918,7 +921,11 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         cache
             .entry((ps_addr, input_addr, hash))
             .or_insert_with(|| match crate::rdna::ps::translate(ps_code, input_addr) {
-                Ok(t) => Some(std::sync::Arc::new(t.spirv)),
+                Ok(t) => Some((std::sync::Arc::new(t.spirv), t.cube)),
+                Err(e) if e == "control flow" => {
+                    PATH_SHADERS.lock().unwrap_or_else(|e| e.into_inner()).insert(ps_addr ^ hash as usize);
+                    None
+                }
                 Err(e) => {
                     eprintln!("[orbis] PS {ps_addr:#x}: not translated ({e})");
                     if let Ok(dir) = std::env::var("ORBIS_GEN_DUMP") {
@@ -931,59 +938,35 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             })
             .clone()
     };
-    let Some(tr) = tr else {
+    let path_mode = tr.is_none() && PATH_SHADERS.lock().unwrap_or_else(|e| e.into_inner()).contains(&(ps_addr ^ hash as usize));
+    if tr.is_none() && !path_mode {
         GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
         return false;
-    };
-    // Scalar pass of the pixel shader: push-constant slots and texture descriptors.
-    let mut lane = crate::rdna::interp::Lane::new();
-    for k in 0..32u32 {
-        lane.s[k as usize] = *gpu.sh.get(&(0x0C + k)).unwrap_or(&0);
     }
-    let Ok(info) = crate::rdna::interp::run_scalar(ps_code, &mut lane, mem_ok) else {
-        GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
-        return false;
-    };
-    let tex = info.images.first().map(|(t, _)| {
-        let addr = (((t[0] as u64) | (((t[1] & 0xFF) as u64) << 32)) << 8) as usize;
-        let w = ((t[1] >> 30) | ((t[2] & 0xFFF) << 2)) + 1;
-        let h = ((t[2] >> 14) & 0x3FFF) + 1;
-        let swiz = (t[3] >> 20) & 0x1F;
-        (addr, w, h, swiz)
-    });
-    if std::env::var_os("ORBIS_TEX_LOG").is_some() {
-        static SEEN: Mutex<Vec<usize>> = Mutex::new(Vec::new());
-        if let Some((t, _)) = info.images.first() {
-            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-            if !seen.contains(&(t[0] as usize)) {
-                seen.push(t[0] as usize);
-                eprintln!("[orbis] TEX ps={ps_addr:#x} fmt={} {tex:x?} T#={t:08x?}", (t[1] >> 20) & 0x1FF);
+    let mut ps_lane = crate::rdna::interp::Lane::new();
+    for k in 0..32u32 {
+        ps_lane.s[k as usize] = *gpu.sh.get(&(0x0C + k)).unwrap_or(&0);
+    }
+    // Branch-free shaders: scalar pass now. Shaders with branches: traced after the vertex
+    // shader has run (the path depends on the interpolated attributes).
+    let pre = if path_mode {
+        None
+    } else {
+        match crate::rdna::interp::run_scalar(ps_code, &mut ps_lane, mem_ok) {
+            Ok(info) => Some(info),
+            Err(_) => {
+                GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
+                return false;
             }
         }
-    }
-    // The final copy of the offscreen render target to the display: we draw straight to the
-    // swapchain, so its source texture is not in guest memory. Drop the draw.
-    if let Some((_, w, h, swiz)) = tex {
-        if w >= 1920 && h >= 1080 && swiz >= 24 {
-            GEN_STATS[3].fetch_add(1, Ordering::Relaxed);
-            return true;
-        }
-    }
-    let mut slots = [0u32; 64];
-    for (k, &v) in info.slots.iter().take(64).enumerate() {
-        slots[k] = v;
-    }
-    // Vertex shader per unique index.
+    };
+    // Vertex shader per unique index (before the pixel shader's path is known).
     let idxs: Vec<u16> = unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt) }.to_vec();
     let cntl: [u32; 8] = std::array::from_fn(|n| gpu.cx.get(&(0x191 + n as u32)).map(|v| v & 0x3F).unwrap_or(n as u32));
-    let (xs, xo) = (f32::from_bits(*gpu.cx.get(&0x10F).unwrap_or(&0)), f32::from_bits(*gpu.cx.get(&0x110).unwrap_or(&0)));
-    let (ys, yo) = (f32::from_bits(*gpu.cx.get(&0x111).unwrap_or(&0)), f32::from_bits(*gpu.cx.get(&0x112).unwrap_or(&0)));
-    let sx = if xo.abs() > 1.0 && xs.is_finite() { xs / xo } else { 1.0 };
-    let sy = if yo.abs() > 1.0 && ys.is_finite() { ys / yo } else { -1.0 };
-    let mut done: HashMap<u16, crate::vk::GVertex> = HashMap::new();
     let vs_ud: Vec<u32> = (0..24u32).map(|k| *gpu.sh.get(&(0x8C + k)).unwrap_or(&0)).collect();
+    let mut raw: HashMap<u16, ([f32; 4], [[f32; 4]; 8])> = HashMap::new();
     for &ix in &idxs {
-        if done.contains_key(&ix) {
+        if raw.contains_key(&ix) {
             continue;
         }
         let mut lane = crate::rdna::interp::Lane::new();
@@ -1007,12 +990,94 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 params[(e.target - 32) as usize] = e.value;
             }
         }
-        let mut gv = crate::vk::GVertex { pos: [p[0] * sx, p[1] * sy, p[2], p[3]], attr: [[0.0; 4]; 8] };
-        for n in 0..8 {
-            gv.attr[n] = params[cntl[n] as usize];
-        }
-        done.insert(ix, gv);
+        let attrs: [[f32; 4]; 8] = std::array::from_fn(|n| params[cntl[n] as usize]);
+        raw.insert(ix, (p, attrs));
     }
+    let (tr, cube, info) = match (tr, pre) {
+        (Some((tr, cube)), Some(info)) => (tr, cube, info),
+        _ => {
+            let attrs = raw[&idxs[0]].1;
+            let Ok((pcs, info)) = crate::rdna::interp::trace_ps(ps_code, &mut ps_lane, &attrs, mem_ok) else {
+                GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
+                return false;
+            };
+            let phash = pcs.iter().fold(hash, |h, &w| (h ^ w as u64).wrapping_mul(0x100_0000_01b3));
+            let got = PATH_CACHE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry((ps_addr, input_addr, phash))
+                .or_insert_with(|| match crate::rdna::ps::translate_path(ps_code, input_addr, &pcs) {
+                    Ok(t) => Some((std::sync::Arc::new(t.spirv), t.cube)),
+                    Err(e) => {
+                        eprintln!("[orbis] PS {ps_addr:#x}: path not translated ({e})");
+                        None
+                    }
+                })
+                .clone();
+            let Some((tr, cube)) = got else {
+                GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
+                return false;
+            };
+            (tr, cube, info)
+        }
+    };
+    let hash = hash ^ (std::sync::Arc::as_ptr(&tr) as u64);
+    let tex = info.images.first().map(|(t, _)| {
+        let addr = (((t[0] as u64) | (((t[1] & 0xFF) as u64) << 32)) << 8) as usize;
+        let w = ((t[1] >> 30) | ((t[2] & 0xFFF) << 2)) + 1;
+        let h = ((t[2] >> 14) & 0x3FFF) + 1;
+        let swiz = (t[3] >> 20) & 0x1F;
+        (addr, w, h, swiz)
+    });
+    if cube && std::env::var_os("ORBIS_TEX_LOG").is_some() {
+        if let Some((t, _)) = info.images.first() {
+            eprintln!("[orbis] CUBE {tex:x?} type={:#x} last_level={} base_level={} depth={} T#={t:08x?}", t[3] >> 28, (t[3] >> 16) & 0xF, (t[3] >> 12) & 0xF, t[4] & 0x1FFF);
+        }
+    }
+    if std::env::var_os("ORBIS_TEX_LOG").is_some() {
+        static SEEN: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        if let Some((t, _)) = info.images.first() {
+            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            if !seen.contains(&(t[0] as usize)) {
+                seen.push(t[0] as usize);
+                eprintln!("[orbis] TEX ps={ps_addr:#x} fmt={} {tex:x?} T#={t:08x?}", (t[1] >> 20) & 0x1FF);
+            }
+        }
+    }
+    // The final copy of the offscreen render target to the display: we draw straight to the
+    // swapchain, so its source texture is not in guest memory. Drop the draw.
+
+    let mut slots = [0u32; 64];
+    for (k, &v) in info.slots.iter().take(64).enumerate() {
+        slots[k] = v;
+    }
+    let (xs, xo) = (f32::from_bits(*gpu.cx.get(&0x10F).unwrap_or(&0)), f32::from_bits(*gpu.cx.get(&0x110).unwrap_or(&0)));
+    let (ys, yo) = (f32::from_bits(*gpu.cx.get(&0x111).unwrap_or(&0)), f32::from_bits(*gpu.cx.get(&0x112).unwrap_or(&0)));
+    // Colour target 0: CB_COLOR0_BASE (+ _EXT) and its size from CB_COLOR0_ATTRIB2.
+    let rt = {
+        let base = *gpu.cx.get(&0x318).unwrap_or(&0) as u64 | ((*gpu.cx.get(&0x390).unwrap_or(&0) as u64 & 0xFF) << 32);
+        let a2 = *gpu.cx.get(&0x3B0).unwrap_or(&0);
+        ((base << 8) as usize, ((a2 >> 14) & 0x3FFF) + 1, (a2 & 0x3FFF) + 1)
+    };
+    let (tw, th) = (rt.1 as f32, rt.2 as f32);
+    // Clip position → Vulkan clip space of the target: screen = ndc * scale + offset (pixels).
+    let have_vp = xs != 0.0 && ys != 0.0 && xs.is_finite() && ys.is_finite() && rt.0 != 0;
+    let to_target = |p: [f32; 4]| -> [f32; 4] {
+        if have_vp {
+            [(p[0] * xs + p[3] * xo) * 2.0 / tw - p[3], (p[1] * ys + p[3] * yo) * 2.0 / th - p[3], p[2], p[3]]
+        } else {
+            [p[0], -p[1], p[2], p[3]]
+        }
+    };
+    // PA_SC_GENERIC_SCISSOR_TL / BR, clipped to the target.
+    let scissor = {
+        let tl = *gpu.cx.get(&0x90).unwrap_or(&0);
+        let br = *gpu.cx.get(&0x91).unwrap_or(&0x4000_4000);
+        let (x0, y0) = ((tl & 0x7FFF) as i32, ((tl >> 16) & 0x7FFF) as i32);
+        let (x1, y1) = (((br & 0x7FFF) as i32).min(rt.1 as i32), (((br >> 16) & 0x7FFF) as i32).min(rt.2 as i32));
+        if x1 > x0 && y1 > y0 { [x0, y0, x1 - x0, y1 - y0] } else { [0, 0, rt.1 as i32, rt.2 as i32] }
+    };
+    let done: HashMap<u16, crate::vk::GVertex> = raw.iter().map(|(&ix, &(p, attr))| (ix, crate::vk::GVertex { pos: to_target(p), attr })).collect();
     // Primitive type: triangle list (default) or rect list (3 corners → 2 triangles).
     let prim = gpu.uc.get(&0x242).copied().map(|v| if v > 0xFF { v >> 8 } else { v }).unwrap_or(4);
     let first_vertex = gpu.frame_gverts.len() as u32;
@@ -1046,6 +1111,15 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             eprintln!("[orbis] GEN ps={ps_addr:#x} prim={prim:#x} n={vertex_count} vp=({xs},{xo},{ys},{yo}) tex={tex:x?} slots={} cntl={cntl:?} {}", info.slots.len(), v.join(" "));
         }
     }
+    if std::env::var_os("ORBIS_CX_LOG").is_some() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) % 500 == 499 {
+            let cx: Vec<String> = gpu.cx.iter().map(|(k, v)| format!("{k:x}={v:x}")).collect();
+            let uc: Vec<String> = gpu.uc.iter().map(|(k, v)| format!("{k:x}={v:x}")).collect();
+            eprintln!("[orbis] CX {}
+[orbis] UC {}", cx.join(" "), uc.join(" "));
+        }
+    }
     // CB_TARGET_MASK (MRT0 bits): nothing written → stencil/depth-only pass, skip it.
     let wmask = gpu.cx.get(&0x8E).copied().unwrap_or(0xF) & 0xF;
     if wmask == 0 {
@@ -1064,8 +1138,18 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         vertex_count,
         slots,
         tex,
+        layers: if cube { 6 } else { 1 },
+        rt,
+        scissor,
     });
     gpu.frame_batches.push(crate::vk::DrawBatch { first_index: 0, index_count: 0, tex_addr: 0, tex_w: 0, tex_h: 0, tex_swiz: 0, gen: Some(g) });
+    if std::env::var_os("ORBIS_RT_LOG").is_some() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        if (15000..15030).contains(&n) {
+            eprintln!("[orbis] DRAW#{n} ps={ps_addr:#x} rt={:#x} {}x{} tex={tex:x?} cube={cube} verts={vertex_count} blend={blend:#x} mask={wmask:#x} sc={scissor:?}", rt.0, rt.1, rt.2);
+        }
+    }
     GEN_STATS[0].fetch_add(1, Ordering::Relaxed);
     true
 }
@@ -1114,6 +1198,19 @@ fn apply_indirect_regs(bank: &mut BTreeMap<u32, u32>, table_addr: u64, count: u3
         return;
     }
     let pairs = unsafe { std::slice::from_raw_parts(table_addr as *const [u32; 2], count as usize) };
+    if std::env::var_os("ORBIS_CX_LOG").is_some() {
+        static SEEN: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
+        let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if g.len() < 40 && !g.contains(&(table_addr, count)) {
+            g.push((table_addr, count));
+            let raw: Vec<String> = pairs.iter().take(24).map(|[a, b]| format!("{a:x}:{b:x}")).collect();
+            if pairs.first().map(|p| p[0]) == Some(0xFFFF_FFFF) {
+                let before = unsafe { std::slice::from_raw_parts((table_addr as usize - 64) as *const u32, 16 + 32) };
+                eprintln!("[orbis] RAW {name} @{table_addr:#x}-64: {:08x?}", before);
+            }
+            eprintln!("[orbis] TABLE {name} @{table_addr:#x} n={count}: {}", raw.join(" "));
+        }
+    }
     for &[reg, val] in pairs {
         bank.insert(reg, val);
         if trace {
@@ -1642,6 +1739,16 @@ fn execute_stream(
                     eprintln!("[orbis] GPU:   DISPATCH ({}, {}, {}) cs={cs_addr:#x} sh200={cs_regs:x?}", w[1], w[2], w[3]);
                 }
             }
+            OP_NOP if std::env::var_os("ORBIS_CX_LOG").is_some() && {
+                static SEEN: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+                let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+                if !g.iter().any(|&(s2, l2)| s2 == sub && l2 == len as u32) {
+                    g.push((sub, len as u32));
+                    let words: Vec<String> = w.iter().take(8).map(|x| format!("{x:08x}")).collect();
+                    eprintln!("[orbis] NOP sub={sub:#x} len={len} {}", words.join(" "));
+                }
+                false
+            } => {}
             OP_NOP => match sub {
                 R_DRAW_INDEX_AUTO if len >= 2 => {
                     if trace {

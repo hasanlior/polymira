@@ -51,6 +51,12 @@ pub struct GenDraw {
     pub vertex_count: u32,
     pub slots: [u32; 64],
     pub tex: Option<(usize, u32, u32, u32)>,
+    /// Array layers of the texture (6 for a cube map, 1 otherwise).
+    pub layers: u32,
+    /// Colour target: guest address, width, height.
+    pub rt: (usize, u32, u32),
+    /// Scissor rectangle in the target: x, y, width, height.
+    pub scissor: [i32; 4],
 }
 
 const GVBUF_BYTES: usize = 8 << 20;
@@ -107,6 +113,12 @@ pub struct VkRenderer {
     pub upload_tex: Option<VkTarget>,
     pub tex_cache: HashMap<usize, (VkTarget, vk::DescriptorSet)>,
     pub tex_sums: HashMap<usize, u64>,
+    pub array_cache: HashMap<usize, (VkTarget, vk::DescriptorSet, u64)>,
+    pub rt_rp_clear: vk::RenderPass,
+    pub rt_rp_load: vk::RenderPass,
+    pub rt_fbs: HashMap<usize, vk::Framebuffer>,
+    pub rt_dsets: HashMap<usize, vk::DescriptorSet>,
+    pub rt_layouts: HashMap<usize, vk::ImageLayout>,
     pub gen_layout: vk::PipelineLayout,
     pub gen_vs: vk::ShaderModule,
     pub gen_pipes: HashMap<(usize, u32, u32), vk::Pipeline>,
@@ -324,6 +336,12 @@ impl VkRenderer {
             upload_tex: None,
             tex_cache: HashMap::new(),
             tex_sums: HashMap::new(),
+            array_cache: HashMap::new(),
+            rt_rp_clear: vk::RenderPass::null(),
+            rt_rp_load: vk::RenderPass::null(),
+            rt_fbs: HashMap::new(),
+            rt_dsets: HashMap::new(),
+            rt_layouts: HashMap::new(),
             gen_layout: vk::PipelineLayout::null(),
             gen_vs: vk::ShaderModule::null(),
             gen_pipes: HashMap::new(),
@@ -913,6 +931,138 @@ impl VkRenderer {
         dset
     }
 
+    /// A layered texture (cube map faces) sampled as a 2D array; faces are stored one after
+    /// another. Re-uploaded when the memory changes.
+    unsafe fn ensure_array_texture(&mut self, addr: usize, width: u32, height: u32, swiz: u32, layers: u32) -> vk::DescriptorSet {
+        if addr == 0 || width == 0 || height == 0 || width > 4096 || height > 4096 || layers > 6 {
+            return self.desc_set;
+        }
+        let slice = if swiz == 0 {
+            (width as usize) * (height as usize) * 4
+        } else {
+            (((width as usize) + 127) / 128) * (((height as usize) + 127) / 128) * 65536
+        };
+        let total = slice * layers as usize;
+        if Self::readable_bytes(addr, total) < total {
+            return self.desc_set;
+        }
+        let sum = {
+            let words = total / 8;
+            let step = (words / 2048).max(1);
+            let p = addr as *const u64;
+            let mut h = 0xcbf2_9ce4_8422_2325u64;
+            let mut k = 0;
+            while k < words {
+                h = (h ^ p.add(k).read_unaligned()).wrapping_mul(0x100_0000_01b3);
+                k += step;
+            }
+            h
+        };
+        let existing = self.array_cache.get(&addr).map(|(t, ds, old)| (t.image, *ds, *old, t.width == width && t.height == height));
+        if let Some((_, ds, old, true)) = existing {
+            if old == sum {
+                return ds;
+            }
+        }
+        let mut pixels: Vec<u32> = Vec::with_capacity((width * height * layers) as usize);
+        for l in 0..layers as usize {
+            let src = std::slice::from_raw_parts((addr + l * slice) as *const u8, slice);
+            pixels.extend(crate::tiling::untile_32bpp(src, width, height, swiz));
+        }
+        let (img, ds, fresh) = match existing {
+            Some((img, ds, _, true)) => (img, ds, false),
+            _ => {
+                let Some((t, ds)) = self.create_array_image(width, height, layers) else { return self.desc_set };
+                let img = t.image;
+                self.array_cache.insert(addr, (t, ds, 0));
+                (img, ds, true)
+            }
+        };
+        self.upload_layers(img, width, height, layers, &pixels, fresh);
+        if let Some(e) = self.array_cache.get_mut(&addr) {
+            e.2 = sum;
+        }
+        eprintln!("[orbis] Vulkan: uploaded PS5 layered texture @{addr:#x} ({width}x{height}x{layers}, swiz={swiz})");
+        ds
+    }
+
+    unsafe fn create_array_image(&mut self, width: u32, height: u32, layers: u32) -> Option<(VkTarget, vk::DescriptorSet)> {
+        let img = self
+            .device
+            .create_image(
+                &vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(vk::Format::R8G8B8A8_UNORM)
+                    .extent(vk::Extent3D { width, height, depth: 1 })
+                    .mip_levels(1)
+                    .array_layers(layers)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+                    .initial_layout(vk::ImageLayout::UNDEFINED),
+                None,
+            )
+            .ok()?;
+        let req = self.device.get_image_memory_requirements(img);
+        let mi = self.find_mem_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+        let mem = self.device.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mi), None).ok()?;
+        self.device.bind_image_memory(img, mem, 0).ok()?;
+        let range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: layers };
+        let view = self
+            .device
+            .create_image_view(
+                &vk::ImageViewCreateInfo::default().image(img).view_type(vk::ImageViewType::TYPE_2D_ARRAY).format(vk::Format::R8G8B8A8_UNORM).subresource_range(range),
+                None,
+            )
+            .ok()?;
+        let dsls = [self.blit_dset_layout];
+        let ds = self.device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.desc_pool).set_layouts(&dsls)).ok()?[0];
+        let img_info = [vk::DescriptorImageInfo::default().sampler(self.sampler).image_view(view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let write = [vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&img_info)];
+        self.device.update_descriptor_sets(&write, &[]);
+        Some((VkTarget { image: img, memory: mem, view, width, height }, ds))
+    }
+
+    unsafe fn upload_layers(&mut self, img: vk::Image, width: u32, height: u32, layers: u32, pixels: &[u32], fresh: bool) {
+        let byte_len = pixels.len() * 4;
+        if byte_len < (width * height * 4 * layers) as usize || !self.ensure_staging(byte_len) {
+            return;
+        }
+        let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+        let Ok(mapped) = self.device.map_memory(self.staging_mem, 0, byte_len as u64, vk::MemoryMapFlags::empty()) else { return };
+        std::ptr::copy_nonoverlapping(pixels.as_ptr() as *const u8, mapped as *mut u8, byte_len);
+        self.device.unmap_memory(self.staging_mem);
+        let _ = self.device.reset_fences(&[self.fence]);
+        let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
+        let _ = self.device.begin_command_buffer(self.cmd_buf, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+        let sub = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: layers };
+        let old = if fresh { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL };
+        let to_dst = [vk::ImageMemoryBarrier::default()
+            .image(img)
+            .subresource_range(sub)
+            .old_layout(old)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+        self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &to_dst);
+        let region = [vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: layers })
+            .image_extent(vk::Extent3D { width, height, depth: 1 })];
+        self.device.cmd_copy_buffer_to_image(self.cmd_buf, self.staging_buf, img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &region);
+        let to_read = [vk::ImageMemoryBarrier::default()
+            .image(img)
+            .subresource_range(sub)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)];
+        self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &to_read);
+        let _ = self.device.end_command_buffer(self.cmd_buf);
+        let cmds = [self.cmd_buf];
+        let submit = [vk::SubmitInfo::default().command_buffers(&cmds)];
+        let _ = self.device.queue_submit(self.queue, &submit, self.fence);
+        let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+    }
+
     /// Copies new pixels into an already sampled texture image.
     unsafe fn reupload_texture(&mut self, img: vk::Image, width: u32, height: u32, pixels: &[u32]) {
         let byte_len = pixels.len() * 4;
@@ -1001,6 +1151,7 @@ impl VkRenderer {
                             continue;
                         }
                         let ds = match gd.tex {
+                            Some((a, w, h, sw)) if gd.layers > 1 => self.ensure_array_texture(a, w, h, sw, gd.layers),
                             Some((a, w, h, sw)) => self.ensure_sampled_texture(a, w, h, sw),
                             None => self.desc_set,
                         };
@@ -1170,6 +1321,385 @@ impl VkRenderer {
         }
     }
 
+    /// Render passes for offscreen targets: one that clears, one that keeps the contents.
+    unsafe fn rt_passes(&mut self) -> Option<(vk::RenderPass, vk::RenderPass)> {
+        if self.rt_rp_load == vk::RenderPass::null() {
+            for clear in [true, false] {
+                let att = [vk::AttachmentDescription::default()
+                    .format(vk::Format::B8G8R8A8_UNORM)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(if clear { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD })
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .initial_layout(if clear { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL })
+                    .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+                let color_ref = [vk::AttachmentReference { attachment: 0, layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL }];
+                let subpass = [vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&color_ref)];
+                let rp = self.device.create_render_pass(&vk::RenderPassCreateInfo::default().attachments(&att).subpasses(&subpass), None).ok()?;
+                if clear {
+                    self.rt_rp_clear = rp;
+                } else {
+                    self.rt_rp_load = rp;
+                }
+            }
+        }
+        Some((self.rt_rp_clear, self.rt_rp_load))
+    }
+
+    /// Offscreen colour target for a guest render-target address (created on first use).
+    unsafe fn rt_target(&mut self, addr: usize, w: u32, h: u32) -> Option<(vk::Image, vk::Framebuffer)> {
+        let (_, rp_load) = self.rt_passes()?;
+        let fresh = !matches!(self.targets.get(&addr), Some(t) if t.width == w && t.height == h);
+        if fresh {
+            self.rt_fbs.remove(&addr);
+            self.rt_dsets.remove(&addr);
+            self.rt_layouts.insert(addr, vk::ImageLayout::UNDEFINED);
+        }
+        let t = self.ensure_target(addr, w, h)?;
+        let (image, view) = (t.image, t.view);
+        if !self.rt_fbs.contains_key(&addr) {
+            let atts = [view];
+            let fb = self
+                .device
+                .create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(rp_load).attachments(&atts).width(w).height(h).layers(1), None)
+                .ok()?;
+            self.rt_fbs.insert(addr, fb);
+        }
+        Some((image, self.rt_fbs[&addr]))
+    }
+
+    /// Descriptor set sampling a render target.
+    unsafe fn rt_dset(&mut self, addr: usize) -> Option<vk::DescriptorSet> {
+        if let Some(&d) = self.rt_dsets.get(&addr) {
+            return Some(d);
+        }
+        let view = self.targets.get(&addr)?.view;
+        let dsls = [self.blit_dset_layout];
+        let ds = self.device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.desc_pool).set_layouts(&dsls)).ok()?[0];
+        let info = [vk::DescriptorImageInfo::default().sampler(self.sampler).image_view(view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let write = [vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&info)];
+        self.device.update_descriptor_sets(&write, &[]);
+        self.rt_dsets.insert(addr, ds);
+        Some(ds)
+    }
+
+    unsafe fn rt_barrier(&mut self, addr: usize, to: vk::ImageLayout) {
+        let Some(t) = self.targets.get(&addr) else { return };
+        let from = *self.rt_layouts.get(&addr).unwrap_or(&vk::ImageLayout::UNDEFINED);
+        if from == to {
+            return;
+        }
+        let sub = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+        let b = [vk::ImageMemoryBarrier::default()
+            .image(t.image)
+            .subresource_range(sub)
+            .old_layout(from)
+            .new_layout(to)
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::TRANSFER_READ)];
+        self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::ALL_COMMANDS, vk::DependencyFlags::empty(), &[], &[], &b);
+        self.rt_layouts.insert(addr, to);
+    }
+
+    /// Renders a frame the way the game does: every draw into its own colour target (offscreen
+    /// images keyed by guest address, sampled when the game reads them as textures), then
+    /// shows the display buffer `display` in the window.
+    pub fn present_frame(
+        &mut self,
+        clear_rgba: [f32; 4],
+        vertices: &[Vertex],
+        indices: &[u32],
+        batches: &[DrawBatch],
+        gverts: &[GVertex],
+        gens: &[GenDraw],
+        display: (usize, u32, u32),
+    ) -> bool {
+        if !self.blit_ready || self.vbuf == vk::Buffer::null() || self.ibuf == vk::Buffer::null() || display.0 == 0 {
+            return false;
+        }
+        unsafe {
+            if self.rt_passes().is_none() {
+                return false;
+            }
+            if !gens.is_empty() && self.gvbuf == vk::Buffer::null() {
+                if let Some((b, m)) = self.alloc_host_buffer(GVBUF_BYTES, vk::BufferUsageFlags::VERTEX_BUFFER) {
+                    self.gvbuf = b;
+                    self.gvmem = m;
+                }
+            }
+            let v_bytes = (vertices.len() * std::mem::size_of::<Vertex>()).min(524288);
+            let i_bytes = (indices.len() * 4).min(131072);
+            let max_idx = (i_bytes / 4) as u32;
+            let g_bytes = (gverts.len() * std::mem::size_of::<GVertex>()).min(GVBUF_BYTES);
+            let g_max = (g_bytes / std::mem::size_of::<GVertex>()) as u32;
+
+            // Resolve every draw before recording: textures, pipelines, targets.
+            struct Item {
+                rt: (usize, u32, u32),
+                first: u32,
+                count: u32,
+                ds: vk::DescriptorSet,
+                pipe: vk::Pipeline,
+                gen: usize,
+                scissor: vk::Rect2D,
+                sampled_rt: usize,
+            }
+            let full = |w: u32, h: u32| vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: w, height: h } };
+            let mut items: Vec<Item> = Vec::with_capacity(batches.len());
+            for b in batches {
+                if let Some(g) = b.gen {
+                    let Some(gd) = gens.get(g as usize) else { continue };
+                    if self.gvbuf == vk::Buffer::null() || gd.vertex_count == 0 || gd.first_vertex.saturating_add(gd.vertex_count) > g_max {
+                        continue;
+                    }
+                    let rt = if gd.rt.0 != 0 && gd.rt.1 <= 8192 && gd.rt.2 <= 8192 { gd.rt } else { display };
+                    let pipe = self.ensure_gen_pipeline(gd);
+                    if pipe == vk::Pipeline::null() {
+                        continue;
+                    }
+                    let mut sampled_rt = 0;
+                    let ds = match gd.tex {
+                        Some((a, _, _, _)) if self.targets.contains_key(&a) && a != rt.0 => {
+                            sampled_rt = a;
+                            self.rt_dset(a).unwrap_or(self.desc_set)
+                        }
+                        Some((a, _, _, _)) if a == rt.0 => self.desc_set,
+                        Some((a, w, h, sw)) if gd.layers > 1 => self.ensure_array_texture(a, w, h, sw, gd.layers),
+                        Some((a, w, h, sw)) => self.ensure_sampled_texture(a, w, h, sw),
+                        None => self.desc_set,
+                    };
+                    let [x, y, w, h] = gd.scissor;
+                    let scissor = vk::Rect2D { offset: vk::Offset2D { x, y }, extent: vk::Extent2D { width: w.max(0) as u32, height: h.max(0) as u32 } };
+                    items.push(Item { rt, first: gd.first_vertex, count: gd.vertex_count, ds, pipe, gen: g as usize, scissor, sampled_rt });
+                } else if b.index_count > 0 && b.first_index.saturating_add(b.index_count) <= max_idx {
+                    let ds = self.ensure_sampled_texture(b.tex_addr, b.tex_w, b.tex_h, b.tex_swiz);
+                    items.push(Item { rt: display, first: b.first_index, count: b.index_count, ds, pipe: vk::Pipeline::null(), gen: 0, scissor: full(display.1, display.2), sampled_rt: 0 });
+                }
+            }
+            if items.is_empty() {
+                return false;
+            }
+            // Targets used this frame (created now so sampling and framebuffers exist).
+            let mut used: Vec<(usize, u32, u32)> = items.iter().map(|i| i.rt).collect();
+            used.push(display);
+            used.sort();
+            used.dedup();
+            for &(a, w, h) in &used {
+                if self.rt_target(a, w, h).is_none() {
+                    return false;
+                }
+            }
+
+            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            if g_bytes > 0 {
+                if let Ok(p) = self.device.map_memory(self.gvmem, 0, g_bytes as u64, vk::MemoryMapFlags::empty()) {
+                    std::ptr::copy_nonoverlapping(gverts.as_ptr() as *const u8, p as *mut u8, g_bytes);
+                    self.device.unmap_memory(self.gvmem);
+                }
+            }
+            if v_bytes > 0 {
+                if let Ok(p) = self.device.map_memory(self.vmem, 0, v_bytes as u64, vk::MemoryMapFlags::empty()) {
+                    std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const u8, p as *mut u8, v_bytes);
+                    self.device.unmap_memory(self.vmem);
+                }
+            }
+            if i_bytes > 0 {
+                if let Ok(p) = self.device.map_memory(self.imem, 0, i_bytes as u64, vk::MemoryMapFlags::empty()) {
+                    std::ptr::copy_nonoverlapping(indices.as_ptr() as *const u8, p as *mut u8, i_bytes);
+                    self.device.unmap_memory(self.imem);
+                }
+            }
+            let Ok((img_idx, _)) = self.swapchain_loader.acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null()) else {
+                return false;
+            };
+            let _ = self.device.reset_fences(&[self.fence]);
+            let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
+            let _ = self.device.begin_command_buffer(self.cmd_buf, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+
+            let (rp_clear, rp_load) = (self.rt_rp_clear, self.rt_rp_load);
+            let mut cleared: Vec<usize> = vec![];
+            let mut sampled_this_frame: Vec<usize> = vec![];
+            let mut in_pass = false;
+            let mut cur_rt = 0usize;
+            let mut cur_pipe = vk::Pipeline::null();
+            let mut cur_vb = vk::Buffer::null();
+            let mut last_ds = vk::DescriptorSet::null();
+            for it in &items {
+                if it.sampled_rt != 0 {
+                    sampled_this_frame.push(it.sampled_rt);
+                }
+                if it.sampled_rt != 0 && *self.rt_layouts.get(&it.sampled_rt).unwrap_or(&vk::ImageLayout::UNDEFINED) != vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL {
+                    if in_pass {
+                        self.device.cmd_end_render_pass(self.cmd_buf);
+                        in_pass = false;
+                    }
+                    self.rt_barrier(it.sampled_rt, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                }
+                if !in_pass || cur_rt != it.rt.0 {
+                    if in_pass {
+                        self.device.cmd_end_render_pass(self.cmd_buf);
+                    }
+                    let (a, w, h) = it.rt;
+                    let fb = self.rt_fbs[&a];
+                    // The display buffer starts each frame cleared; other targets keep their
+                    // contents (the game may build them over several frames).
+                    // A target is cleared when first drawn to in this frame, unless the frame
+                    // already read it (then it holds content from an earlier frame).
+                    let clear_now = !cleared.contains(&a) && !sampled_this_frame.contains(&a);
+                    if clear_now {
+                        cleared.push(a);
+                        self.rt_layouts.insert(a, vk::ImageLayout::UNDEFINED);
+                    } else {
+                        self.rt_barrier(a, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+                    }
+                    let cv = if a == display.0 { clear_rgba } else { [0.0, 0.0, 0.0, 0.0] };
+                    let clear = [vk::ClearValue { color: vk::ClearColorValue { float32: cv } }];
+                    let bi = vk::RenderPassBeginInfo::default()
+                        .render_pass(if clear_now { rp_clear } else { rp_load })
+                        .framebuffer(fb)
+                        .render_area(full(w, h))
+                        .clear_values(&clear);
+                    self.device.cmd_begin_render_pass(self.cmd_buf, &bi, vk::SubpassContents::INLINE);
+                    self.rt_layouts.insert(a, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+                    let vp = [vk::Viewport { x: 0.0, y: 0.0, width: w as f32, height: h as f32, min_depth: 0.0, max_depth: 1.0 }];
+                    self.device.cmd_set_viewport(self.cmd_buf, 0, &vp);
+                    in_pass = true;
+                    cur_rt = a;
+                    cur_pipe = vk::Pipeline::null();
+                    cur_vb = vk::Buffer::null();
+                    last_ds = vk::DescriptorSet::null();
+                    if self.ibuf != vk::Buffer::null() {
+                        self.device.cmd_bind_index_buffer(self.cmd_buf, self.ibuf, 0, vk::IndexType::UINT32);
+                    }
+                }
+                let generic = it.pipe != vk::Pipeline::null();
+                let want = if generic { it.pipe } else { self.quad_pipe };
+                if want == vk::Pipeline::null() {
+                    continue;
+                }
+                if want != cur_pipe {
+                    self.device.cmd_bind_pipeline(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, want);
+                    cur_pipe = want;
+                    last_ds = vk::DescriptorSet::null();
+                }
+                let vb = if generic { self.gvbuf } else { self.vbuf };
+                if vb != cur_vb {
+                    self.device.cmd_bind_vertex_buffers(self.cmd_buf, 0, &[vb], &[0]);
+                    cur_vb = vb;
+                }
+                let layout = if generic { self.gen_layout } else { self.blit_layout };
+                if it.ds != last_ds {
+                    self.device.cmd_bind_descriptor_sets(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, layout, 0, &[it.ds], &[]);
+                    last_ds = it.ds;
+                }
+                self.device.cmd_set_scissor(self.cmd_buf, 0, &[it.scissor]);
+                if generic {
+                    let bytes = std::slice::from_raw_parts(gens[it.gen].slots.as_ptr() as *const u8, 256);
+                    self.device.cmd_push_constants(self.cmd_buf, self.gen_layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
+                    self.device.cmd_draw(self.cmd_buf, it.count, 1, it.first, 0);
+                } else {
+                    self.device.cmd_draw_indexed(self.cmd_buf, it.count, 1, it.first, 0, 0);
+                }
+            }
+            if in_pass {
+                self.device.cmd_end_render_pass(self.cmd_buf);
+            }
+
+            // Show the display buffer.
+            let swap_img = self.swap_images[img_idx as usize];
+            let sub = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+            let layers = vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 };
+            if !cleared.contains(&display.0) && *self.rt_layouts.get(&display.0).unwrap_or(&vk::ImageLayout::UNDEFINED) == vk::ImageLayout::UNDEFINED {
+                self.rt_barrier(display.0, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+                let img = self.targets[&display.0].image;
+                let c = vk::ClearColorValue { float32: clear_rgba };
+                self.device.cmd_clear_color_image(self.cmd_buf, img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &c, &[sub]);
+            }
+            self.rt_barrier(display.0, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+            let to_dst = [vk::ImageMemoryBarrier::default()
+                .image(swap_img)
+                .subresource_range(sub)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+            self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &to_dst);
+            let (dw, dh) = (display.1 as i32, display.2 as i32);
+            let blit = vk::ImageBlit {
+                src_subresource: layers,
+                src_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: dw, y: dh, z: 1 }],
+                dst_subresource: layers,
+                dst_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: self.swap_extent.width as i32, y: self.swap_extent.height as i32, z: 1 }],
+            };
+            let disp_img = self.targets[&display.0].image;
+            self.device.cmd_blit_image(self.cmd_buf, disp_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::LINEAR);
+
+            // ORBIS_VK_DUMP=<dir>: copy every 120th shown frame back for checking.
+            static DUMP_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let dump_dir = std::env::var("ORBIS_VK_DUMP").ok();
+            let n = DUMP_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (ew, eh) = (self.swap_extent.width, self.swap_extent.height);
+            let dump = dump_dir.is_some() && n % 120 == 60 && self.ensure_staging((ew * eh * 4) as usize);
+            let mut swap_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+            if dump {
+                let b = [vk::ImageMemoryBarrier::default()
+                    .image(swap_img)
+                    .subresource_range(sub)
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)];
+                self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &b);
+                let region = [vk::BufferImageCopy::default().image_subresource(layers).image_extent(vk::Extent3D { width: ew, height: eh, depth: 1 })];
+                self.device.cmd_copy_image_to_buffer(self.cmd_buf, swap_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, self.staging_buf, &region);
+                swap_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+            }
+            let to_present = [vk::ImageMemoryBarrier::default()
+                .image(swap_img)
+                .subresource_range(sub)
+                .old_layout(swap_layout)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+            self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &to_present);
+            let _ = self.device.end_command_buffer(self.cmd_buf);
+
+            let wait_sems = [self.image_avail];
+            let sig_sems = [self.render_done];
+            let wait_stages = [vk::PipelineStageFlags::TRANSFER];
+            let cmds = [self.cmd_buf];
+            let submit = [vk::SubmitInfo::default().wait_semaphores(&wait_sems).wait_dst_stage_mask(&wait_stages).command_buffers(&cmds).signal_semaphores(&sig_sems)];
+            if self.device.queue_submit(self.queue, &submit, self.fence).is_err() {
+                return false;
+            }
+            let scs = [self.swapchain];
+            let idxs = [img_idx];
+            let present = vk::PresentInfoKHR::default().wait_semaphores(&sig_sems).swapchains(&scs).image_indices(&idxs);
+            let _ = self.swapchain_loader.queue_present(self.queue, &present);
+            if dump {
+                let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+                let bytes = (ew * eh * 4) as usize;
+                if let Ok(p) = self.device.map_memory(self.staging_mem, 0, bytes as u64, vk::MemoryMapFlags::empty()) {
+                    let px = std::slice::from_raw_parts(p as *const u8, bytes);
+                    let mut bmp = Vec::with_capacity(54 + bytes);
+                    bmp.extend_from_slice(b"BM");
+                    bmp.extend_from_slice(&((54 + bytes) as u32).to_le_bytes());
+                    bmp.extend_from_slice(&0u32.to_le_bytes());
+                    bmp.extend_from_slice(&54u32.to_le_bytes());
+                    bmp.extend_from_slice(&40u32.to_le_bytes());
+                    bmp.extend_from_slice(&(ew as i32).to_le_bytes());
+                    bmp.extend_from_slice(&(-(eh as i32)).to_le_bytes());
+                    bmp.extend_from_slice(&1u16.to_le_bytes());
+                    bmp.extend_from_slice(&32u16.to_le_bytes());
+                    bmp.extend_from_slice(&[0u8; 24]);
+                    bmp.extend_from_slice(px);
+                    self.device.unmap_memory(self.staging_mem);
+                    let dir = dump_dir.unwrap_or_default();
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::fs::write(format!("{dir}/vk{n:05}.bmp"), bmp);
+                }
+            }
+            true
+        }
+    }
+
     /// Pipeline for a generic draw: pass-through vertex shader + the translated pixel shader.
     /// Failures are cached as a null pipeline (the draw is then skipped).
     unsafe fn ensure_gen_pipeline(&mut self, gd: &GenDraw) -> vk::Pipeline {
@@ -1276,7 +1806,7 @@ impl VkRenderer {
             .color_blend_state(&cb)
             .dynamic_state(&ds)
             .layout(self.gen_layout)
-            .render_pass(self.swap_rp)];
+            .render_pass(self.rt_passes().map(|p| p.1).unwrap_or(self.swap_rp))];
         let r = self.device.create_graphics_pipelines(vk::PipelineCache::null(), &gp_ci, None).map_err(|(_, e)| format!("pipeline: {e}"));
         self.device.destroy_shader_module(fs_mod, None);
         Ok(r?[0])
@@ -1685,7 +2215,7 @@ impl VkRenderer {
                     .array_layers(1)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
-                    .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
+                    .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
                     .initial_layout(vk::ImageLayout::UNDEFINED);
                 let image = self.device.create_image(&img_ci, None).ok()?;
                 let req = self.device.get_image_memory_requirements(image);
