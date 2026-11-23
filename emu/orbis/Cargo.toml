@@ -20,6 +20,6 @@ naga = { version = "30.0.2", features = ["spv-in"] }
 windows-sys = { version = "0.59", features = ["Win32_System_Memory", "Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Time"] }
 
 [profile.release]
-opt-level = 2
+opt-level = 3
 lto = true
 strip = true

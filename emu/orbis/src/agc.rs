@@ -1073,41 +1073,106 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             }
         }
     };
-    // Vertex shader per unique index (before the pixel shader's path is known).
+    let (xs, xo) = (f32::from_bits(*gpu.cx.get(&0x10F).unwrap_or(&0)), f32::from_bits(*gpu.cx.get(&0x110).unwrap_or(&0)));
+    let (ys, yo) = (f32::from_bits(*gpu.cx.get(&0x111).unwrap_or(&0)), f32::from_bits(*gpu.cx.get(&0x112).unwrap_or(&0)));
+    // Colour target 0: CB_COLOR0_BASE (+ _EXT) and its size from CB_COLOR0_ATTRIB2.
+    let rt = {
+        let base = *gpu.cx.get(&0x318).unwrap_or(&0) as u64 | ((*gpu.cx.get(&0x390).unwrap_or(&0) as u64 & 0xFF) << 32);
+        let a2 = *gpu.cx.get(&0x3B0).unwrap_or(&0);
+        ((base << 8) as usize, ((a2 >> 14) & 0x3FFF) + 1, (a2 & 0x3FFF) + 1)
+    };
+    let (tw, th) = (rt.1 as f32, rt.2 as f32);
+    // Clip position → Vulkan clip space of the target: screen = ndc * scale + offset (pixels).
+    let have_vp = xs != 0.0 && ys != 0.0 && xs.is_finite() && ys.is_finite() && rt.0 != 0;
+    let to_target = |p: [f32; 4]| -> [f32; 4] {
+        if have_vp {
+            [(p[0] * xs + p[3] * xo) * 2.0 / tw - p[3], (p[1] * ys + p[3] * yo) * 2.0 / th - p[3], p[2], p[3]]
+        } else {
+            [p[0], -p[1], p[2], p[3]]
+        }
+    };
+    // Deduplicate indices into dense `unique` + `remap` (flat table when span < 131k, HashMap fallback).
     let cntl: [u32; 8] = std::array::from_fn(|n| gpu.cx.get(&(0x191 + n as u32)).map(|v| v & 0x3F).unwrap_or(n as u32));
     let vs_ud: [u32; 24] = std::array::from_fn(|k| *gpu.sh.get(&(0x8C + k as u32)).unwrap_or(&0));
-    let mut raw: HashMap<u32, ([f32; 4], [[f32; 4]; 8])> = HashMap::with_capacity(idxs.len().min(512));
-    let mut lane = crate::rdna::interp::Lane::new();
-    for &ix in &idxs {
-        if raw.contains_key(&ix) {
-            continue;
-        }
-        lane.reset();
-        lane.s[3] = 0x101;
-        lane.s[8..32].copy_from_slice(&vs_ud);
-        lane.v[5] = ix;
-        lane.v[8] = 0;
-        if crate::rdna::interp::run_compiled(&vs_sh, &mut lane, mem_ok).is_err() {
-            GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-        let Some(p) = lane.exports.iter().find(|e| e.target == 12).map(|e| e.value) else {
-            GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
-            return false;
-        };
-        let mut params = [[0f32; 4]; 64];
-        for e in &lane.exports {
-            if (32..96).contains(&e.target) {
-                params[(e.target - 32) as usize] = e.value;
+    let (min_ix, max_ix) = idxs.iter().fold((u32::MAX, 0u32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let span = max_ix.saturating_sub(min_ix) as usize;
+    let mut unique: Vec<u32> = Vec::with_capacity(idxs.len().min(span + 1).min(65536));
+    let mut remap: Vec<u32> = Vec::with_capacity(idxs.len());
+    if span < 131_072 {
+        let mut seen = vec![u32::MAX; span + 1];
+        for &ix in &idxs {
+            let slot = (ix - min_ix) as usize;
+            let mut u = seen[slot];
+            if u == u32::MAX {
+                u = unique.len() as u32;
+                seen[slot] = u;
+                unique.push(ix);
             }
+            remap.push(u);
         }
-        let attrs: [[f32; 4]; 8] = std::array::from_fn(|n| params[cntl[n] as usize]);
-        raw.insert(ix, (p, attrs));
+    } else {
+        let mut seen: HashMap<u32, u32> = HashMap::with_capacity(idxs.len().min(4096));
+        for &ix in &idxs {
+            let u = *seen.entry(ix).or_insert_with(|| {
+                let id = unique.len() as u32;
+                unique.push(ix);
+                id
+            });
+            remap.push(u);
+        }
+    }
+    let eval_chunk = |ixs: &[u32], out: &mut [crate::vk::GVertex]| -> bool {
+        let mut lane = crate::rdna::interp::Lane::new();
+        for (&ix, dst) in ixs.iter().zip(out.iter_mut()) {
+            lane.reset();
+            lane.s[3] = 0x101;
+            lane.s[8..32].copy_from_slice(&vs_ud);
+            lane.v[5] = ix;
+            lane.v[8] = 0;
+            if crate::rdna::interp::run_compiled(&vs_sh, &mut lane, mem_ok).is_err() {
+                return false;
+            }
+            let Some(p) = lane.exports.iter().find(|e| e.target == 12).map(|e| e.value) else {
+                return false;
+            };
+            let mut params = [[0f32; 4]; 64];
+            for e in &lane.exports {
+                if (32..96).contains(&e.target) {
+                    params[(e.target - 32) as usize] = e.value;
+                }
+            }
+            let attr: [[f32; 4]; 8] = std::array::from_fn(|n| params[cntl[n] as usize]);
+            *dst = crate::vk::GVertex { pos: to_target(p), attr };
+        }
+        true
+    };
+    let mut verts = vec![crate::vk::GVertex::default(); unique.len()];
+    let vs_ok = if unique.len() < 128 {
+        eval_chunk(&unique, &mut verts)
+    } else {
+        let n_threads = std::thread::available_parallelism().map(|n| n.get().min(12)).unwrap_or(8);
+        let chunk_sz = (unique.len() + n_threads - 1) / n_threads;
+        let failed = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            for (ix_chunk, out_chunk) in unique.chunks(chunk_sz).zip(verts.chunks_mut(chunk_sz)) {
+                let failed = &failed;
+                s.spawn(move || {
+                    if !eval_chunk(ix_chunk, out_chunk) {
+                        failed.store(true, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        !failed.load(Ordering::Relaxed)
+    };
+    if !vs_ok {
+        GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
+        return false;
     }
     let (tr, cube, info) = match (tr, pre) {
         (Some((tr, cube)), Some(info)) => (tr, cube, info),
         _ => {
-            let attrs = raw[&idxs[0]].1;
+            let attrs = verts[remap[0] as usize].attr;
             let Ok((pcs, info)) = crate::rdna::interp::trace_ps_compiled(&ps_sh, &mut ps_lane, &attrs, mem_ok) else {
                 GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
                 return false;
@@ -1162,24 +1227,6 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     for (k, &v) in info.slots.iter().take(64).enumerate() {
         slots[k] = v;
     }
-    let (xs, xo) = (f32::from_bits(*gpu.cx.get(&0x10F).unwrap_or(&0)), f32::from_bits(*gpu.cx.get(&0x110).unwrap_or(&0)));
-    let (ys, yo) = (f32::from_bits(*gpu.cx.get(&0x111).unwrap_or(&0)), f32::from_bits(*gpu.cx.get(&0x112).unwrap_or(&0)));
-    // Colour target 0: CB_COLOR0_BASE (+ _EXT) and its size from CB_COLOR0_ATTRIB2.
-    let rt = {
-        let base = *gpu.cx.get(&0x318).unwrap_or(&0) as u64 | ((*gpu.cx.get(&0x390).unwrap_or(&0) as u64 & 0xFF) << 32);
-        let a2 = *gpu.cx.get(&0x3B0).unwrap_or(&0);
-        ((base << 8) as usize, ((a2 >> 14) & 0x3FFF) + 1, (a2 & 0x3FFF) + 1)
-    };
-    let (tw, th) = (rt.1 as f32, rt.2 as f32);
-    // Clip position → Vulkan clip space of the target: screen = ndc * scale + offset (pixels).
-    let have_vp = xs != 0.0 && ys != 0.0 && xs.is_finite() && ys.is_finite() && rt.0 != 0;
-    let to_target = |p: [f32; 4]| -> [f32; 4] {
-        if have_vp {
-            [(p[0] * xs + p[3] * xo) * 2.0 / tw - p[3], (p[1] * ys + p[3] * yo) * 2.0 / th - p[3], p[2], p[3]]
-        } else {
-            [p[0], -p[1], p[2], p[3]]
-        }
-    };
     // PA_SC_GENERIC_SCISSOR_TL / BR, clipped to the target.
     let scissor = {
         let tl = *gpu.cx.get(&0x90).unwrap_or(&0);
@@ -1188,13 +1235,12 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         let (x1, y1) = (((br & 0x7FFF) as i32).min(rt.1 as i32), (((br >> 16) & 0x7FFF) as i32).min(rt.2 as i32));
         if x1 > x0 && y1 > y0 { [x0, y0, x1 - x0, y1 - y0] } else { [0, 0, rt.1 as i32, rt.2 as i32] }
     };
-    let done: HashMap<u32, crate::vk::GVertex> = raw.iter().map(|(&ix, &(p, attr))| (ix, crate::vk::GVertex { pos: to_target(p), attr })).collect();
     // Primitive type: triangle list (default) or rect list (3 corners → 2 triangles).
     let prim = gpu.uc.get(&0x242).copied().map(|v| if v > 0xFF { v >> 8 } else { v }).unwrap_or(4);
     let first_vertex = gpu.frame_gverts.len() as u32;
     if prim == 0x11 {
-        for tri in idxs.chunks_exact(3) {
-            let (a, b, c) = (done[&tri[0]], done[&tri[1]], done[&tri[2]]);
+        for tri in remap.chunks_exact(3) {
+            let (a, b, c) = (verts[tri[0] as usize], verts[tri[1] as usize], verts[tri[2] as usize]);
             let mut d = a;
             d.pos = std::array::from_fn(|k| b.pos[k] + c.pos[k] - a.pos[k]);
             for n in 0..8 {
@@ -1203,8 +1249,9 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             gpu.frame_gverts.extend_from_slice(&[a, b, c, c, b, d]);
         }
     } else {
-        for &ix in &idxs[..idxs.len() / 3 * 3] {
-            gpu.frame_gverts.push(done[&ix]);
+        gpu.frame_gverts.reserve(remap.len() / 3 * 3);
+        for &r in &remap[..remap.len() / 3 * 3] {
+            gpu.frame_gverts.push(verts[r as usize]);
         }
     }
     let vertex_count = gpu.frame_gverts.len() as u32 - first_vertex;
