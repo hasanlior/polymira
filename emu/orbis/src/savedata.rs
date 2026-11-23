@@ -210,6 +210,7 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceSaveDataMount2", mount3 as *const () as usize),
         ("#ZP4e7rlzOUk", mount3 as *const () as usize), // sceSaveDataMount3
         ("sceSaveDataUmount", umount as *const () as usize),
+        ("sceSaveDataUmountWithBackup", umount as *const () as usize),
         ("#uW4vfTwMQVo", umount as *const () as usize), // sceSaveDataUmount2
         ("sceSaveDataGetMountInfo", mount_info as *const () as usize),
         ("#65VH0Qaaz6s", mount_info as *const () as usize), // sceSaveDataGetMountInfo

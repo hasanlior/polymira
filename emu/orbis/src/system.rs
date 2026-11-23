@@ -386,19 +386,19 @@ fn poll_host_pad() -> (u32, u8, u8, u8, u8, u8, u8) {
             ry = if k_ry < 0 { 0x20 } else { 0xE0 };
         }
 
-        // Face, shoulder, and system buttons
-        if down(0x0D) || down(0x20) { btns |= SCE_PAD_BUTTON_CROSS; }      // Enter / Space
-        if down(0x1B) || down(0x08) { btns |= SCE_PAD_BUTTON_CIRCLE; }     // Esc / Backspace
+        // Face, shoulder, and system buttons (natural 3D Minecraft PS5 keyboard layout)
+        if down(0x0D) || down(0x20) { btns |= SCE_PAD_BUTTON_CROSS; }      // Enter / Space -> Jump / Select
+        if down(0x08) || down(b'Q' as i32) { btns |= SCE_PAD_BUTTON_CIRCLE; } // Backspace / Q -> Back / Drop
         if down(b'E' as i32) { btns |= SCE_PAD_BUTTON_TRIANGLE; }          // E -> Inventory
-        if down(b'Q' as i32) { btns |= SCE_PAD_BUTTON_SQUARE; }            // Q -> Crafting
-        if down(0x09) || down(b'P' as i32) { btns |= SCE_PAD_BUTTON_OPTIONS; } // Tab / P -> Pause
-        if down(b'M' as i32) { btns |= SCE_PAD_BUTTON_TOUCH_PAD; }         // M -> TouchPad
-        if down(0x10) { btns |= SCE_PAD_BUTTON_L3; }                       // Shift -> Sprint
-        if down(0x11) { btns |= SCE_PAD_BUTTON_R3; }                       // Ctrl -> Crouch
-        if down(b'1' as i32) || down(b'Z' as i32) { btns |= SCE_PAD_BUTTON_L1; } // Prev hotbar
-        if down(b'2' as i32) || down(b'X' as i32) { btns |= SCE_PAD_BUTTON_R1; } // Next hotbar
-        if down(b'F' as i32) { btns |= SCE_PAD_BUTTON_L2; l2 = 0xFF; }     // Place / Use
-        if down(b'R' as i32) { btns |= SCE_PAD_BUTTON_R2; r2 = 0xFF; }     // Mine / Attack
+        if down(b'F' as i32) { btns |= SCE_PAD_BUTTON_SQUARE; }            // F -> Crafting
+        if down(0x1B) || down(b'P' as i32) { btns |= SCE_PAD_BUTTON_OPTIONS; } // Esc / P -> Pause menu
+        if down(0x09) || down(b'M' as i32) { btns |= SCE_PAD_BUTTON_TOUCH_PAD; } // Tab / M -> TouchPad
+        if down(0x11) { btns |= SCE_PAD_BUTTON_L3; }                       // Ctrl -> Sprint
+        if down(0x10) { btns |= SCE_PAD_BUTTON_R3; }                       // Shift -> Sneak / Crouch
+        if down(b'1' as i32) || down(b'Z' as i32) { btns |= SCE_PAD_BUTTON_L1; } // 1 / Z -> Hotbar left
+        if down(b'2' as i32) || down(b'X' as i32) || down(b'C' as i32) { btns |= SCE_PAD_BUTTON_R1; } // 2 / X / C -> Hotbar right
+        if down(b'R' as i32) { btns |= SCE_PAD_BUTTON_R2; r2 = 0xFF; }     // R -> Mine / Attack (keyboard fallback)
+        if down(b'V' as i32) { btns |= SCE_PAD_BUTTON_L2; l2 = 0xFF; }     // V -> Place / Use (keyboard fallback)
 
         // Mouse look & triggers only when cursor is inside the Orbis window client area
         let mut pt = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
