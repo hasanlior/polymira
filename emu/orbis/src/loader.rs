@@ -65,13 +65,120 @@ fn readable(addr: usize) -> bool {
     n != 0 && mbi.State == MEM_COMMIT && mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD) == 0 && addr + 16 <= mbi.BaseAddress as usize + mbi.RegionSize
 }
 
+/// Emulates AMD SSE4a bit-field instructions (`INSERTQ` / `EXTRQ`) missing on Intel CPUs.
+/// Returns `Some(instr_len)` if the bytes at `code` are a supported SSE4a instruction and
+/// updates `xmm[0..16]` (as `(low_u64, high_u64)` pairs) in place.
+fn emulate_sse4a(code: &[u8], xmm: &mut [(u64, u64); 16]) -> Option<usize> {
+    if code.len() < 4 {
+        return None;
+    }
+    let prefix = code[0];
+    if prefix != 0xF2 && prefix != 0x66 {
+        return None;
+    }
+    let mut i = 1usize;
+    let mut rex = 0u8;
+    if i < code.len() && (code[i] & 0xF0) == 0x40 {
+        rex = code[i];
+        i += 1;
+    }
+    if i + 3 > code.len() || code[i] != 0x0F {
+        return None;
+    }
+    let op = code[i + 1];
+    if op != 0x78 && op != 0x79 {
+        return None;
+    }
+    let modrm = code[i + 2];
+    if (modrm >> 6) != 3 {
+        return None;
+    }
+    i += 3;
+
+    let reg = ((((rex >> 2) & 1) << 3) | ((modrm >> 3) & 7)) as usize;
+    let rm = (((rex & 1) << 3) | (modrm & 7)) as usize;
+
+    let mask_for = |len_raw: u8| -> u64 {
+        let n = (len_raw & 0x3F) as u32;
+        if n == 0 || n >= 64 { u64::MAX } else { (1u64 << n) - 1 }
+    };
+
+    match (prefix, op) {
+        // INSERTQ xmm1(reg), xmm2(rm), imm8(len), imm8(idx)
+        (0xF2, 0x78) => {
+            if i + 2 > code.len() {
+                return None;
+            }
+            let len = code[i];
+            let idx = (code[i + 1] & 0x3F) as u32;
+            let mask = mask_for(len);
+            let src_lo = xmm[rm].0;
+            let dst_lo = xmm[reg].0;
+            xmm[reg].0 = (dst_lo & !mask.wrapping_shl(idx)) | ((src_lo & mask).wrapping_shl(idx));
+            Some(i + 2)
+        }
+        // INSERTQ xmm1(reg), xmm2(rm)  (len = xmm2[69:64], idx = xmm2[77:72])
+        (0xF2, 0x79) => {
+            let src_lo = xmm[rm].0;
+            let src_hi = xmm[rm].1;
+            let len = (src_hi & 0x3F) as u8;
+            let idx = ((src_hi >> 8) & 0x3F) as u32;
+            let mask = mask_for(len);
+            let dst_lo = xmm[reg].0;
+            xmm[reg].0 = (dst_lo & !mask.wrapping_shl(idx)) | ((src_lo & mask).wrapping_shl(idx));
+            Some(i)
+        }
+        // EXTRQ xmm1(rm), imm8(len), imm8(idx)
+        (0x66, 0x78) if ((modrm >> 3) & 7) == 0 => {
+            if i + 2 > code.len() {
+                return None;
+            }
+            let len = code[i];
+            let idx = (code[i + 1] & 0x3F) as u32;
+            let mask = mask_for(len);
+            xmm[rm].0 = xmm[rm].0.wrapping_shr(idx) & mask;
+            Some(i + 2)
+        }
+        // EXTRQ xmm1(reg), xmm2(rm)  (len = xmm2[5:0], idx = xmm2[13:8])
+        (0x66, 0x79) => {
+            let src_lo = xmm[rm].0;
+            let len = (src_lo & 0x3F) as u8;
+            let idx = ((src_lo >> 8) & 0x3F) as u32;
+            let mask = mask_for(len);
+            xmm[reg].0 = xmm[reg].0.wrapping_shr(idx) & mask;
+            Some(i)
+        }
+        _ => None,
+    }
+}
+
 /// Reports where the game stopped (address, offset in the game, instruction bytes, the last
 /// system calls) and ends the process, instead of a silent crash.
 #[cfg(windows)]
 unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS) -> i32 {
     let rec = &*(*info).ExceptionRecord;
-    let ctx = &*(*info).ContextRecord;
+    let ctx = &mut *(*info).ContextRecord;
     let code = rec.ExceptionCode as u32;
+    // Emulate AMD SSE4a (INSERTQ / EXTRQ) on Intel CPUs transparently.
+    if code == 0xC000_001D {
+        let rip = ctx.Rip as usize;
+        if readable(rip) {
+            let bytes = std::slice::from_raw_parts(rip as *const u8, 8);
+            let mut xmm = [(0u64, 0u64); 16];
+            for r in 0..16 {
+                let m = ctx.Anonymous.FltSave.XmmRegisters[r];
+                xmm[r] = (m.Low, m.High as u64);
+            }
+            if let Some(len) = emulate_sse4a(bytes, &mut xmm) {
+                for r in 0..16 {
+                    ctx.Anonymous.FltSave.XmmRegisters[r].Low = xmm[r].0;
+                    ctx.Anonymous.FltSave.XmmRegisters[r].High = xmm[r].1 as i64;
+                }
+                ctx.Rip += len as u64;
+                return -1; // EXCEPTION_CONTINUE_EXECUTION
+            }
+        }
+    }
     // Ignore debugger/C++ exceptions (0xE06D7363 = MSVC C++, used by Vulkan/NVIDIA drivers); report real faults.
     if code < 0xC000_0000 || code == 0xE06D_7363 || code == 0xE043_4352 {
         return 0; // EXCEPTION_CONTINUE_SEARCH
@@ -504,4 +611,45 @@ fn run_here(loaded: &Loaded) -> i32 {
     let mut args = [0u64; 32];
     let entry: extern "sysv64" fn(*mut u64, extern "sysv64" fn()) -> i32 = unsafe { std::mem::transmute(loaded.entry as usize) };
     entry(args.as_mut_ptr(), exit_handler)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emulate_sse4a_insertq_and_extrq() {
+        let mut xmm = [(0u64, 0u64); 16];
+
+        // Exact Minecraft PS5 instruction: f2 0f 78 c0 08 08 -> INSERTQ xmm0, xmm0, len=8, idx=8
+        xmm[0] = (0x1122_3344_5566_77AB, 0xAAAA_BBBB_CCCC_DDDD);
+        assert_eq!(emulate_sse4a(&[0xF2, 0x0F, 0x78, 0xC0, 0x08, 0x08], &mut xmm), Some(6));
+        assert_eq!(xmm[0].0, 0x1122_3344_5566_ABAB);
+        assert_eq!(xmm[0].1, 0xAAAA_BBBB_CCCC_DDDD);
+
+        // INSERTQ with REX (REX.R | REX.B = 0x45): xmm9, xmm10, len=16, idx=16
+        xmm[9] = (0xFFFF_FFFF_0000_1234, 0);
+        xmm[10] = (0x0000_0000_0000_CAFE, 0);
+        // modrm: mod=3, reg=1 (xmm9), rm=2 (xmm10) -> 0xCA
+        assert_eq!(emulate_sse4a(&[0xF2, 0x45, 0x0F, 0x78, 0xCA, 16, 16], &mut xmm), Some(7));
+        assert_eq!(xmm[9].0, 0xFFFF_FFFF_CAFE_1234);
+
+        // INSERTQ register form: F2 0F 79 C1 -> xmm0, xmm1 (len=8 in hi[5:0], idx=24 in hi[13:8])
+        xmm[0] = (0x0000_0000_1122_3344, 0);
+        xmm[1] = (0x0000_0000_0000_00EE, (24u64 << 8) | 8u64);
+        assert_eq!(emulate_sse4a(&[0xF2, 0x0F, 0x79, 0xC1], &mut xmm), Some(4));
+        assert_eq!(xmm[0].0, 0x0000_0000_EE22_3344);
+
+        // EXTRQ immediate form with REX.B=0x41: 66 41 0F 78 C2 0C 04 -> xmm10, len=12, idx=4
+        xmm[10] = (0x1234_5678_9ABC_DEF0, 0x9999);
+        assert_eq!(emulate_sse4a(&[0x66, 0x41, 0x0F, 0x78, 0xC2, 12, 4], &mut xmm), Some(7));
+        assert_eq!(xmm[10].0, 0xDEF);
+        assert_eq!(xmm[10].1, 0x9999);
+
+        // EXTRQ register form: 66 0F 79 C1 -> xmm0, xmm1 (len=0 => 64 bits, idx=0)
+        xmm[0] = (0x0123_4567_89AB_CDEF, 0);
+        xmm[1] = (0, 0); // len=0 (64), idx=0
+        assert_eq!(emulate_sse4a(&[0x66, 0x0F, 0x79, 0xC1], &mut xmm), Some(4));
+        assert_eq!(xmm[0].0, 0x0123_4567_89AB_CDEF);
+    }
 }
