@@ -1082,14 +1082,29 @@ fn execute_stream(
                             }
                         }
                     } else if has_load && has_store {
-                        // Compute buffer copy (SHADER #5 pattern: s[0:3] = src V#, s[4:7] = dst V#)
+                        // Compute buffer copy (SHADER #5 or offset-copy upload shader: s[0:3]=src V#, s[4:7]=dst V#, s[8:11]=const V#)
                         if let (Some((src, sbytes)), Some((dst, dbytes))) =
                             (decode_vsharp(&gpu.sh, 0x240), decode_vsharp(&gpu.sh, 0x244))
                         {
-                            let n = sbytes.min(dbytes);
-                            if is_committed(src, n) && is_committed(dst, n) {
+                            let mut dst_off = 0usize;
+                            let mut copy_bytes = sbytes.min(dbytes);
+                            if let Some((cb, cbytes)) = decode_vsharp(&gpu.sh, 0x248) {
+                                if cbytes >= 12 && is_committed(cb, 12) {
+                                    let c = unsafe { std::slice::from_raw_parts(cb as *const u32, 3) };
+                                    if trace {
+                                        eprintln!("[orbis] GPU:     cs_copy src={src:#x}({sbytes}) dst={dst:#x}({dbytes}) cb={c:#x?}");
+                                    }
+                                    // Heuristic: if c[1] looks like a dword/byte offset inside dst, honor it.
+                                    let off_cand = (c[0] as usize) * 4;
+                                    if off_cand < dbytes && off_cand + copy_bytes <= dbytes {
+                                        dst_off = off_cand;
+                                    }
+                                }
+                            }
+                            let dst_at = dst.saturating_add(dst_off);
+                            if is_committed(src, copy_bytes) && is_committed(dst_at, copy_bytes) {
                                 unsafe {
-                                    std::ptr::copy(src as *const u8, dst as *mut u8, n);
+                                    std::ptr::copy(src as *const u8, dst_at as *mut u8, copy_bytes);
                                 }
                             }
                         }
