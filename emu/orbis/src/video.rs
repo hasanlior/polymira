@@ -161,14 +161,23 @@ pub extern "sysv64" fn wait_vblank(_handle: i32) -> i32 {
 fn present(buf: &Buffer, n: u64) {
     let (w, h) = (buf.width as usize, buf.height as usize);
     let pitch = buf.pitch.max(buf.width) as usize;
-    let src = unsafe { std::slice::from_raw_parts(buf.addr as *const u32, pitch * h) };
+    let mut px = if buf.tiling != 0 {
+        let bytes = unsafe { std::slice::from_raw_parts(buf.addr as *const u8, pitch * h * 4) };
+        crate::tiling::untile_32bpp(bytes, buf.width, buf.height, buf.tiling)
+    } else {
+        let src = unsafe { std::slice::from_raw_parts(buf.addr as *const u32, pitch * h) };
+        let mut out = vec![0u32; w * h];
+        for y in 0..h {
+            out[y * w..(y + 1) * w].copy_from_slice(&src[y * pitch..y * pitch + w]);
+        }
+        out
+    };
     // R and B swap for ABGR-ordered formats; others are shown as stored (BGRA).
     let swap = (buf.format >> 8) & 0xFF == 0x22 || buf.format & 0xFFFF_FFFF == 0x8000_2200;
-    let mut px = vec![0u32; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let v = src[y * pitch + x];
-            px[y * w + x] = if swap { (v & 0xFF00FF00) | ((v & 0xFF) << 16) | ((v >> 16) & 0xFF) } else { v };
+    if swap {
+        for p in &mut px {
+            let v = *p;
+            *p = (v & 0xFF00FF00) | ((v & 0xFF) << 16) | ((v >> 16) & 0xFF);
         }
     }
     if let Ok(dir) = std::env::var("ORBIS_DUMP") {

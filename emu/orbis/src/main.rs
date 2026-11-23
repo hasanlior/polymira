@@ -16,6 +16,7 @@ mod equeue;
 mod gpu;
 mod agc;
 mod shader;
+mod tiling;
 mod vk;
 mod video;
 mod system;

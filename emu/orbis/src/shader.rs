@@ -456,6 +456,87 @@ pub fn spv_blit_fs() -> Vec<u32> {
     b.finish()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShaderStage {
+    Vertex,
+    Fragment,
+}
+
+/// Solid-color fragment shader reading a 16-byte push-constant `vec4 color` (for untextured/clear draws).
+pub fn spv_solid_fs() -> Vec<u32> {
+    let mut b = SpirvBuilder::new();
+    SpirvBuilder::push_op(&mut b.header, 17, &[1]); // Capability Shader
+    SpirvBuilder::push_op(&mut b.header, 14, &[0, 1]); // Logical GLSL450
+
+    let main_fn = b.id();
+    let v_out = b.id();
+    let v_pc = b.id();
+    let t_pc_struct = b.id();
+
+    let mut ep = vec![4, main_fn];
+    SpirvBuilder::push_str(&mut ep, "main");
+    ep.push(v_out);
+    SpirvBuilder::push_op(&mut b.header, 15, &ep);
+    SpirvBuilder::push_op(&mut b.header, 16, &[main_fn, 7]); // OriginUpperLeft
+
+    SpirvBuilder::push_op(&mut b.header, 71, &[v_out, 30, 0]);       // Location 0
+    SpirvBuilder::push_op(&mut b.header, 71, &[t_pc_struct, 2]);     // Block
+    SpirvBuilder::push_op(&mut b.header, 72, &[t_pc_struct, 0, 35, 0]); // MemberDecorate Offset 0
+
+    let t_void = b.id();
+    let t_fn = b.id();
+    let t_f32 = b.id();
+    let t_vec4 = b.id();
+    let t_i32 = b.id();
+    let t_ptr_out_vec4 = b.id();
+    let t_ptr_pc_struct = b.id();
+    let t_ptr_pc_vec4 = b.id();
+    let c_i0 = b.id();
+
+    SpirvBuilder::push_op(&mut b.decls, 19, &[t_void]);
+    SpirvBuilder::push_op(&mut b.decls, 33, &[t_fn, t_void]);
+    SpirvBuilder::push_op(&mut b.decls, 22, &[t_f32, 32]);
+    SpirvBuilder::push_op(&mut b.decls, 23, &[t_vec4, t_f32, 4]);
+    SpirvBuilder::push_op(&mut b.decls, 21, &[t_i32, 32, 1]);
+    SpirvBuilder::push_op(&mut b.decls, 30, &[t_pc_struct, t_vec4]); // OpTypeStruct
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_out_vec4, 3, t_vec4]);
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_pc_struct, 9, t_pc_struct]); // PushConstant
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_pc_vec4, 9, t_vec4]);
+    SpirvBuilder::push_op(&mut b.decls, 43, &[t_i32, c_i0, 0]);
+
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_out_vec4, v_out, 3]);
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_pc_struct, v_pc, 9]);
+
+    let lbl = b.id();
+    let ptr = b.id();
+    let col = b.id();
+    SpirvBuilder::push_op(&mut b.body, 54, &[t_void, main_fn, 0, t_fn]);
+    SpirvBuilder::push_op(&mut b.body, 248, &[lbl]);
+    SpirvBuilder::push_op(&mut b.body, 65, &[t_ptr_pc_vec4, ptr, v_pc, c_i0]); // AccessChain
+    SpirvBuilder::push_op(&mut b.body, 61, &[t_vec4, col, ptr]);
+    SpirvBuilder::push_op(&mut b.body, 62, &[v_out, col]);
+    SpirvBuilder::push_op(&mut b.body, 253, &[]);
+    SpirvBuilder::push_op(&mut b.body, 56, &[]);
+
+    b.finish()
+}
+
+/// Translates a PS5 RDNA2 shader into a valid Vulkan 1.2 SPIR-V module.
+pub fn compile_rdna2_to_spirv(words: &[u32], stage: ShaderStage) -> (DecodedShader, Vec<u32>) {
+    let decoded = decode_rdna2(words);
+    let spv = match stage {
+        ShaderStage::Vertex => spv_fullscreen_vs(),
+        ShaderStage::Fragment => {
+            if decoded.has_image_sample {
+                spv_blit_fs()
+            } else {
+                spv_solid_fs()
+            }
+        }
+    };
+    (decoded, spv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,9 +545,11 @@ mod tests {
     fn spirv_headers_valid() {
         let vs = spv_fullscreen_vs();
         let fs = spv_blit_fs();
+        let solid = spv_solid_fs();
         assert_eq!(vs[0], 0x0723_0203);
         assert_eq!(fs[0], 0x0723_0203);
-        assert!(vs.len() > 20 && fs.len() > 20);
+        assert_eq!(solid[0], 0x0723_0203);
+        assert!(vs.len() > 20 && fs.len() > 20 && solid.len() > 20);
     }
 
     #[test]

@@ -638,6 +638,79 @@ impl VkRenderer {
         None
     }
 
+    /// Compiles and caches a Vulkan graphics pipeline for a bound PS5 (VS, PS) shader pair.
+    pub fn ensure_shader_pipeline(&mut self, vs_addr: usize, ps_addr: usize, vs_spv: &[u32], ps_spv: &[u32], has_tex: bool) -> bool {
+        if !self.blit_ready || vs_addr == 0 || ps_addr == 0 {
+            return false;
+        }
+        if self.pipelines.contains_key(&(vs_addr, ps_addr)) {
+            return true;
+        }
+        unsafe {
+            let Ok(vs_mod) = self.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(vs_spv), None) else {
+                return false;
+            };
+            let Ok(fs_mod) = self.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(ps_spv), None) else {
+                self.device.destroy_shader_module(vs_mod, None);
+                return false;
+            };
+            let pc_ranges = [vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                offset: 0,
+                size: 16,
+            }];
+            let dsls = [self.blit_dset_layout];
+            let pl_ci = if has_tex {
+                vk::PipelineLayoutCreateInfo::default().set_layouts(&dsls)
+            } else {
+                vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&pc_ranges)
+            };
+            let Ok(pl) = self.device.create_pipeline_layout(&pl_ci, None) else {
+                self.device.destroy_shader_module(vs_mod, None);
+                self.device.destroy_shader_module(fs_mod, None);
+                return false;
+            };
+            let entry = c"main";
+            let stages = [
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vs_mod).name(entry),
+                vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fs_mod).name(entry),
+            ];
+            let vi = vk::PipelineVertexInputStateCreateInfo::default();
+            let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+            let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+            let rs = vk::PipelineRasterizationStateCreateInfo::default()
+                .polygon_mode(vk::PolygonMode::FILL)
+                .cull_mode(vk::CullModeFlags::NONE)
+                .line_width(1.0);
+            let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            let cba = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
+            let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&cba);
+            let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+            let ds = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+            let gp_ci = [vk::GraphicsPipelineCreateInfo::default()
+                .stages(&stages)
+                .vertex_input_state(&vi)
+                .input_assembly_state(&ia)
+                .viewport_state(&vp)
+                .rasterization_state(&rs)
+                .multisample_state(&ms)
+                .color_blend_state(&cb)
+                .dynamic_state(&ds)
+                .layout(pl)
+                .render_pass(self.blit_rp)];
+            let pipe = self.device.create_graphics_pipelines(vk::PipelineCache::null(), &gp_ci, None).ok().map(|v| v[0]);
+            self.device.destroy_shader_module(vs_mod, None);
+            self.device.destroy_shader_module(fs_mod, None);
+            if let Some(p) = pipe {
+                self.pipelines.insert((vs_addr, ps_addr), (pl, p, self.blit_rp));
+                true
+            } else {
+                self.device.destroy_pipeline_layout(pl, None);
+                false
+            }
+        }
+    }
+
     pub fn ensure_target(&mut self, addr: usize, width: u32, height: u32) -> Option<&VkTarget> {
         if addr == 0 || width == 0 || height == 0 {
             return None;

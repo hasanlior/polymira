@@ -756,6 +756,23 @@ fn is_committed(addr: usize, len: usize) -> bool {
     }
 }
 
+fn compile_bound_graphics_pipeline(gpu: &GpuState) {
+    let vs_lo = *gpu.sh.get(&0x80).unwrap_or(&0) as u64;
+    let vs_hi = *gpu.sh.get(&0x81).unwrap_or(&0) as u64;
+    let ps_lo = *gpu.sh.get(&0x06).unwrap_or(&0) as u64;
+    let ps_hi = *gpu.sh.get(&0x07).unwrap_or(&0) as u64;
+    let vs_addr = ((vs_lo | ((vs_hi & 0xFF) << 32)) << 8) as usize;
+    let ps_addr = ((ps_lo | ((ps_hi & 0xFF) << 32)) << 8) as usize;
+    if !is_committed(vs_addr, 64) || !is_committed(ps_addr, 64) {
+        return;
+    }
+    let vs_words = unsafe { std::slice::from_raw_parts(vs_addr as *const u32, 64) };
+    let ps_words = unsafe { std::slice::from_raw_parts(ps_addr as *const u32, 64) };
+    let (_, vs_spv) = crate::shader::compile_rdna2_to_spirv(vs_words, crate::shader::ShaderStage::Vertex);
+    let (ps_dec, ps_spv) = crate::shader::compile_rdna2_to_spirv(ps_words, crate::shader::ShaderStage::Fragment);
+    let _ = crate::vk::with_renderer(|r| r.ensure_shader_pipeline(vs_addr, ps_addr, &vs_spv, &ps_spv, ps_dec.has_image_sample));
+}
+
 fn decode_vsharp(sh: &BTreeMap<u32, u32>, base_reg: u32) -> Option<(usize, usize)> {
     let w0 = *sh.get(&base_reg)?;
     let w1 = *sh.get(&(base_reg + 1))?;
@@ -990,6 +1007,7 @@ fn execute_stream(
                 }
             }
             OP_DRAW_INDEX_OFFSET_2 if len >= 5 => {
+                compile_bound_graphics_pipeline(gpu);
                 if trace {
                     let vs_ud: Vec<u32> = (0x8C..0x94).map(|r| *gpu.sh.get(&r).unwrap_or(&0)).collect();
                     let ps_ud: Vec<u32> = (0x0C..0x14).map(|r| *gpu.sh.get(&r).unwrap_or(&0)).collect();
