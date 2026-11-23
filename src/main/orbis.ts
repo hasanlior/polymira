@@ -55,26 +55,24 @@ export async function tryRunGame(game: Game): Promise<{ code: number; log: strin
   if (!exe) throw new Error('Orbis bu sürümde bulunamadı.')
   const file = executableOf(game)
   if (!file) throw new Error('Oyunun çalıştırılabilir dosyası (eboot.bin) bulunamadı.')
-  // Start it the way a terminal does: its own visible window, the log in a file (a pipe slows
-  // the game down, since Orbis logs every frame), the game folder as working directory.
+  // Start it exactly the way a terminal does (that is what works): its own console window,
+  // started through cmd's `start`, without Electron's environment variables.
   const dataDir = path.join(app.getPath('userData'), 'orbis')
   fs.mkdirSync(dataDir, { recursive: true })
-  const logFile = path.join(dataDir, 'orbis.log')
-  const logFd = fs.openSync(logFile, 'w')
-  const child = spawn(exe, ['run', file], {
-    env: { ...process.env, ORBIS_TITLE: game.title, ORBIS_DATA: dataDir },
+  const env: NodeJS.ProcessEnv = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!/^(ELECTRON|CHROME|NODE_|VITE)/i.test(k)) env[k] = v
+  }
+  env.ORBIS_TITLE = game.title
+  env.ORBIS_DATA = dataDir
+  const child = spawn('cmd.exe', ['/d', '/c', 'start', '"POLYMIRA Orbis"', '/min', `"${exe}"`, 'run', `"${file}"`], {
+    env,
     cwd: path.dirname(file),
     detached: true,
-    stdio: ['ignore', logFd, logFd],
+    stdio: 'ignore',
+    windowsVerbatimArguments: true,
   })
-  fs.closeSync(logFd)
-  const readLog = (): string => {
-    try {
-      return fs.readFileSync(logFile, 'utf8').split(/\r?\n/).filter(Boolean).slice(0, 120).join('\n')
-    } catch {
-      return ''
-    }
-  }
+  const readLog = (): string => ''
   return new Promise((resolve) => {
     let settled = false
     const finish = (code: number) => {
