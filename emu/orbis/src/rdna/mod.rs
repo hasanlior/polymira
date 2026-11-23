@@ -5,6 +5,7 @@
 //! translator to SPIR-V builds on it.
 
 mod ops;
+pub mod interp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fmt {

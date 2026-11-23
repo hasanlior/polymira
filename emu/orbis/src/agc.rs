@@ -810,6 +810,60 @@ fn bound_shader_pair(gpu: &GpuState) -> (usize, usize) {
     (vs, ps)
 }
 
+fn mem_ok(addr: usize, len: usize) -> bool {
+    is_committed(addr, len)
+}
+
+/// Runs the bound vertex (NGG) shader on the CPU for the vertices of a draw and prints the
+/// clip-space positions (ORBIS_VS_CPU=1). Checks the interpreter against known-good draws.
+fn vs_cpu_probe(gpu: &GpuState, idx_off: usize, idx_cnt: usize) {
+    static SEEN: std::sync::Mutex<Vec<(usize, u32)>> = std::sync::Mutex::new(Vec::new());
+    let (vs_addr, _) = bound_shader_pair(gpu);
+    {
+        let mut seen = SEEN.lock().unwrap();
+        let entry = seen.iter_mut().find(|(a, _)| *a == vs_addr);
+        match entry {
+            Some((_, n)) if *n >= 3 => return,
+            Some((_, n)) => *n += 1,
+            None => seen.push((vs_addr, 1)),
+        }
+    }
+    if !is_committed(vs_addr, 256) {
+        return;
+    }
+    let code = unsafe { std::slice::from_raw_parts(vs_addr as *const u32, 1 << 14) };
+    let ib = (gpu.index_base as usize).saturating_add(idx_off * 2);
+    if !is_committed(ib, idx_cnt.min(6) * 2) {
+        return;
+    }
+    let idxs = unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt.min(6)) };
+    let mut line = String::new();
+    for &ix in idxs.iter().take(4) {
+        let mut lane = crate::rdna::interp::Lane::new();
+        lane.s[3] = 0x101; // one vertex, one primitive in this "wave"
+        for k in 0..24u32 {
+            lane.s[8 + k as usize] = *gpu.sh.get(&(0x8C + k)).unwrap_or(&0);
+        }
+        lane.v[5] = ix as u32; // VertexID
+        lane.v[8] = 0; // InstanceID
+        match crate::rdna::interp::run(code, &mut lane, mem_ok) {
+            Ok(()) => {
+                let pos = lane.exports.iter().find(|e| e.target == 12).map(|e| e.value);
+                let params = lane.exports.iter().filter(|e| e.target >= 32).count();
+                match pos {
+                    Some(p) => line += &format!(" v{ix}=({:.3},{:.3},{:.3},{:.3})+{params}p", p[0], p[1], p[2], p[3]),
+                    None => line += &format!(" v{ix}=no-pos"),
+                }
+            }
+            Err(e) => {
+                line += &format!(" v{ix}: {e}");
+                break;
+            }
+        }
+    }
+    eprintln!("[orbis] VS-CPU vs={vs_addr:#x} n={idx_cnt}:{line}");
+}
+
 fn compile_bound_graphics_pipeline(gpu: &GpuState) {
     let (vs_addr, ps_addr) = bound_shader_pair(gpu);
     if !is_committed(vs_addr, 64) || !is_committed(ps_addr, 64) {
@@ -1065,6 +1119,9 @@ fn execute_stream(
                 let vs_ud: [u32; 8] = std::array::from_fn(|k| *gpu.sh.get(&(0x8C + k as u32)).unwrap_or(&0));
                 let ps_ud: [u32; 8] = std::array::from_fn(|k| *gpu.sh.get(&(0x0C + k as u32)).unwrap_or(&0));
 
+                if std::env::var_os("ORBIS_VS_CPU").is_some() {
+                    vs_cpu_probe(gpu, idx_off, idx_cnt);
+                }
                 // Decode real UI/quad geometry: MVP matrix at vs[0..2], vertex V# table at vs[4..6], u16 indices at index_base + idx_off*2
                 let mvp_ptr = (vs_ud[0] as u64 | (((vs_ud[1] & 0xFFFF) as u64) << 32)) as usize;
                 let vt_ptr = (vs_ud[4] as u64 | (((vs_ud[5] & 0xFFFF) as u64) << 32)) as usize;

@@ -3,7 +3,7 @@
 //!
 //! Folder: %APPDATA%\POLYMIRA\orbis\savedata\<game folder>\<save directory name>
 
-use std::ffi::{c_char, CStr};
+use std::ffi::c_char;
 use std::path::PathBuf;
 use std::sync::Mutex;
 

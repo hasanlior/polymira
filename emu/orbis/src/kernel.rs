@@ -320,7 +320,7 @@ pub extern "sysv64" fn load_start_module(path: *const c_char, _argc: usize, _arg
 // ── mspaces (sceLibcMspace*): heaps a game creates over its own memory ──
 // Orbis serves them from the PC heap; the region the game offers is left alone.
 
-use crate::hle_rt::{calloc as rt_calloc, free_any, memalign as rt_memalign};
+use crate::hle_rt::{free_any, memalign as rt_memalign};
 
 fn usable(p: *mut c_void) -> usize {
     if p.is_null() {
