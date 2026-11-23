@@ -12,6 +12,7 @@ mod hle;
 mod hle_rt;
 mod known;
 mod kernel;
+mod rdna;
 mod equeue;
 mod gpu;
 mod agc;
@@ -147,6 +148,15 @@ fn main() -> ExitCode {
             Ok(())
         })(),
         Some("selftest") => selftest::run(),
+        // rdna-dis <shader.bin>: one line per instruction (offset, dwords, name) for checking the decoder.
+        Some("rdna-dis") if args.len() >= 2 => (|| {
+            let bytes = std::fs::read(&args[1]).map_err(|e| e.to_string())?;
+            let code: Vec<u32> = bytes.chunks(4).map(|c| { let mut b = [0u8; 4]; b[..c.len()].copy_from_slice(c); u32::from_le_bytes(b) }).collect();
+            for i in rdna::decode_shader(&code) {
+                println!("{:06x} {} {}", i.pc, i.words.len(), i.name);
+            }
+            Ok(())
+        })(),
         Some("sample") if args.len() >= 2 => std::fs::write(&args[1], selftest::wrap_self(&selftest::build_elf())).map_err(|e| e.to_string()),
         _ => Err("usage: orbis analyze <eboot.bin> [--json] | orbis run <eboot.bin> | orbis selftest".into()),
     };
