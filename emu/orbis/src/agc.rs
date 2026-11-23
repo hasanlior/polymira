@@ -991,7 +991,7 @@ fn execute_stream(
                         let readable = false;
                         if readable {
                             let f = unsafe { std::slice::from_raw_parts(ptr as *const f32, 4) };
-                            if f.iter().all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0) && f[3] > 0.0 {
+                            if f.iter().all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0) && f[3] > 0.0 && (f[0] < 0.99 || f[1] < 0.99 || f[2] < 0.99) {
                                 gpu.clear_rgba = [f[0], f[1], f[2], f[3]];
                                 crate::video::set_clear_color(gpu.clear_rgba);
                             }
@@ -1119,87 +1119,118 @@ fn execute_stream(
                         let idxs = unsafe { std::slice::from_raw_parts(ib_ptr as *const u16, idx_cnt) };
                         let max_idx = idxs.iter().copied().max().unwrap_or(0) as usize;
                         if max_idx < 2048 && is_committed(vb_ptr, (max_idx + 1) * stride) {
-                            let base_v = gpu.frame_verts.len() as u32;
-                            let first_index = gpu.frame_idxs.len() as u32;
-                            let mut any_nonzero = false;
-                            // Detect 20-byte packed f16x4 UI vertex (w at +6 == 0x3C00 == 1.0f16)
-                            let is_f16 = stride == 20 && unsafe { *((vb_ptr + 6) as *const u16) } == 0x3C00;
-                            for vi in 0..=max_idx {
-                                let vp = vb_ptr + vi * stride;
-                                let (x, y, z, u, v) = if is_f16 {
-                                    unsafe {
-                                        (
-                                            f16_to_f32(*(vp as *const u16)),
-                                            f16_to_f32(*((vp + 2) as *const u16)),
-                                            f16_to_f32(*((vp + 4) as *const u16)),
-                                            *((vp + 8) as *const u16) as f32 / 65535.0,
-                                            *((vp + 10) as *const u16) as f32 / 65535.0,
-                                        )
+                            // Detect packed f16x4 UI vertex (stride 12/16/20 with w at +6 == 0x3C00 == 1.0f16)
+                            let is_f16 = matches!(stride, 12 | 16 | 20)
+                                && unsafe { *((vb_ptr + 6) as *const u16) } == 0x3C00;
+                            // Detect 16-byte font glyph quad: v[0] and v[1] share base UV at +8, local corner (0/1) in +4/+6
+                            let is_font_glyph = is_f16
+                                && stride == 16
+                                && max_idx >= 1
+                                && unsafe { *((vb_ptr + 8) as *const u32) == *((vb_ptr + 16 + 8) as *const u32) };
+                            // Skip unpopulated 1024x1024 cubemap skybox cube so it doesn't cover 2D UI before cubemap support
+                            let is_skybox_cube = !is_f16 && idx_cnt == 36 && tex_w == 1024 && tex_h == 1024;
+                            if !is_skybox_cube {
+                                let base_v = gpu.frame_verts.len() as u32;
+                                let first_index = gpu.frame_idxs.len() as u32;
+                                let mut any_nonzero = false;
+                                for vi in 0..=max_idx {
+                                    let vp = vb_ptr + vi * stride;
+                                    let (x, y, z, u, v) = if is_font_glyph {
+                                        unsafe {
+                                            let cx_local = f16_to_f32(*((vp + 4) as *const u16));
+                                            let cy_local = f16_to_f32(*((vp + 6) as *const u16));
+                                            let ub = *((vp + 8) as *const u16) as f32 / 65536.0;
+                                            let vb_uv = *((vp + 10) as *const u16) as f32 / 65536.0;
+                                            (
+                                                f16_to_f32(*(vp as *const u16)),
+                                                f16_to_f32(*((vp + 2) as *const u16)),
+                                                0.0,
+                                                ub + cx_local * (1.0 / 16.0),
+                                                vb_uv + cy_local * (1.0 / 16.0),
+                                            )
+                                        }
+                                    } else if is_f16 {
+                                        unsafe {
+                                            (
+                                                f16_to_f32(*(vp as *const u16)),
+                                                f16_to_f32(*((vp + 2) as *const u16)),
+                                                f16_to_f32(*((vp + 4) as *const u16)),
+                                                *((vp + 8) as *const u16) as f32 / 65535.0,
+                                                *((vp + 10) as *const u16) as f32 / 65535.0,
+                                            )
+                                        }
+                                    } else {
+                                        unsafe {
+                                            (
+                                                *(vp as *const f32),
+                                                *((vp + 4) as *const f32),
+                                                *((vp + 8) as *const f32),
+                                                0.0,
+                                                0.0,
+                                            )
+                                        }
+                                    };
+                                    if x != 0.0 || y != 0.0 {
+                                        any_nonzero = true;
                                     }
-                                } else {
-                                    unsafe {
-                                        (
-                                            *(vp as *const f32),
-                                            *((vp + 4) as *const f32),
-                                            *((vp + 8) as *const f32),
-                                            0.0,
-                                            0.0,
-                                        )
-                                    }
-                                };
-                                if x != 0.0 || y != 0.0 {
-                                    any_nonzero = true;
-                                }
-                                // Column-major mat4 * (x, y, z, 1)
-                                let cx = m[0] * x + m[4] * y + m[8] * z + m[12];
-                                let cy = -(m[1] * x + m[5] * y + m[9] * z + m[13]); // Vulkan Y-down
-                                let cz = (m[2] * x + m[6] * y + m[10] * z + m[14]).clamp(0.0, 1.0);
-                                let cw = m[3] * x + m[7] * y + m[11] * z + m[15];
-                                let cw = if cw.abs() < 1e-6 { 1.0 } else { cw };
-                                let vcol = if stride >= 20 {
-                                    let rgba = unsafe { *((vp + 16) as *const u32) };
-                                    if rgba != 0 {
-                                        [
-                                            (rgba & 0xFF) as f32 / 255.0,
-                                            ((rgba >> 8) & 0xFF) as f32 / 255.0,
-                                            ((rgba >> 16) & 0xFF) as f32 / 255.0,
-                                            ((rgba >> 24) & 0xFF) as f32 / 255.0,
-                                        ]
+                                    // Column-major mat4 * (x, y, z, 1)
+                                    let cx = m[0] * x + m[4] * y + m[8] * z + m[12];
+                                    let cy = -(m[1] * x + m[5] * y + m[9] * z + m[13]); // Vulkan Y-down
+                                    let cz = (m[2] * x + m[6] * y + m[10] * z + m[14]).clamp(0.0, 1.0);
+                                    let cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+                                    let cw = if cw.abs() < 1e-6 { 1.0 } else { cw };
+                                    let col_off = if stride == 16 && is_f16 {
+                                        Some(12)
+                                    } else if stride >= 20 {
+                                        Some(16)
+                                    } else {
+                                        None
+                                    };
+                                    let vcol = if let Some(off) = col_off {
+                                        let rgba = unsafe { *((vp + off) as *const u32) };
+                                        if rgba != 0 {
+                                            [
+                                                (rgba & 0xFF) as f32 / 255.0,
+                                                ((rgba >> 8) & 0xFF) as f32 / 255.0,
+                                                ((rgba >> 16) & 0xFF) as f32 / 255.0,
+                                                ((rgba >> 24) & 0xFF) as f32 / 255.0,
+                                            ]
+                                        } else {
+                                            [1.0, 1.0, 1.0, 1.0]
+                                        }
                                     } else {
                                         [1.0, 1.0, 1.0, 1.0]
-                                    }
-                                } else {
-                                    [1.0, 1.0, 1.0, 1.0]
-                                };
-                                let col = if ps_is_tex {
-                                    vcol
-                                } else if let Some(pc) = ps_col {
-                                    [pc[0] * vcol[0], pc[1] * vcol[1], pc[2] * vcol[2], pc[3] * vcol[3]]
-                                } else if has_tint {
-                                    [tint[0] * vcol[0], tint[1] * vcol[1], tint[2] * vcol[2], tint[3] * vcol[3]]
-                                } else {
-                                    vcol
-                                };
-                                gpu.frame_verts.push(crate::vk::Vertex {
-                                    pos: [cx / cw, cy / cw, cz / cw, 1.0],
-                                    uv: [u, v],
-                                    color: col,
-                                });
-                            }
-                            if any_nonzero {
-                                for &ix in idxs {
-                                    gpu.frame_idxs.push(base_v + ix as u32);
+                                    };
+                                    let col = if ps_is_tex {
+                                        vcol
+                                    } else if let Some(pc) = ps_col {
+                                        [pc[0] * vcol[0], pc[1] * vcol[1], pc[2] * vcol[2], pc[3] * vcol[3]]
+                                    } else if has_tint {
+                                        [tint[0] * vcol[0], tint[1] * vcol[1], tint[2] * vcol[2], tint[3] * vcol[3]]
+                                    } else {
+                                        vcol
+                                    };
+                                    gpu.frame_verts.push(crate::vk::Vertex {
+                                        pos: [cx / cw, cy / cw, cz / cw, 1.0],
+                                        uv: [u, v],
+                                        color: col,
+                                    });
                                 }
-                                gpu.frame_batches.push(crate::vk::DrawBatch {
-                                    first_index,
-                                    index_count: idxs.len() as u32,
-                                    tex_addr,
-                                    tex_w,
-                                    tex_h,
-                                    tex_swiz,
-                                });
-                            } else {
-                                gpu.frame_verts.truncate(base_v as usize);
+                                if any_nonzero {
+                                    for &ix in idxs {
+                                        gpu.frame_idxs.push(base_v + ix as u32);
+                                    }
+                                    gpu.frame_batches.push(crate::vk::DrawBatch {
+                                        first_index,
+                                        index_count: idxs.len() as u32,
+                                        tex_addr,
+                                        tex_w,
+                                        tex_h,
+                                        tex_swiz,
+                                    });
+                                } else {
+                                    gpu.frame_verts.truncate(base_v as usize);
+                                }
                             }
                         }
                     }
@@ -1211,9 +1242,26 @@ fn execute_stream(
                     if (ps_ud[1] & 0x0380_0000) != 0x0380_0000 && ps_ud[2] <= 8 && is_committed(ps_p, 48) {
                         ps_f.extend_from_slice(unsafe { std::slice::from_raw_parts(ps_p as *const f32, 12) });
                     }
+                    let vt = if is_committed(vt_ptr, 64) {
+                        unsafe { std::slice::from_raw_parts(vt_ptr as *const u32, 4) }
+                    } else {
+                        &[0, 0, 0, 0]
+                    };
+                    let st = (vt[1] >> 16) & 0x3FFF;
+                    let vb = (vt[0] as u64 | (((vt[1] & 0xFFFF) as u64) << 32)) as usize;
+                    let mut vhex = Vec::new();
+                    if st >= 8 && st <= 64 && is_committed(vb, (st * 2) as usize) {
+                        let sl = unsafe { std::slice::from_raw_parts(vb as *const u32, ((st * 2) / 4) as usize) };
+                        vhex.extend_from_slice(sl);
+                    }
+                    let ps_tex = (ps_ud[1] & 0x0380_0000) == 0x0380_0000;
+                    let tw = if ps_tex { ((ps_ud[1] >> 30) | ((ps_ud[2] & 0xFFF) << 2)) + 1 } else { 0 };
+                    let th = if ps_tex { ((ps_ud[2] >> 14) & 0x3FFF) + 1 } else { 0 };
+                    let tfmt = if ps_tex { (ps_ud[1] >> 20) & 0x3FF } else { 0 };
+                    let tsw = if ps_tex { (ps_ud[3] >> 20) & 0x1F } else { 0 };
                     eprintln!(
-                        "[orbis] GPU:   DRAW_INDEX_OFFSET_2 off={} count={} queued_verts={} ps_f={:.2?}",
-                        w[2], w[3], gpu.frame_verts.len(), ps_f
+                        "[orbis] GPU:   DRAW off={} cnt={} stride={} qv={} qb={} tex=({}x{} fmt={:#x} sw={}) vraw={:08x?}",
+                        w[2], w[3], st, gpu.frame_verts.len(), gpu.frame_batches.len(), tw, th, tfmt, tsw, vhex
                     );
                 }
             }
@@ -1410,7 +1458,7 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
     let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let n = SUBMIT_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
     let trace = (std::env::var_os("ORBIS_TRACE_GPU").is_some() && n <= 3)
-        || (std::env::var_os("ORBIS_DUMP_DRAW").is_some() && n == 180);
+        || (std::env::var_os("ORBIS_DUMP_DRAW").is_some() && (n == 60 || n == 600));
     let mut stats = BTreeMap::new();
     execute_stream(&mut gpu, addr, dwords, 0, trace, &mut stats);
     let draws = (*stats.get(&((OP_NOP << 8) | R_DRAW_INDEX_AUTO)).unwrap_or(&0)

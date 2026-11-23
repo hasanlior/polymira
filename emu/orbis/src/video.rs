@@ -21,7 +21,7 @@ static BUFFERS: Mutex<[Buffer; 16]> = Mutex::new([Buffer { addr: 0, width: 0, he
 static FLIPS: AtomicU64 = AtomicU64::new(0);
 static LAST_ARG: AtomicU64 = AtomicU64::new(0);
 static CURRENT: AtomicU64 = AtomicU64::new(0);
-static CLEAR_RGBA: Mutex<[f32; 4]> = Mutex::new([0.0, 0.0, 0.0, 1.0]);
+static CLEAR_RGBA: Mutex<[f32; 4]> = Mutex::new([0.12, 0.12, 0.12, 1.0]);
 
 pub fn set_clear_color(rgba: [f32; 4]) {
     if let Ok(mut c) = CLEAR_RGBA.lock() {
