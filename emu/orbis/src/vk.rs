@@ -461,6 +461,8 @@ impl VkRenderer {
             self.ibuf = ib;
             self.imem = im;
         }
+        // Upload a 1x1 white fallback texture so desc_set binding 0 is always valid for quad_pipe.
+        self.init_white_texture();
 
         self.quad_pipe = self.create_quad_pipeline(swap_rp, pl).unwrap_or(vk::Pipeline::null());
         self.blit_ready = true;
@@ -470,6 +472,129 @@ impl VkRenderer {
             self.swap_fbs.len()
         );
         Ok(())
+    }
+
+    unsafe fn init_white_texture(&mut self) {
+        if !self.ensure_staging(4) {
+            return;
+        }
+        if let Ok(p) = self.device.map_memory(self.staging_mem, 0, 4, vk::MemoryMapFlags::empty()) {
+            *(p as *mut u32) = 0xFFFF_FFFF;
+            self.device.unmap_memory(self.staging_mem);
+        }
+        let Ok(img) = self.device.create_image(
+            &vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(vk::Format::B8G8R8A8_UNORM)
+                .extent(vk::Extent3D { width: 1, height: 1, depth: 1 })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+                .initial_layout(vk::ImageLayout::UNDEFINED),
+            None,
+        ) else {
+            return;
+        };
+        let req = self.device.get_image_memory_requirements(img);
+        let Some(mi) = self.find_mem_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL) else {
+            return;
+        };
+        let Ok(mem) = self.device.allocate_memory(
+            &vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mi),
+            None,
+        ) else {
+            return;
+        };
+        let _ = self.device.bind_image_memory(img, mem, 0);
+        let Ok(view) = self.device.create_image_view(
+            &vk::ImageViewCreateInfo::default()
+                .image(img)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(vk::Format::B8G8R8A8_UNORM)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                }),
+            None,
+        ) else {
+            return;
+        };
+        let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+        let _ = self.device.reset_fences(&[self.fence]);
+        let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
+        let _ = self.device.begin_command_buffer(
+            self.cmd_buf,
+            &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+        );
+        let sub = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let to_dst = [vk::ImageMemoryBarrier::default()
+            .image(img)
+            .subresource_range(sub)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+        self.device.cmd_pipeline_barrier(
+            self.cmd_buf,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &to_dst,
+        );
+        let region = [vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_extent(vk::Extent3D { width: 1, height: 1, depth: 1 })];
+        self.device.cmd_copy_buffer_to_image(self.cmd_buf, self.staging_buf, img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &region);
+        let to_read = [vk::ImageMemoryBarrier::default()
+            .image(img)
+            .subresource_range(sub)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)];
+        self.device.cmd_pipeline_barrier(
+            self.cmd_buf,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &to_read,
+        );
+        let _ = self.device.end_command_buffer(self.cmd_buf);
+        let cmds = [self.cmd_buf];
+        let submit = [vk::SubmitInfo::default().command_buffers(&cmds)];
+        let _ = self.device.queue_submit(self.queue, &submit, self.fence);
+        let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+
+        let img_info = [vk::DescriptorImageInfo::default()
+            .sampler(self.sampler)
+            .image_view(view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let write = [vk::WriteDescriptorSet::default()
+            .dst_set(self.desc_set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&img_info)];
+        self.device.update_descriptor_sets(&write, &[]);
+        self.upload_tex = Some(VkTarget { image: img, memory: mem, view, width: 1, height: 1 });
     }
 
     unsafe fn alloc_host_buffer(&self, bytes: usize, usage: vk::BufferUsageFlags) -> Option<(vk::Buffer, vk::DeviceMemory)> {
@@ -534,6 +659,14 @@ impl VkRenderer {
                 .clear_values(&clear);
             self.device.cmd_begin_render_pass(self.cmd_buf, &rp_bi, vk::SubpassContents::INLINE);
             self.device.cmd_bind_pipeline(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, self.quad_pipe);
+            self.device.cmd_bind_descriptor_sets(
+                self.cmd_buf,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.blit_layout,
+                0,
+                &[self.desc_set],
+                &[],
+            );
             let vp = [vk::Viewport {
                 x: 0.0,
                 y: 0.0,

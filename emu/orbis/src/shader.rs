@@ -173,13 +173,15 @@ pub fn decode_rdna2(words: &[u32]) -> DecodedShader {
                 offset: w1 & 0x1F_FFFF,
             }
         } else if (w0 >> 26) == 0b1110_00 && i + 1 < words.len() {
-            // MUBUF (GFX10: opcode in bits [24:18] or [22:16] -> 0x0C load_dwordx4, 0x1C store_dwordx4)
+            // MUBUF: GFX10 op is bits [24:18] (e.g. 0x0C=load_dword, 0x0F=load_dwordx4, 0x1C=store_dword, 0x1F=store_dwordx4)
+            // Legacy/compact op in [22:16] also seen (0x0C/0x1C).
             let w1 = words[i + 1];
             step = 2;
-            let mop = ((w0 >> 16) & 0x7F) as u8;
-            if mop <= 0x17 {
+            let mop = ((w0 >> 18) & 0x7F) as u8;
+            let mop16 = ((w0 >> 16) & 0x7F) as u8;
+            if matches!(mop, 0x00..=0x17) && mop16 != 0x1C {
                 has_buffer_load = true;
-            } else if mop <= 0x2F {
+            } else {
                 has_buffer_store = true;
             }
             Rdna2Op::Mubuf {
