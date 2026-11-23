@@ -521,6 +521,247 @@ pub fn spv_solid_fs() -> Vec<u32> {
     b.finish()
 }
 
+/// Vertex shader reading per-vertex `(vec4 pos @ loc 0, vec2 uv @ loc 1, vec4 color @ loc 2)`.
+pub fn spv_vertex_vs() -> Vec<u32> {
+    let mut b = SpirvBuilder::new();
+    SpirvBuilder::push_op(&mut b.header, 17, &[1]); // Capability Shader
+    SpirvBuilder::push_op(&mut b.header, 14, &[0, 1]); // Logical GLSL450
+
+    let main_fn = b.id();
+    let in_pos = b.id();
+    let in_uv = b.id();
+    let in_col = b.id();
+    let out_pos = b.id();
+    let out_uv = b.id();
+    let out_col = b.id();
+
+    let mut ep = vec![0, main_fn];
+    SpirvBuilder::push_str(&mut ep, "main");
+    ep.extend_from_slice(&[in_pos, in_uv, in_col, out_pos, out_uv, out_col]);
+    SpirvBuilder::push_op(&mut b.header, 15, &ep);
+
+    SpirvBuilder::push_op(&mut b.header, 71, &[in_pos, 30, 0]);  // Location 0
+    SpirvBuilder::push_op(&mut b.header, 71, &[in_uv, 30, 1]);   // Location 1
+    SpirvBuilder::push_op(&mut b.header, 71, &[in_col, 30, 2]);  // Location 2
+    SpirvBuilder::push_op(&mut b.header, 71, &[out_pos, 11, 0]); // BuiltIn Position
+    SpirvBuilder::push_op(&mut b.header, 71, &[out_uv, 30, 0]);  // Location 0
+    SpirvBuilder::push_op(&mut b.header, 71, &[out_col, 30, 1]); // Location 1
+
+    let t_void = b.id();
+    let t_fn = b.id();
+    let t_f32 = b.id();
+    let t_vec2 = b.id();
+    let t_vec4 = b.id();
+    let t_ptr_in_v4 = b.id();
+    let t_ptr_in_v2 = b.id();
+    let t_ptr_out_v4 = b.id();
+    let t_ptr_out_v2 = b.id();
+
+    SpirvBuilder::push_op(&mut b.decls, 19, &[t_void]);
+    SpirvBuilder::push_op(&mut b.decls, 33, &[t_fn, t_void]);
+    SpirvBuilder::push_op(&mut b.decls, 22, &[t_f32, 32]);
+    SpirvBuilder::push_op(&mut b.decls, 23, &[t_vec2, t_f32, 2]);
+    SpirvBuilder::push_op(&mut b.decls, 23, &[t_vec4, t_f32, 4]);
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_in_v4, 1, t_vec4]);
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_in_v2, 1, t_vec2]);
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_out_v4, 3, t_vec4]);
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_out_v2, 3, t_vec2]);
+
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_in_v4, in_pos, 1]);
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_in_v2, in_uv, 1]);
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_in_v4, in_col, 1]);
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_out_v4, out_pos, 3]);
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_out_v2, out_uv, 3]);
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_out_v4, out_col, 3]);
+
+    let lbl = b.id();
+    let p = b.id();
+    let u = b.id();
+    let c = b.id();
+    SpirvBuilder::push_op(&mut b.body, 54, &[t_void, main_fn, 0, t_fn]);
+    SpirvBuilder::push_op(&mut b.body, 248, &[lbl]);
+    SpirvBuilder::push_op(&mut b.body, 61, &[t_vec4, p, in_pos]);
+    SpirvBuilder::push_op(&mut b.body, 61, &[t_vec2, u, in_uv]);
+    SpirvBuilder::push_op(&mut b.body, 61, &[t_vec4, c, in_col]);
+    SpirvBuilder::push_op(&mut b.body, 62, &[out_pos, p]);
+    SpirvBuilder::push_op(&mut b.body, 62, &[out_uv, u]);
+    SpirvBuilder::push_op(&mut b.body, 62, &[out_col, c]);
+    SpirvBuilder::push_op(&mut b.body, 253, &[]);
+    SpirvBuilder::push_op(&mut b.body, 56, &[]);
+
+    b.finish()
+}
+
+/// Textured + vertex-tinted fragment shader (`texture(tex, uv) * color`).
+pub fn spv_textured_color_fs() -> Vec<u32> {
+    let mut b = SpirvBuilder::new();
+    SpirvBuilder::push_op(&mut b.header, 17, &[1]);
+    SpirvBuilder::push_op(&mut b.header, 14, &[0, 1]);
+
+    let main_fn = b.id();
+    let v_uv = b.id();
+    let v_col = b.id();
+    let v_out = b.id();
+    let v_tex = b.id();
+
+    let mut ep = vec![4, main_fn];
+    SpirvBuilder::push_str(&mut ep, "main");
+    ep.extend_from_slice(&[v_uv, v_col, v_out]);
+    SpirvBuilder::push_op(&mut b.header, 15, &ep);
+    SpirvBuilder::push_op(&mut b.header, 16, &[main_fn, 7]);
+
+    SpirvBuilder::push_op(&mut b.header, 71, &[v_uv, 30, 0]);
+    SpirvBuilder::push_op(&mut b.header, 71, &[v_col, 30, 1]);
+    SpirvBuilder::push_op(&mut b.header, 71, &[v_out, 30, 0]);
+    SpirvBuilder::push_op(&mut b.header, 71, &[v_tex, 34, 0]);
+    SpirvBuilder::push_op(&mut b.header, 71, &[v_tex, 33, 0]);
+
+    let t_void = b.id();
+    let t_fn = b.id();
+    let t_f32 = b.id();
+    let t_vec2 = b.id();
+    let t_vec4 = b.id();
+    let t_img = b.id();
+    let t_samp = b.id();
+    let t_ptr_in_v2 = b.id();
+    let t_ptr_in_v4 = b.id();
+    let t_ptr_out_v4 = b.id();
+    let t_ptr_uni_samp = b.id();
+
+    SpirvBuilder::push_op(&mut b.decls, 19, &[t_void]);
+    SpirvBuilder::push_op(&mut b.decls, 33, &[t_fn, t_void]);
+    SpirvBuilder::push_op(&mut b.decls, 22, &[t_f32, 32]);
+    SpirvBuilder::push_op(&mut b.decls, 23, &[t_vec2, t_f32, 2]);
+    SpirvBuilder::push_op(&mut b.decls, 23, &[t_vec4, t_f32, 4]);
+    SpirvBuilder::push_op(&mut b.decls, 25, &[t_img, t_f32, 1, 0, 0, 0, 1, 0]);
+    SpirvBuilder::push_op(&mut b.decls, 27, &[t_samp, t_img]);
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_in_v2, 1, t_vec2]);
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_in_v4, 1, t_vec4]);
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_out_v4, 3, t_vec4]);
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_uni_samp, 0, t_samp]);
+
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_in_v2, v_uv, 1]);
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_in_v4, v_col, 1]);
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_out_v4, v_out, 3]);
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_uni_samp, v_tex, 0]);
+
+    let lbl = b.id();
+    let uv = b.id();
+    let col = b.id();
+    let samp = b.id();
+    let texel = b.id();
+    let prod = b.id();
+    SpirvBuilder::push_op(&mut b.body, 54, &[t_void, main_fn, 0, t_fn]);
+    SpirvBuilder::push_op(&mut b.body, 248, &[lbl]);
+    SpirvBuilder::push_op(&mut b.body, 61, &[t_vec2, uv, v_uv]);
+    SpirvBuilder::push_op(&mut b.body, 61, &[t_vec4, col, v_col]);
+    SpirvBuilder::push_op(&mut b.body, 61, &[t_samp, samp, v_tex]);
+    SpirvBuilder::push_op(&mut b.body, 87, &[t_vec4, texel, samp, uv]);
+    SpirvBuilder::push_op(&mut b.body, 133, &[t_vec4, prod, texel, col]); // FMul
+    SpirvBuilder::push_op(&mut b.body, 62, &[v_out, prod]);
+    SpirvBuilder::push_op(&mut b.body, 253, &[]);
+    SpirvBuilder::push_op(&mut b.body, 56, &[]);
+
+    b.finish()
+}
+
+/// Translates a PS5 RDNA2 fragment shader's ALU + EXP mrt0 instructions directly into SPIR-V SSA.
+pub fn translate_rdna2_fragment_alu(decoded: &DecodedShader) -> Option<Vec<u32>> {
+    if !decoded.exports_mrt0 || decoded.has_image_sample {
+        return None;
+    }
+    let mut b = SpirvBuilder::new();
+    SpirvBuilder::push_op(&mut b.header, 17, &[1]); // Capability Shader
+    SpirvBuilder::push_op(&mut b.header, 14, &[0, 1]); // Logical GLSL450
+
+    let main_fn = b.id();
+    let v_out = b.id();
+    let mut ep = vec![4, main_fn];
+    SpirvBuilder::push_str(&mut ep, "main");
+    ep.push(v_out);
+    SpirvBuilder::push_op(&mut b.header, 15, &ep);
+    SpirvBuilder::push_op(&mut b.header, 16, &[main_fn, 7]);
+    SpirvBuilder::push_op(&mut b.header, 71, &[v_out, 30, 0]);
+
+    let t_void = b.id();
+    let t_fn = b.id();
+    let t_f32 = b.id();
+    let t_vec4 = b.id();
+    let t_ptr_out_v4 = b.id();
+    let c_f0 = b.id();
+    let c_f1 = b.id();
+    let c_fn1 = b.id();
+    let c_f05 = b.id();
+
+    SpirvBuilder::push_op(&mut b.decls, 19, &[t_void]);
+    SpirvBuilder::push_op(&mut b.decls, 33, &[t_fn, t_void]);
+    SpirvBuilder::push_op(&mut b.decls, 22, &[t_f32, 32]);
+    SpirvBuilder::push_op(&mut b.decls, 23, &[t_vec4, t_f32, 4]);
+    SpirvBuilder::push_op(&mut b.decls, 32, &[t_ptr_out_v4, 3, t_vec4]);
+    SpirvBuilder::push_op(&mut b.decls, 43, &[t_f32, c_f0, 0.0f32.to_bits()]);
+    SpirvBuilder::push_op(&mut b.decls, 43, &[t_f32, c_f1, 1.0f32.to_bits()]);
+    SpirvBuilder::push_op(&mut b.decls, 43, &[t_f32, c_fn1, (-1.0f32).to_bits()]);
+    SpirvBuilder::push_op(&mut b.decls, 43, &[t_f32, c_f05, 0.5f32.to_bits()]);
+    SpirvBuilder::push_op(&mut b.decls, 59, &[t_ptr_out_v4, v_out, 3]);
+
+    let lbl = b.id();
+    SpirvBuilder::push_op(&mut b.body, 54, &[t_void, main_fn, 0, t_fn]);
+    SpirvBuilder::push_op(&mut b.body, 248, &[lbl]);
+
+    let mut vgpr = [c_f0; 64];
+    let resolve_src = |src: u16, vgpr: &[u32; 64]| -> u32 {
+        match src {
+            256..=319 => vgpr[(src - 256) as usize],
+            128 => c_f0,
+            240 => c_f05,
+            242 => c_f1,
+            243 => c_fn1,
+            _ => c_f0,
+        }
+    };
+
+    let mut exported = None;
+    for op in &decoded.ops {
+        match *op {
+            Rdna2Op::Vop1 { op: 1, dst, src } if (dst as usize) < 64 => {
+                // v_mov_b32
+                vgpr[dst as usize] = resolve_src(src, &vgpr);
+            }
+            Rdna2Op::Vop2 { op: sop, dst, src0, vsrc1 } if (dst as usize) < 64 && (vsrc1 as usize) < 64 => {
+                let a = resolve_src(src0, &vgpr);
+                let c = vgpr[vsrc1 as usize];
+                let res = b.id();
+                match sop {
+                    3 => { SpirvBuilder::push_op(&mut b.body, 129, &[t_f32, res, a, c]); vgpr[dst as usize] = res; } // v_add_f32
+                    4 => { SpirvBuilder::push_op(&mut b.body, 131, &[t_f32, res, a, c]); vgpr[dst as usize] = res; } // v_sub_f32
+                    7 | 8 => { SpirvBuilder::push_op(&mut b.body, 133, &[t_f32, res, a, c]); vgpr[dst as usize] = res; } // v_mul_f32
+                    _ => {}
+                }
+            }
+            Rdna2Op::Exp { target: 0, vsrcs, .. } => {
+                let r = vgpr[(vsrcs[0] as usize).min(63)];
+                let g = vgpr[(vsrcs[1] as usize).min(63)];
+                let bl = vgpr[(vsrcs[2] as usize).min(63)];
+                let a = vgpr[(vsrcs[3] as usize).min(63)];
+                let col = b.id();
+                SpirvBuilder::push_op(&mut b.body, 80, &[t_vec4, col, r, g, bl, a]);
+                exported = Some(col);
+            }
+            _ => {}
+        }
+    }
+
+    let final_col = exported.unwrap_or_else(|| {
+        let c = b.id();
+        SpirvBuilder::push_op(&mut b.body, 80, &[t_vec4, c, c_f1, c_f1, c_f1, c_f1]);
+        c
+    });
+    SpirvBuilder::push_op(&mut b.body, 62, &[v_out, final_col]);
+    SpirvBuilder::push_op(&mut b.body, 253, &[]);
+    SpirvBuilder::push_op(&mut b.body, 56, &[]);
+    Some(b.finish())
+}
+
 /// Translates a PS5 RDNA2 shader into a valid Vulkan 1.2 SPIR-V module.
 pub fn compile_rdna2_to_spirv(words: &[u32], stage: ShaderStage) -> (DecodedShader, Vec<u32>) {
     let decoded = decode_rdna2(words);
@@ -529,6 +770,8 @@ pub fn compile_rdna2_to_spirv(words: &[u32], stage: ShaderStage) -> (DecodedShad
         ShaderStage::Fragment => {
             if decoded.has_image_sample {
                 spv_blit_fs()
+            } else if let Some(alu) = translate_rdna2_fragment_alu(&decoded) {
+                alu
             } else {
                 spv_solid_fs()
             }
@@ -546,10 +789,21 @@ mod tests {
         let vs = spv_fullscreen_vs();
         let fs = spv_blit_fs();
         let solid = spv_solid_fs();
-        assert_eq!(vs[0], 0x0723_0203);
-        assert_eq!(fs[0], 0x0723_0203);
-        assert_eq!(solid[0], 0x0723_0203);
-        assert!(vs.len() > 20 && fs.len() > 20 && solid.len() > 20);
+        let vvs = spv_vertex_vs();
+        let tfs = spv_textured_color_fs();
+        for spv in [&vs, &fs, &solid, &vvs, &tfs] {
+            assert_eq!(spv[0], 0x0723_0203);
+            assert!(spv.len() > 20);
+        }
+    }
+
+    #[test]
+    fn translate_rdna2_alu_fragment_emits_valid_spirv() {
+        // v_mov_b32 v0, 1.0; v_mov_b32 v1, 0.5; exp mrt0 v0, v1, v0, v0; s_endpgm
+        let code = [0x7e00_02f2, 0x7e02_02f0, 0xf800_080f, 0x0000_0100, 0xbf81_0000];
+        let (dec, spv) = compile_rdna2_to_spirv(&code, ShaderStage::Fragment);
+        assert!(dec.exports_mrt0);
+        assert_eq!(spv[0], 0x0723_0203);
     }
 
     #[test]

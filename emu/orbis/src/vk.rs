@@ -10,6 +10,14 @@ use std::sync::{Mutex, OnceLock};
 
 use ash::vk;
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Vertex {
+    pub pos: [f32; 4],
+    pub uv: [f32; 2],
+    pub color: [f32; 4],
+}
+
 pub struct VkTarget {
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
@@ -44,6 +52,7 @@ pub struct VkRenderer {
     pub blit_rp: vk::RenderPass,
     pub blit_layout: vk::PipelineLayout,
     pub blit_pipe: vk::Pipeline,
+    pub quad_pipe: vk::Pipeline,
     pub blit_dset_layout: vk::DescriptorSetLayout,
     pub sampler: vk::Sampler,
     pub desc_pool: vk::DescriptorPool,
@@ -246,6 +255,7 @@ impl VkRenderer {
             blit_rp: vk::RenderPass::null(),
             blit_layout: vk::PipelineLayout::null(),
             blit_pipe: vk::Pipeline::null(),
+            quad_pipe: vk::Pipeline::null(),
             blit_dset_layout: vk::DescriptorSetLayout::null(),
             sampler: vk::Sampler::null(),
             desc_pool: vk::DescriptorPool::null(),
@@ -375,9 +385,78 @@ impl VkRenderer {
         self.sampler = sampler;
         self.desc_pool = desc_pool;
         self.desc_set = desc_set;
+        self.quad_pipe = self.create_quad_pipeline(rp, pl).unwrap_or(vk::Pipeline::null());
         self.blit_ready = true;
-        eprintln!("[orbis] Vulkan: SPIR-V fullscreen blit pipeline + sampler compiled on GPU");
+        eprintln!(
+            "[orbis] Vulkan: SPIR-V fullscreen blit + indexed quad pipelines compiled on GPU (quad={})",
+            self.quad_pipe != vk::Pipeline::null()
+        );
         Ok(())
+    }
+
+    unsafe fn create_quad_pipeline(&self, rp: vk::RenderPass, pl: vk::PipelineLayout) -> Result<vk::Pipeline, String> {
+        let vs_code = crate::shader::spv_vertex_vs();
+        let fs_code = crate::shader::spv_textured_color_fs();
+        let vs_mod = self
+            .device
+            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&vs_code), None)
+            .map_err(|e| format!("quad vs: {e}"))?;
+        let fs_mod = self
+            .device
+            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&fs_code), None)
+            .map_err(|e| format!("quad fs: {e}"))?;
+        let entry = c"main";
+        let stages = [
+            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vs_mod).name(entry),
+            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fs_mod).name(entry),
+        ];
+        let vbind = [vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: std::mem::size_of::<Vertex>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }];
+        let vattr = [
+            vk::VertexInputAttributeDescription { location: 0, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 0 },
+            vk::VertexInputAttributeDescription { location: 1, binding: 0, format: vk::Format::R32G32_SFLOAT, offset: 16 },
+            vk::VertexInputAttributeDescription { location: 2, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: 24 },
+        ];
+        let vi = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&vbind)
+            .vertex_attribute_descriptions(&vattr);
+        let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+        let rs = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .line_width(1.0);
+        let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let cba = [vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD)
+            .color_write_mask(vk::ColorComponentFlags::RGBA)];
+        let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&cba);
+        let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let ds = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+        let gp_ci = [vk::GraphicsPipelineCreateInfo::default()
+            .stages(&stages)
+            .vertex_input_state(&vi)
+            .input_assembly_state(&ia)
+            .viewport_state(&vp)
+            .rasterization_state(&rs)
+            .multisample_state(&ms)
+            .color_blend_state(&cb)
+            .dynamic_state(&ds)
+            .layout(pl)
+            .render_pass(rp)];
+        let pipe = self.device.create_graphics_pipelines(vk::PipelineCache::null(), &gp_ci, None).map_err(|(_, e)| format!("quad pipe: {e}"))?[0];
+        self.device.destroy_shader_module(vs_mod, None);
+        self.device.destroy_shader_module(fs_mod, None);
+        Ok(pipe)
     }
 
     unsafe fn ensure_staging(&mut self, bytes: usize) -> bool {
