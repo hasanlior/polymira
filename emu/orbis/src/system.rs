@@ -275,6 +275,82 @@ pub extern "sysv64" fn http2_offline() -> i32 {
     0x8043_1001u32 as i32 // offline / network unavailable
 }
 
+static NEXT_SOCK: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1000);
+
+pub extern "sysv64" fn net_socket(_domain: i32, _ty: i32, _proto: i32) -> i32 {
+    NEXT_SOCK.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+pub extern "sysv64" fn net_getsockname(_fd: i32, addr: *mut u8, addrlen: *mut u32) -> i32 {
+    if !addr.is_null() {
+        unsafe {
+            let cap = if !addrlen.is_null() { (*addrlen as usize).min(16) } else { 16 };
+            if cap >= 16 {
+                std::ptr::write_bytes(addr, 0, 16);
+                *addr.add(0) = 16; // sin_len (FreeBSD/PS5)
+                *addr.add(1) = 2;  // AF_INET
+                *addr.add(2) = 0x4A; // htons(19132) = 0x4ABC
+                *addr.add(3) = 0xBC;
+                *addr.add(4) = 127;
+                *addr.add(5) = 0;
+                *addr.add(6) = 0;
+                *addr.add(7) = 1;
+                if !addrlen.is_null() {
+                    *addrlen = 16;
+                }
+            }
+        }
+    }
+    0
+}
+
+pub extern "sysv64" fn net_send(_fd: i32, _buf: *const u8, len: usize) -> isize {
+    len as isize
+}
+
+pub extern "sysv64" fn net_fail() -> isize {
+    crate::hle_rt::set_errno(35); // EAGAIN
+    -1
+}
+
+pub extern "sysv64" fn net_inet_ntop(af: i32, src: *const u8, dst: *mut u8, size: u32) -> *mut u8 {
+    if src.is_null() || dst.is_null() || size < 8 {
+        return std::ptr::null_mut();
+    }
+    let s = if af == 2 {
+        unsafe { format!("{}.{}.{}.{}", *src, *src.add(1), *src.add(2), *src.add(3)) }
+    } else {
+        "::1".to_string()
+    };
+    let b = s.as_bytes();
+    let n = b.len().min((size as usize).saturating_sub(1));
+    unsafe {
+        std::ptr::copy_nonoverlapping(b.as_ptr(), dst, n);
+        *dst.add(n) = 0;
+    }
+    dst
+}
+
+pub extern "sysv64" fn net_inet_pton(af: i32, src: *const i8, dst: *mut u8) -> i32 {
+    if src.is_null() || dst.is_null() {
+        return 0;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(src) }.to_string_lossy();
+    if af == 2 {
+        let parts: Vec<u8> = s.split('.').filter_map(|p| p.parse::<u8>().ok()).collect();
+        if parts.len() == 4 {
+            unsafe { std::ptr::copy_nonoverlapping(parts.as_ptr(), dst, 4) };
+            return 1;
+        }
+    }
+    0
+}
+
+pub extern "sysv64" fn audio2_pace() -> i32 {
+    std::thread::sleep(std::time::Duration::from_millis(8));
+    0
+}
+
 pub fn functions() -> Vec<(&'static str, usize)> {
     vec![
         ("sceSystemServiceReceiveEvent", system_receive_event as *const () as usize),
@@ -304,5 +380,18 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceNetCtlGetState", netctl_get_state as *const () as usize),
         ("sceHttp2CreateRequestWithURL", http2_offline as *const () as usize),
         ("sceHttp2SendRequestAsync", http2_offline as *const () as usize),
+        ("socket", net_socket as *const () as usize),
+        ("bind", ok as *const () as usize),
+        ("getsockname", net_getsockname as *const () as usize),
+        ("setsockopt", ok as *const () as usize),
+        ("sendto", net_send as *const () as usize),
+        ("send", net_send as *const () as usize),
+        ("recvfrom", net_fail as *const () as usize),
+        ("recv", net_fail as *const () as usize),
+        ("connect", net_fail as *const () as usize),
+        ("inet_ntop", net_inet_ntop as *const () as usize),
+        ("inet_pton", net_inet_pton as *const () as usize),
+        ("sceNetInetPton", net_inet_pton as *const () as usize),
+        ("#MmpF1XsQiHw", audio2_pace as *const () as usize), // libSceAudioOut2 frame pacing
     ]
 }

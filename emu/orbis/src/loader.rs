@@ -16,31 +16,39 @@ const R_X86_64_JUMP_SLOT: u32 = 7;
 const R_X86_64_RELATIVE: u32 = 8;
 
 static MISSING: Mutex<Vec<String>> = Mutex::new(Vec::new());
-/// Which stubs have been reported, and the most recent calls (for crash reports).
-static SEEN: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+/// Which stubs have been reported, call counts, and the most recent calls (for crash reports).
+static SEEN: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 static RECENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static GAME: Mutex<(usize, usize)> = Mutex::new((0, 0));
+static TRACE_STUBS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Called by stubs of functions Orbis does not implement yet.
 extern "sysv64" fn unimplemented(index: u64) -> u64 {
-    let name = MISSING.lock().unwrap().get(index as usize).cloned().unwrap_or_default();
-    {
+    let idx = index as usize;
+    let count = {
         let mut seen = SEEN.lock().unwrap();
-        if seen.len() <= index as usize {
-            seen.resize(index as usize + 1, false);
+        if seen.len() <= idx {
+            seen.resize(idx + 1, 0);
         }
-        if !seen[index as usize] {
-            seen[index as usize] = true;
+        seen[idx] += 1;
+        seen[idx]
+    };
+    let trace = *TRACE_STUBS.get_or_init(|| std::env::var_os("ORBIS_TRACE").is_some());
+    if count == 1 || count == 50_000 || trace {
+        let name = MISSING.lock().unwrap().get(idx).cloned().unwrap_or_default();
+        if count == 1 {
             eprintln!("[orbis] unimplemented system function: {name}");
+        } else if count == 50_000 {
+            eprintln!("[orbis] HOT STUB (50000 calls): {name}");
         }
-    }
-    if std::env::var_os("ORBIS_TRACE").is_some() {
-        eprintln!("[orbis] call {name}");
-    }
-    let mut recent = RECENT.lock().unwrap();
-    recent.push(name);
-    if recent.len() > 8 {
-        recent.remove(0);
+        if trace {
+            eprintln!("[orbis] call {name}");
+        }
+        let mut recent = RECENT.lock().unwrap();
+        recent.push(name);
+        if recent.len() > 8 {
+            recent.remove(0);
+        }
     }
     0
 }

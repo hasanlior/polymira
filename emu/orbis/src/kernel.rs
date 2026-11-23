@@ -801,6 +801,19 @@ pub extern "sysv64" fn sce_mkdir(path: *const c_char, _mode: i32) -> i32 {
     0
 }
 
+pub extern "sysv64" fn sce_unlink(path: *const c_char) -> i32 {
+    let p = host_path(&text(path));
+    match std::fs::remove_file(&p) {
+        Ok(()) => 0,
+        Err(_) => SCE_KERNEL_ERROR_ENOENT,
+    }
+}
+
+pub extern "sysv64" fn posix_unlink(path: *const c_char) -> i32 {
+    let p = host_path(&text(path));
+    if std::fs::remove_file(&p).is_ok() { 0 } else { -1 }
+}
+
 /// (name, address) for everything here.
 pub fn functions() -> Vec<(&'static str, usize)> {
     vec![
@@ -895,5 +908,8 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("fstat", sce_fstat as *const () as usize),
         ("sceKernelMkdir", sce_mkdir as *const () as usize),
         ("mkdir", sce_mkdir as *const () as usize),
+        ("sceKernelUnlink", sce_unlink as *const () as usize),
+        ("unlink", posix_unlink as *const () as usize),
+        ("sceKernelSync", zero as *const () as usize),
     ]
 }

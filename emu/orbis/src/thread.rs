@@ -528,6 +528,107 @@ pub extern "sysv64" fn once(ctrl: *mut i32, f: extern "sysv64" fn()) -> i32 {
 }
 
 /// (name, address) for everything here.
+// ── kernel semaphores ─────────────────────────────────────────────────
+
+struct Sema {
+    state: std::sync::Mutex<(i32, i32)>, // (count, max_count)
+    cv: std::sync::Condvar,
+}
+
+const SCE_ETIMEDOUT: i32 = 0x8002_003Cu32 as i32;
+const SCE_EBUSY: i32 = 0x8002_0010u32 as i32;
+const SCE_EINVAL: i32 = 0x8002_0016u32 as i32;
+
+pub extern "sysv64" fn sema_create(
+    out: *mut usize,
+    _name: *const c_char,
+    _attr: u32,
+    init_count: i32,
+    max_count: i32,
+    _opt: *const c_void,
+) -> i32 {
+    if out.is_null() || init_count < 0 || max_count <= 0 || init_count > max_count {
+        return SCE_EINVAL;
+    }
+    let s = Box::leak(Box::new(Sema {
+        state: std::sync::Mutex::new((init_count, max_count)),
+        cv: std::sync::Condvar::new(),
+    }));
+    unsafe { *out = s as *mut Sema as usize };
+    0
+}
+
+pub extern "sysv64" fn sema_delete(_sem: usize) -> i32 {
+    0
+}
+
+pub extern "sysv64" fn sema_wait(sem: usize, need: i32, timeout_us: *mut u32) -> i32 {
+    if sem < 0x10000 || need <= 0 {
+        return SCE_EINVAL;
+    }
+    let s = unsafe { &*(sem as *const Sema) };
+    let mut g = s.state.lock().unwrap_or_else(|e| e.into_inner());
+    if timeout_us.is_null() {
+        while g.0 < need {
+            g = s.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        g.0 -= need;
+        return 0;
+    }
+    let us = unsafe { *timeout_us };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_micros(us as u64);
+    while g.0 < need {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            unsafe { *timeout_us = 0 };
+            return SCE_ETIMEDOUT;
+        }
+        let (ng, res) = s.cv.wait_timeout(g, deadline - now).unwrap_or_else(|e| e.into_inner());
+        g = ng;
+        if res.timed_out() && g.0 < need {
+            unsafe { *timeout_us = 0 };
+            return SCE_ETIMEDOUT;
+        }
+    }
+    g.0 -= need;
+    0
+}
+
+pub extern "sysv64" fn sema_poll(sem: usize, need: i32) -> i32 {
+    if sem < 0x10000 || need <= 0 {
+        return SCE_EINVAL;
+    }
+    let s = unsafe { &*(sem as *const Sema) };
+    let mut g = s.state.lock().unwrap_or_else(|e| e.into_inner());
+    if g.0 < need {
+        return SCE_EBUSY;
+    }
+    g.0 -= need;
+    0
+}
+
+pub extern "sysv64" fn sema_signal(sem: usize, count: i32) -> i32 {
+    if sem < 0x10000 || count <= 0 {
+        return SCE_EINVAL;
+    }
+    let s = unsafe { &*(sem as *const Sema) };
+    let mut g = s.state.lock().unwrap_or_else(|e| e.into_inner());
+    g.0 = g.0.saturating_add(count).min(g.1);
+    s.cv.notify_all();
+    0
+}
+
+pub extern "sysv64" fn sema_cancel(sem: usize, set_count: i32, _num_waiters: *mut i32) -> i32 {
+    if sem < 0x10000 {
+        return SCE_EINVAL;
+    }
+    let s = unsafe { &*(sem as *const Sema) };
+    let mut g = s.state.lock().unwrap_or_else(|e| e.into_inner());
+    g.0 = set_count.clamp(0, g.1);
+    s.cv.notify_all();
+    0
+}
+
 pub fn functions() -> Vec<(&'static str, usize)> {
     let mut v: Vec<(&'static str, usize)> = vec![
         ("scePthreadCreate", create as *const () as usize),
@@ -639,6 +740,12 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("scePthreadRwlockattrDestroy", ok as *const () as usize),
         ("scePthreadOnce", once as *const () as usize),
         ("pthread_once", once as *const () as usize),
+        ("sceKernelCreateSema", sema_create as *const () as usize),
+        ("sceKernelDeleteSema", sema_delete as *const () as usize),
+        ("sceKernelWaitSema", sema_wait as *const () as usize),
+        ("sceKernelPollSema", sema_poll as *const () as usize),
+        ("sceKernelSignalSema", sema_signal as *const () as usize),
+        ("sceKernelCancelSema", sema_cancel as *const () as usize),
     ];
     let _ = (&mut v, std::ptr::null::<c_void>());
     v
