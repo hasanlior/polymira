@@ -1240,8 +1240,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     }
     let blend = gpu.cx.get(&0x1E0).copied().unwrap_or(0);
     let dctl = gpu.cx.get(&0x200).copied().unwrap_or(0);
-    let is_cohtml_clear = dctl == 0x701 && blend == 0x60010001 && tex.is_none();
-    let dkey = (dctl & 0x77) | if is_cohtml_clear { 0x80 } else { 0 };
+    let dkey = dctl & 0x77;
     let g = gpu.frame_gens.len() as u32;
     gpu.frame_gens.push(crate::vk::GenDraw {
         key: (ps_addr ^ hash as usize, blend, wmask | (dkey << 8)),
@@ -1259,7 +1258,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         depth: dctl,
         // Depth is cleared through HTILE metadata we do not see: start from the far plane of
         // the compare direction (1.0 for LESS-style tests, 0.0 for GREATER-style ones).
-        zclear: if matches!((dctl >> 4) & 7, 4 | 6) || dctl == 0x701 { 0.0 } else { 1.0 },
+        zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
     });
     gpu.frame_batches.push(crate::vk::DrawBatch { first_index: 0, index_count: 0, tex_addr: 0, tex_w: 0, tex_h: 0, tex_swiz: 0, gen: Some(g) });
     if std::env::var_os("ORBIS_RT_LOG").is_some() {

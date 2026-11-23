@@ -2003,7 +2003,6 @@ impl VkRenderer {
             let mut cur_pipe = vk::Pipeline::null();
             let mut cur_vb = vk::Buffer::null();
             let mut last_ds = vk::DescriptorSet::null();
-            let mut prev_was_cohtml_clear = false;
             for it in &items {
                 if it.sampled_rt != 0 {
                     sampled_this_frame.push(it.sampled_rt);
@@ -2073,7 +2072,6 @@ impl VkRenderer {
                     cur_pipe = vk::Pipeline::null();
                     cur_vb = vk::Buffer::null();
                     last_ds = vk::DescriptorSet::null();
-                    prev_was_cohtml_clear = false;
                     if self.ibuf != vk::Buffer::null() {
                         self.device.cmd_bind_index_buffer(self.cmd_buf, self.ibuf, 0, vk::IndexType::UINT32);
                     }
@@ -2100,26 +2098,10 @@ impl VkRenderer {
                 }
                 self.device.cmd_set_scissor(self.cmd_buf, 0, &[it.scissor]);
                 if generic {
-                    let is_cohtml_clear = gens[it.gen].depth == 0x701 && gens[it.gen].blend == 0x60010001 && gens[it.gen].tex.is_none();
-                    if is_cohtml_clear && !prev_was_cohtml_clear {
-                        let ca = [vk::ClearAttachment {
-                            aspect_mask: vk::ImageAspectFlags::DEPTH,
-                            color_attachment: 0,
-                            clear_value: vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } },
-                        }];
-                        let cr = [vk::ClearRect {
-                            rect: full(it.rt.1, it.rt.2),
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        }];
-                        self.device.cmd_clear_attachments(self.cmd_buf, &ca, &cr);
-                    }
-                    prev_was_cohtml_clear = is_cohtml_clear;
                     let bytes = std::slice::from_raw_parts(gens[it.gen].slots.as_ptr() as *const u8, 256);
                     self.device.cmd_push_constants(self.cmd_buf, self.gen_layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
                     self.device.cmd_draw(self.cmd_buf, it.count, 1, it.first, 0);
                 } else {
-                    prev_was_cohtml_clear = false;
                     self.device.cmd_draw_indexed(self.cmd_buf, it.count, 1, it.first, 0, 0);
                 }
             }
@@ -2317,27 +2299,19 @@ impl VkRenderer {
         let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let ds = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
         let dc = gd.depth;
-        let is_cohtml_clear = dc == 0x701 && gd.blend == 0x60010001 && gd.tex.is_none();
-        let is_cohtml_masked = dc == 0x701 && !is_cohtml_clear;
-        let zop = if is_cohtml_clear {
-            vk::CompareOp::ALWAYS
-        } else if is_cohtml_masked {
-            vk::CompareOp::EQUAL
-        } else {
-            match (dc >> 4) & 7 {
-                0 => vk::CompareOp::NEVER,
-                1 => vk::CompareOp::LESS,
-                2 => vk::CompareOp::EQUAL,
-                3 => vk::CompareOp::LESS_OR_EQUAL,
-                4 => vk::CompareOp::GREATER,
-                5 => vk::CompareOp::NOT_EQUAL,
-                6 => vk::CompareOp::GREATER_OR_EQUAL,
-                _ => vk::CompareOp::ALWAYS,
-            }
+        let zop = match (dc >> 4) & 7 {
+            0 => vk::CompareOp::NEVER,
+            1 => vk::CompareOp::LESS,
+            2 => vk::CompareOp::EQUAL,
+            3 => vk::CompareOp::LESS_OR_EQUAL,
+            4 => vk::CompareOp::GREATER,
+            5 => vk::CompareOp::NOT_EQUAL,
+            6 => vk::CompareOp::GREATER_OR_EQUAL,
+            _ => vk::CompareOp::ALWAYS,
         };
         let dss = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable((dc & 2 != 0) || dc == 0x701)
-            .depth_write_enable((dc & 2 != 0 && dc & 4 != 0) || is_cohtml_clear)
+            .depth_test_enable(dc & 2 != 0)
+            .depth_write_enable(dc & 2 != 0 && dc & 4 != 0)
             .depth_compare_op(zop);
         let gp_ci = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
