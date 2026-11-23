@@ -625,6 +625,19 @@ const handlers: Handlers = {
     const game = store.games.find((g) => g.id === id)
     if (!game) throw new Error('Oyun bulunamadı.')
     if (session.info) throw new Error('Önce çalışan oyunu kapatın.')
+    // PS5 games (and PS4 games when shadPS4 is not set up) play on POLYMIRA's own emulator.
+    if (game.platformId === 'ps5' || (game.platformId === 'ps4' && !store.settings.emulatorPaths['shadps4'])) {
+      store.updateGame(id, { lastPlayedAt: Date.now(), playCount: game.playCount + 1 })
+      try {
+        await tryRunGame(game)
+        store.updateGame(id, { lastLaunch: { at: Date.now(), result: 'ok' } })
+        toast('info', `${game.title} POLYMIRA Orbis ile açılıyor.`)
+      } finally {
+        send('launch:ended', game.id)
+        broadcast()
+      }
+      return
+    }
     let plan
     try {
       plan = game.platformId === 'apps' ? appLaunchPlan(game) : planLaunch(game, store.settings)

@@ -87,6 +87,30 @@ function detectFolderGame(dir: string, allowed: (id: string) => boolean): Candid
     }
   }
 
+  if (allowed('ps5')) {
+    // Decrypted PS5 game folder: eboot.bin + sce_sys/param.json.
+    const eboot = path.join(dir, 'eboot.bin')
+    const jsonPath = path.join(dir, 'sce_sys', 'param.json')
+    if (exists(eboot) && exists(jsonPath)) {
+      let title = name
+      let titleId: string | undefined
+      try {
+        const p = JSON.parse(fs.readFileSync(jsonPath, 'utf8')) as {
+          titleId?: string
+          localizedParameters?: Record<string, { titleName?: string } | string> & { defaultLanguage?: string }
+        }
+        titleId = p.titleId
+        const lp = p.localizedParameters ?? {}
+        const lang = typeof lp.defaultLanguage === 'string' ? lp.defaultLanguage : 'en-US'
+        const entry = (lp[lang] ?? lp['en-US']) as { titleName?: string } | undefined
+        if (entry?.titleName) title = entry.titleName
+      } catch {
+        /* keep the folder name */
+      }
+      return { platformId: 'ps5', title, path: eboot, kind: 'file', meta: titleId ? { titleId } : {} }
+    }
+  }
+
   if (allowed('vita') && VITA_TITLE_ID.test(name)) {
     const sfoPath = path.join(dir, 'sce_sys', 'param.sfo')
     if (exists(sfoPath)) {

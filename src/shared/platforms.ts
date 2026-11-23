@@ -193,9 +193,9 @@ export const PLATFORMS: PlatformDef[] = [
     note: 'Emülasyon erken aşamada. Oyunların çoğu henüz çalışmıyor.'
   },
   {
-    id: 'ps5', name: 'PlayStation 5', short: 'PS5', family: 'playstation', support: 'unsupported', kind: 'file',
+    id: 'ps5', name: 'PlayStation 5', short: 'PS5', family: 'playstation', support: 'experimental', kind: 'file',
     extensions: [], runners: [], hue: 220,
-    note: 'Çalışan bir PS5 emülatörü yok. PC sürümleri PC Oyunları altına eklenebilir.'
+    note: 'POLYMIRA Orbis ile deneysel. Şifresi çözülmüş oyun klasöründeki eboot.bin eklenir.'
   },
   {
     id: 'psp', name: 'PlayStation Portable', short: 'PSP', family: 'playstation', support: 'stable', kind: 'file',
