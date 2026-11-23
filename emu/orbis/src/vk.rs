@@ -557,6 +557,160 @@ impl VkRenderer {
         Ok(())
     }
 
+    pub fn recreate_swapchain(&mut self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        unsafe {
+            let _ = self.device.device_wait_idle();
+            let Ok(caps) = self.surface_loader.get_physical_device_surface_capabilities(self.physical, self.surface) else {
+                return false;
+            };
+            let swap_extent = if caps.current_extent.width != u32::MAX && caps.current_extent.height != u32::MAX {
+                caps.current_extent
+            } else {
+                vk::Extent2D {
+                    width: width.clamp(caps.min_image_extent.width, caps.max_image_extent.width),
+                    height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
+                }
+            };
+            if swap_extent.width == 0 || swap_extent.height == 0 {
+                return false;
+            }
+            let color_space = self
+                .surface_loader
+                .get_physical_device_surface_formats(self.physical, self.surface)
+                .ok()
+                .and_then(|fmts| fmts.iter().find(|f| f.format == self.swap_format).map(|f| f.color_space))
+                .unwrap_or(vk::ColorSpaceKHR::SRGB_NONLINEAR);
+            let min_images = (caps.min_image_count + 1).min(if caps.max_image_count > 0 { caps.max_image_count } else { 3 });
+            let old_swapchain = self.swapchain;
+            let sc_ci = vk::SwapchainCreateInfoKHR::default()
+                .surface(self.surface)
+                .min_image_count(min_images)
+                .image_format(self.swap_format)
+                .image_color_space(color_space)
+                .image_extent(swap_extent)
+                .image_array_layers(1)
+                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC)
+                .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .pre_transform(caps.current_transform)
+                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                .present_mode(vk::PresentModeKHR::FIFO)
+                .clipped(true)
+                .old_swapchain(old_swapchain);
+            let Ok(new_sc) = self.swapchain_loader.create_swapchain(&sc_ci, None) else {
+                return false;
+            };
+            let Ok(new_images) = self.swapchain_loader.get_swapchain_images(new_sc) else {
+                self.swapchain_loader.destroy_swapchain(new_sc, None);
+                return false;
+            };
+            for fb in self.swap_fbs.drain(..) {
+                self.device.destroy_framebuffer(fb, None);
+            }
+            for view in self.swap_views.drain(..) {
+                self.device.destroy_image_view(view, None);
+            }
+            self.swapchain_loader.destroy_swapchain(old_swapchain, None);
+            self.swapchain = new_sc;
+            self.swap_images = new_images;
+            self.swap_extent = swap_extent;
+            if self.swap_rp != vk::RenderPass::null() {
+                for &img in &self.swap_images {
+                    let Ok(view) = self.device.create_image_view(
+                        &vk::ImageViewCreateInfo::default()
+                            .image(img)
+                            .view_type(vk::ImageViewType::TYPE_2D)
+                            .format(self.swap_format)
+                            .subresource_range(vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            }),
+                        None,
+                    ) else {
+                        return false;
+                    };
+                    let atts = [view];
+                    let Ok(fb) = self.device.create_framebuffer(
+                        &vk::FramebufferCreateInfo::default()
+                            .render_pass(self.swap_rp)
+                            .attachments(&atts)
+                            .width(self.swap_extent.width)
+                            .height(self.swap_extent.height)
+                            .layers(1),
+                        None,
+                    ) else {
+                        self.device.destroy_image_view(view, None);
+                        return false;
+                    };
+                    self.swap_views.push(view);
+                    self.swap_fbs.push(fb);
+                }
+            }
+            eprintln!(
+                "[orbis] Vulkan: swapchain recreated {}x{} ({} images)",
+                self.swap_extent.width,
+                self.swap_extent.height,
+                self.swap_images.len()
+            );
+            true
+        }
+    }
+
+    unsafe fn acquire_swapchain_image(&mut self) -> Option<u32> {
+        if let Some((w, h)) = crate::video::take_resize() {
+            if w == 0 || h == 0 {
+                return None;
+            }
+            if w != self.swap_extent.width || h != self.swap_extent.height {
+                if !self.recreate_swapchain(w, h) {
+                    return None;
+                }
+            }
+        }
+        let (cur_w, cur_h) = crate::video::window_size();
+        if cur_w == 0 || cur_h == 0 {
+            return None;
+        }
+        match self.swapchain_loader.acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null()) {
+            Ok((idx, _suboptimal)) => Some(idx),
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                let (w, h) = crate::video::window_size();
+                if !self.recreate_swapchain(w, h) {
+                    return None;
+                }
+                self.swapchain_loader
+                    .acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null())
+                    .ok()
+                    .map(|(idx, _)| idx)
+            }
+            Err(_) => None,
+        }
+    }
+
+    unsafe fn present_swapchain_image(&mut self, img_idx: u32) {
+        let sig_sems = [self.render_done];
+        let scs = [self.swapchain];
+        let idxs = [img_idx];
+        let present = vk::PresentInfoKHR::default()
+            .wait_semaphores(&sig_sems)
+            .swapchains(&scs)
+            .image_indices(&idxs);
+        match self.swapchain_loader.queue_present(self.queue, &present) {
+            Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                let (w, h) = crate::video::window_size();
+                if w > 0 && h > 0 {
+                    let _ = self.recreate_swapchain(w, h);
+                }
+            }
+            _ => {}
+        }
+    }
+
     unsafe fn init_white_texture(&mut self) {
         if !self.ensure_staging(4) {
             return;
@@ -1199,7 +1353,7 @@ impl VkRenderer {
                     self.device.unmap_memory(self.imem);
                 }
             }
-            let Ok((img_idx, _)) = self.swapchain_loader.acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null()) else {
+            let Some(img_idx) = self.acquire_swapchain_image() else {
                 return false;
             };
             let _ = self.device.reset_fences(&[self.fence]);
@@ -1301,13 +1455,7 @@ impl VkRenderer {
             if self.device.queue_submit(self.queue, &submit, self.fence).is_err() {
                 return false;
             }
-            let scs = [self.swapchain];
-            let idxs = [img_idx];
-            let present = vk::PresentInfoKHR::default()
-                .wait_semaphores(&sig_sems)
-                .swapchains(&scs)
-                .image_indices(&idxs);
-            let _ = self.swapchain_loader.queue_present(self.queue, &present);
+            self.present_swapchain_image(img_idx);
             if dump {
                 let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
                 let bytes = (ew * eh * 4) as usize;
@@ -1652,7 +1800,7 @@ impl VkRenderer {
                     self.device.unmap_memory(self.imem);
                 }
             }
-            let Ok((img_idx, _)) = self.swapchain_loader.acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null()) else {
+            let Some(img_idx) = self.acquire_swapchain_image() else {
                 return false;
             };
             let _ = self.device.reset_fences(&[self.fence]);
@@ -1825,10 +1973,7 @@ impl VkRenderer {
             if self.device.queue_submit(self.queue, &submit, self.fence).is_err() {
                 return false;
             }
-            let scs = [self.swapchain];
-            let idxs = [img_idx];
-            let present = vk::PresentInfoKHR::default().wait_semaphores(&sig_sems).swapchains(&scs).image_indices(&idxs);
-            let _ = self.swapchain_loader.queue_present(self.queue, &present);
+            self.present_swapchain_image(img_idx);
             if dump {
                 let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
                 let bytes = (ew * eh * 4) as usize;
@@ -2165,7 +2310,7 @@ impl VkRenderer {
             }
             let tex_img = self.upload_tex.as_ref().unwrap().image;
 
-            let Ok((img_idx, _)) = self.swapchain_loader.acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null()) else {
+            let Some(img_idx) = self.acquire_swapchain_image() else {
                 return false;
             };
             let _ = self.device.reset_fences(&[self.fence]);
@@ -2278,13 +2423,7 @@ impl VkRenderer {
             if self.device.queue_submit(self.queue, &submit, self.fence).is_err() {
                 return false;
             }
-            let scs = [self.swapchain];
-            let idxs = [img_idx];
-            let present = vk::PresentInfoKHR::default()
-                .wait_semaphores(&sig_sems)
-                .swapchains(&scs)
-                .image_indices(&idxs);
-            let _ = self.swapchain_loader.queue_present(self.queue, &present);
+            self.present_swapchain_image(img_idx);
             true
         }
     }
@@ -2426,7 +2565,7 @@ impl VkRenderer {
     pub fn present_target(&mut self, target_addr: usize, clear_rgba: [f32; 4]) -> bool {
         unsafe {
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
-            let Ok((img_idx, _)) = self.swapchain_loader.acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null()) else {
+            let Some(img_idx) = self.acquire_swapchain_image() else {
                 return false;
             };
             let _ = self.device.reset_fences(&[self.fence]);
@@ -2527,13 +2666,7 @@ impl VkRenderer {
             if self.device.queue_submit(self.queue, &submit, self.fence).is_err() {
                 return false;
             }
-            let scs = [self.swapchain];
-            let idxs = [img_idx];
-            let present = vk::PresentInfoKHR::default()
-                .wait_semaphores(&sig_sems)
-                .swapchains(&scs)
-                .image_indices(&idxs);
-            let _ = self.swapchain_loader.queue_present(self.queue, &present);
+            self.present_swapchain_image(img_idx);
             true
         }
     }

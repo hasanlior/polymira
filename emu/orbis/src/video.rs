@@ -4,7 +4,7 @@
 //! BMP file there (for testing without a visible window).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -293,7 +293,7 @@ fn present(buf: &Buffer, n: u64) {
             } else {
                 crate::vk::with_renderer(|r| r.present_target(buf.addr, clear)).unwrap_or(false)
             };
-            if !presented_vk {
+            if !presented_vk && WIN_W.load(Ordering::Relaxed) > 0 && WIN_H.load(Ordering::Relaxed) > 0 {
                 windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
             }
         }
@@ -320,12 +320,97 @@ fn write_bmp(path: &str, px: &[u32], w: usize, h: usize) -> std::io::Result<()> 
 }
 
 static WINDOW: AtomicU64 = AtomicU64::new(0);
+static WIN_W: AtomicU32 = AtomicU32::new(1280);
+static WIN_H: AtomicU32 = AtomicU32::new(720);
+static WIN_RESIZED: AtomicBool = AtomicBool::new(false);
+static FULLSCREEN: AtomicBool = AtomicBool::new(false);
+static SAVED_STYLE: AtomicU32 = AtomicU32::new(0);
+static SAVED_RECT: Mutex<[i32; 4]> = Mutex::new([100, 100, 1380, 820]);
+
+pub fn window_size() -> (u32, u32) {
+    (WIN_W.load(Ordering::Relaxed), WIN_H.load(Ordering::Relaxed))
+}
+
+pub fn take_resize() -> Option<(u32, u32)> {
+    if WIN_RESIZED.swap(false, Ordering::AcqRel) {
+        Some(window_size())
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+unsafe fn toggle_fullscreen(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    let entering = !FULLSCREEN.load(Ordering::Relaxed);
+    if entering {
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        SAVED_STYLE.store(style, Ordering::Relaxed);
+        let mut rc: RECT = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut rc) != 0 {
+            *SAVED_RECT.lock().unwrap_or_else(|e| e.into_inner()) = [rc.left, rc.top, rc.right, rc.bottom];
+        }
+        let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(mon, &mut mi) != 0 {
+            let r = mi.rcMonitor;
+            let borderless = (style & !(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_POPUP;
+            SetWindowLongW(hwnd, GWL_STYLE, borderless as i32);
+            SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+            );
+            FULLSCREEN.store(true, Ordering::Relaxed);
+        }
+    } else {
+        let style = SAVED_STYLE.load(Ordering::Relaxed);
+        let restore_style = if style != 0 { style } else { WS_OVERLAPPEDWINDOW | WS_VISIBLE };
+        let [l, t, r, b] = *SAVED_RECT.lock().unwrap_or_else(|e| e.into_inner());
+        SetWindowLongW(hwnd, GWL_STYLE, restore_style as i32);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            l,
+            t,
+            (r - l).max(320),
+            (b - t).max(240),
+            SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+        );
+        FULLSCREEN.store(false, Ordering::Relaxed);
+    }
+}
 
 #[cfg(windows)]
 unsafe extern "system" fn wndproc(hwnd: windows_sys::Win32::Foundation::HWND, msg: u32, wp: usize, lp: isize) -> isize {
     use windows_sys::Win32::Graphics::Gdi::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
     match msg {
+        WM_SIZE => {
+            let w = (lp as usize & 0xFFFF) as u32;
+            let h = ((lp as usize >> 16) & 0xFFFF) as u32;
+            WIN_W.store(w, Ordering::Relaxed);
+            WIN_H.store(h, Ordering::Relaxed);
+            WIN_RESIZED.store(true, Ordering::Release);
+            0
+        }
+        WM_KEYDOWN if wp == 0x7A && (lp & (1 << 30)) == 0 => {
+            // F11: borderless fullscreen toggle
+            toggle_fullscreen(hwnd);
+            0
+        }
+        WM_SYSKEYDOWN if wp == 0x0D && (lp & (1 << 29)) != 0 && (lp & (1 << 30)) == 0 => {
+            // Alt+Enter: borderless fullscreen toggle
+            toggle_fullscreen(hwnd);
+            0
+        }
         WM_PAINT => {
             let mut ps: PAINTSTRUCT = std::mem::zeroed();
             let dc = BeginPaint(hwnd, &mut ps);
