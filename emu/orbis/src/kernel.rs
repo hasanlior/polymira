@@ -249,7 +249,7 @@ pub extern "sysv64" fn direct_memory_size() -> u64 {
 /// sceKernelAvailableFlexibleMemorySize(size_t* out)
 pub extern "sysv64" fn available_flexible(out: *mut u64) -> i32 {
     if !out.is_null() {
-        unsafe { *out = 448 << 20 };
+        unsafe { *out = 2 << 30 }; // 2 GiB flexible RAM for world generation
     }
     0
 }
@@ -616,13 +616,38 @@ const O_RDWR: i32 = 2;
 const O_APPEND: i32 = 8;
 const O_CREAT: i32 = 0x200;
 const O_TRUNC: i32 = 0x400;
+const O_EXCL: i32 = 0x800;
+
+const SCE_KERNEL_ERROR_EEXIST: i32 = 0x8002_0011u32 as i32;
+const SCE_KERNEL_ERROR_EINVAL: i32 = 0x8002_0016u32 as i32;
+const SCE_KERNEL_ERROR_ENOTEMPTY: i32 = 0x8002_0042u32 as i32;
+
+fn alloc_fd(entry: FdEntry) -> i32 {
+    let mut f = FILES.lock().unwrap();
+    if let Some((idx, slot)) = f.iter_mut().enumerate().find(|(_, s)| s.is_none()) {
+        *slot = Some(entry);
+        (idx + 3) as i32
+    } else {
+        f.push(Some(entry));
+        (f.len() + 2) as i32
+    }
+}
 
 fn open_file(path: &str, flags: i32) -> Result<i32, i32> {
     let host = if path == "/dev/urandom" || path == "/dev/random" { random_device() } else { host_path(path) };
     let mut o = std::fs::OpenOptions::new();
     let acc = flags & 3;
-    o.read(acc != O_WRONLY).write(acc == O_WRONLY || acc == O_RDWR).append(flags & O_APPEND != 0).create(flags & O_CREAT != 0).truncate(flags & O_TRUNC != 0);
+    let want_write = acc == O_WRONLY || acc == O_RDWR || (flags & (O_TRUNC | O_APPEND)) != 0;
+    o.read(acc != O_WRONLY)
+        .write(want_write)
+        .append(flags & O_APPEND != 0)
+        .truncate(flags & O_TRUNC != 0);
     if flags & O_CREAT != 0 {
+        if flags & O_EXCL != 0 {
+            o.create_new(true);
+        } else {
+            o.create(true);
+        }
         if let Some(parent) = host.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -637,18 +662,15 @@ fn open_file(path: &str, flags: i32) -> Result<i32, i32> {
                 }
             }
         }
-        let mut f = FILES.lock().unwrap();
-        f.push(Some(FdEntry::Dir { path: host, entries, pos: 0 }));
-        return Ok((f.len() + 2) as i32);
+        return Ok(alloc_fd(FdEntry::Dir { path: host, entries, pos: 0 }));
     }
     match o.open(&host) {
         Ok(file) => {
-            let mut f = FILES.lock().unwrap();
-            f.push(Some(FdEntry::File(file)));
-            let fd = (f.len() + 2) as i32;
+            let fd = alloc_fd(FdEntry::File(file));
             eprintln!("[orbis] open {path} → fd {fd}");
             Ok(fd)
         }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(SCE_KERNEL_ERROR_EEXIST),
         Err(_) => {
             eprintln!("[orbis] open {path}: not found ({})", host.display());
             Err(SCE_KERNEL_ERROR_ENOENT)
@@ -666,8 +688,12 @@ pub extern "sysv64" fn sce_open(path: *const c_char, flags: i32, _mode: i32) -> 
 pub extern "sysv64" fn posix_open(path: *const c_char, flags: i32, _mode: i32) -> i32 {
     match open_file(&text(path), flags) {
         Ok(fd) => fd,
+        Err(SCE_KERNEL_ERROR_EEXIST) => {
+            crate::hle_rt::set_errno(17); // EEXIST
+            -1
+        }
         Err(_) => {
-            crate::hle_rt::set_errno(2);
+            crate::hle_rt::set_errno(2); // ENOENT
             -1
         }
     }
@@ -726,6 +752,115 @@ pub extern "sysv64" fn sce_lseek(fd: i32, off: i64, whence: i32) -> i64 {
     with_file(fd, |f| f.seek(pos).map(|n| n as i64).unwrap_or(-1)).unwrap_or(SCE_KERNEL_ERROR_EBADF as i64)
 }
 
+pub extern "sysv64" fn sce_pread(fd: i32, buf: *mut u8, len: usize, offset: i64) -> i64 {
+    use std::io::{Read, Seek, SeekFrom};
+    if fd < 3 || buf.is_null() {
+        return SCE_KERNEL_ERROR_EBADF as i64;
+    }
+    if offset < 0 {
+        return SCE_KERNEL_ERROR_EINVAL as i64;
+    }
+    let slice = unsafe { std::slice::from_raw_parts_mut(buf, len) };
+    with_file(fd, |f| {
+        let orig = f.stream_position().unwrap_or(0);
+        let res = f
+            .seek(SeekFrom::Start(offset as u64))
+            .and_then(|_| f.read(slice))
+            .map(|n| n as i64)
+            .unwrap_or(-1);
+        let _ = f.seek(SeekFrom::Start(orig));
+        res
+    })
+    .unwrap_or(SCE_KERNEL_ERROR_EBADF as i64)
+}
+
+pub extern "sysv64" fn posix_pread(fd: i32, buf: *mut u8, len: usize, offset: i64) -> i64 {
+    let r = sce_pread(fd, buf, len, offset);
+    if r < 0 {
+        crate::hle_rt::set_errno(if offset < 0 { 22 } else { 9 }); // EINVAL / EBADF
+        -1
+    } else {
+        r
+    }
+}
+
+pub extern "sysv64" fn sce_pwrite(fd: i32, buf: *const u8, len: usize, offset: i64) -> i64 {
+    use std::io::{Seek, SeekFrom, Write};
+    if fd < 3 || buf.is_null() {
+        return SCE_KERNEL_ERROR_EBADF as i64;
+    }
+    if offset < 0 {
+        return SCE_KERNEL_ERROR_EINVAL as i64;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(buf, len) };
+    with_file(fd, |f| {
+        let orig = f.stream_position().unwrap_or(0);
+        let res = f
+            .seek(SeekFrom::Start(offset as u64))
+            .and_then(|_| f.write(slice))
+            .map(|n| n as i64)
+            .unwrap_or(-1);
+        let _ = f.seek(SeekFrom::Start(orig));
+        res
+    })
+    .unwrap_or(SCE_KERNEL_ERROR_EBADF as i64)
+}
+
+pub extern "sysv64" fn posix_pwrite(fd: i32, buf: *const u8, len: usize, offset: i64) -> i64 {
+    let r = sce_pwrite(fd, buf, len, offset);
+    if r < 0 {
+        crate::hle_rt::set_errno(if offset < 0 { 22 } else { 9 }); // EINVAL / EBADF
+        -1
+    } else {
+        r
+    }
+}
+
+pub extern "sysv64" fn sce_ftruncate(fd: i32, length: i64) -> i32 {
+    if length < 0 {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    with_file(fd, |f| match f.set_len(length as u64) {
+        Ok(()) => 0,
+        Err(_) => SCE_KERNEL_ERROR_EINVAL,
+    })
+    .unwrap_or(SCE_KERNEL_ERROR_EBADF)
+}
+
+pub extern "sysv64" fn posix_ftruncate(fd: i32, length: i64) -> i32 {
+    let r = sce_ftruncate(fd, length);
+    if r == 0 {
+        0
+    } else {
+        crate::hle_rt::set_errno(if r == SCE_KERNEL_ERROR_EINVAL { 22 } else { 9 });
+        -1
+    }
+}
+
+pub extern "sysv64" fn sce_truncate(path: *const c_char, length: i64) -> i32 {
+    if length < 0 {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    let p = host_path(&text(path));
+    match std::fs::OpenOptions::new().write(true).open(&p) {
+        Ok(f) => match f.set_len(length as u64) {
+            Ok(()) => 0,
+            Err(_) => SCE_KERNEL_ERROR_EINVAL,
+        },
+        Err(_) => SCE_KERNEL_ERROR_ENOENT,
+    }
+}
+
+pub extern "sysv64" fn posix_truncate(path: *const c_char, length: i64) -> i32 {
+    let r = sce_truncate(path, length);
+    if r == 0 {
+        0
+    } else {
+        crate::hle_rt::set_errno(if r == SCE_KERNEL_ERROR_EINVAL { 22 } else { 2 });
+        -1
+    }
+}
+
 /// FreeBSD struct stat (the fields games read: mode, size, blocks).
 #[repr(C)]
 pub struct Stat {
@@ -748,6 +883,13 @@ pub struct Stat {
     birthtime: [i64; 2],
 }
 
+fn sys_time_to_timespec(t: std::io::Result<std::time::SystemTime>) -> [i64; 2] {
+    match t.ok().and_then(|st| st.duration_since(std::time::UNIX_EPOCH).ok()) {
+        Some(d) => [d.as_secs() as i64, d.subsec_nanos() as i64],
+        None => [0, 0],
+    }
+}
+
 fn fill_stat(meta: &std::fs::Metadata, st: *mut Stat) {
     unsafe {
         std::ptr::write_bytes(st as *mut u8, 0, std::mem::size_of::<Stat>());
@@ -756,6 +898,10 @@ fn fill_stat(meta: &std::fs::Metadata, st: *mut Stat) {
         (*st).blksize = 0x10000;
         (*st).blocks = (meta.len() as i64 + 511) / 512;
         (*st).nlink = 1;
+        (*st).atime = sys_time_to_timespec(meta.accessed());
+        (*st).mtime = sys_time_to_timespec(meta.modified());
+        (*st).ctime = (*st).mtime;
+        (*st).birthtime = sys_time_to_timespec(meta.created());
     }
 }
 
@@ -883,17 +1029,54 @@ pub extern "sysv64" fn sce_unlink(path: *const c_char) -> i32 {
 
 pub extern "sysv64" fn posix_unlink(path: *const c_char) -> i32 {
     let p = host_path(&text(path));
-    if std::fs::remove_file(&p).is_ok() { 0 } else { -1 }
+    if std::fs::remove_file(&p).is_ok() {
+        0
+    } else {
+        crate::hle_rt::set_errno(2); // ENOENT
+        -1
+    }
 }
 
-// ── rename, fsync, process id, random device ─────────────────────────
+pub extern "sysv64" fn sce_rmdir(path: *const c_char) -> i32 {
+    let p = host_path(&text(path));
+    match std::fs::remove_dir(&p) {
+        Ok(()) => 0,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SCE_KERNEL_ERROR_ENOENT,
+        Err(_) => SCE_KERNEL_ERROR_ENOTEMPTY,
+    }
+}
+
+pub extern "sysv64" fn posix_rmdir(path: *const c_char) -> i32 {
+    match sce_rmdir(path) {
+        0 => 0,
+        SCE_KERNEL_ERROR_ENOENT => {
+            crate::hle_rt::set_errno(2); // ENOENT
+            -1
+        }
+        _ => {
+            crate::hle_rt::set_errno(66); // FreeBSD ENOTEMPTY
+            -1
+        }
+    }
+}
+
+// ── rename, fsync, uuid, scheduler, process id, random device ────────
 
 pub extern "sysv64" fn sce_rename(from: *const c_char, to: *const c_char) -> i32 {
     let (f, t) = (host_path(&text(from)), host_path(&text(to)));
     if let Some(parent) = t.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match std::fs::rename(&f, &t) {
+    let res = match std::fs::rename(&f, &t) {
+        Ok(()) => Ok(()),
+        Err(_) if f.exists() && t.is_file() => {
+            // POSIX/PS5 rename replaces an existing target file; Windows rename fails if it exists.
+            let _ = std::fs::remove_file(&t);
+            std::fs::rename(&f, &t)
+        }
+        Err(e) => Err(e),
+    };
+    match res {
         Ok(()) => 0,
         Err(_) => SCE_KERNEL_ERROR_ENOENT,
     }
@@ -906,6 +1089,27 @@ pub extern "sysv64" fn posix_rename(from: *const c_char, to: *const c_char) -> i
         crate::hle_rt::set_errno(2);
         -1
     }
+}
+
+/// sceKernelUuidCreate(SceKernelUuid* out): 16-byte RFC 4122 v4 UUID.
+pub extern "sysv64" fn sce_uuid_create(out: *mut u8) -> i32 {
+    if out.is_null() {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    crate::system::random(out, 16);
+    unsafe {
+        *out.add(6) = (*out.add(6) & 0x0F) | 0x40; // version 4
+        *out.add(8) = (*out.add(8) & 0x3F) | 0x80; // variant RFC 4122
+    }
+    0
+}
+
+pub extern "sysv64" fn sched_get_priority_min(_policy: i32) -> i32 {
+    0
+}
+
+pub extern "sysv64" fn sched_get_priority_max(_policy: i32) -> i32 {
+    31
 }
 
 pub extern "sysv64" fn getpid() -> i32 {
@@ -1127,6 +1331,108 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sem_getvalue", sem_getvalue as *const () as usize),
         ("sceKernelUnlink", sce_unlink as *const () as usize),
         ("unlink", posix_unlink as *const () as usize),
+        ("sceKernelRmdir", sce_rmdir as *const () as usize),
+        ("rmdir", posix_rmdir as *const () as usize),
+        ("_rmdir", posix_rmdir as *const () as usize),
+        ("sceKernelPread", sce_pread as *const () as usize),
+        ("pread", posix_pread as *const () as usize),
+        ("_pread", posix_pread as *const () as usize),
+        ("sceKernelPwrite", sce_pwrite as *const () as usize),
+        ("pwrite", posix_pwrite as *const () as usize),
+        ("_pwrite", posix_pwrite as *const () as usize),
+        ("sceKernelFtruncate", sce_ftruncate as *const () as usize),
+        ("ftruncate", posix_ftruncate as *const () as usize),
+        ("_ftruncate", posix_ftruncate as *const () as usize),
+        ("sceKernelTruncate", sce_truncate as *const () as usize),
+        ("truncate", posix_truncate as *const () as usize),
+        ("sceKernelUuidCreate", sce_uuid_create as *const () as usize),
+        ("sceKernelUuidcreate", sce_uuid_create as *const () as usize),
+        ("sceKernelStopUnloadModule", zero as *const () as usize),
+        ("sceKernelDeleteReadEvent", zero as *const () as usize),
+        ("sceKernelDeleteWriteEvent", zero as *const () as usize),
+        ("sceKernelAddWriteEvent", zero as *const () as usize),
+        ("sched_get_priority_min", sched_get_priority_min as *const () as usize),
+        ("sched_get_priority_max", sched_get_priority_max as *const () as usize),
+        ("pthread_setschedparam", zero as *const () as usize),
         ("sceKernelSync", zero as *const () as usize),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    #[test]
+    fn world_save_fs_syscalls_work_end_to_end() {
+        let base = std::env::temp_dir().join(format!("orbis_fs_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::env::set_var("ORBIS_DATA", base.to_str().unwrap());
+
+        let dir_c = CString::new("/data/world_test").unwrap();
+        assert_eq!(sce_mkdir(dir_c.as_ptr(), 0o755), 0);
+
+        let file_a = CString::new("/data/world_test/CURRENT.tmp").unwrap();
+        let file_b = CString::new("/data/world_test/CURRENT").unwrap();
+
+        // Create and write via sce_open + sce_write + sce_pwrite
+        let fd = sce_open(file_a.as_ptr(), O_RDWR | O_CREAT | O_TRUNC, 0o644);
+        assert!(fd >= 3);
+        let payload = b"MANIFEST-000001\n";
+        assert_eq!(sce_write(fd, payload.as_ptr(), payload.len()), payload.len() as i64);
+
+        // Positional pwrite at offset 9 does not disturb seek position (which is at 16)
+        assert_eq!(sce_pwrite(fd, b"000042".as_ptr(), 6, 9), 6);
+        assert_eq!(sce_lseek(fd, 0, 1), payload.len() as i64);
+
+        // Positional pread reads updated bytes and preserves seek position
+        let mut read_buf = [0u8; 16];
+        assert_eq!(sce_pread(fd, read_buf.as_mut_ptr(), 16, 0), 16);
+        assert_eq!(&read_buf, b"MANIFEST-000042\n");
+        assert_eq!(sce_lseek(fd, 0, 1), payload.len() as i64);
+
+        // ftruncate shrinks file to 8 bytes
+        assert_eq!(sce_ftruncate(fd, 8), 0);
+        let mut st = unsafe { std::mem::zeroed::<Stat>() };
+        assert_eq!(sce_fstat(fd, &mut st), 0);
+        assert_eq!(st.size, 8);
+        assert!(st.mtime[0] > 0);
+        assert_eq!(sce_close(fd), 0);
+
+        // Rename over an existing destination (POSIX/LevelDB semantics on Windows)
+        let fd_b = sce_open(file_b.as_ptr(), O_RDWR | O_CREAT | O_TRUNC, 0o644);
+        assert!(fd_b >= 3);
+        assert_eq!(sce_write(fd_b, b"OLD".as_ptr(), 3), 3);
+        assert_eq!(sce_close(fd_b), 0);
+        assert_eq!(sce_rename(file_a.as_ptr(), file_b.as_ptr()), 0);
+
+        // Verify destination now has the truncated 8-byte content
+        let fd_check = sce_open(file_b.as_ptr(), 0, 0);
+        assert!(fd_check >= 3);
+        let mut check_buf = [0u8; 8];
+        assert_eq!(sce_read(fd_check, check_buf.as_mut_ptr(), 8), 8);
+        assert_eq!(&check_buf, b"MANIFEST");
+        assert_eq!(sce_close(fd_check), 0);
+
+        // Cleanup via unlink + rmdir
+        assert_eq!(sce_unlink(file_b.as_ptr()), 0);
+        assert_eq!(sce_rmdir(dir_c.as_ptr()), 0);
+        // Removing already-deleted dir returns ENOENT
+        assert_eq!(sce_rmdir(dir_c.as_ptr()), SCE_KERNEL_ERROR_ENOENT);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn uuid_create_generates_valid_v4_uuids() {
+        let mut u1 = [0u8; 16];
+        let mut u2 = [0u8; 16];
+        assert_eq!(sce_uuid_create(u1.as_mut_ptr()), 0);
+        assert_eq!(sce_uuid_create(u2.as_mut_ptr()), 0);
+        assert_eq!(u1[6] & 0xF0, 0x40); // version 4
+        assert_eq!(u1[8] & 0xC0, 0x80); // RFC 4122 variant
+        assert_ne!(u1, u2);
+        assert_eq!(sce_uuid_create(std::ptr::null_mut()), SCE_KERNEL_ERROR_EINVAL);
+    }
 }

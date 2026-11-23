@@ -57,9 +57,15 @@ pub struct GenDraw {
     pub rt: (usize, u32, u32),
     /// Scissor rectangle in the target: x, y, width, height.
     pub scissor: [i32; 4],
+    /// The sampler descriptor (S#) the shader uses with the texture.
+    pub samp: [u32; 4],
+    /// DB_DEPTH_CONTROL (bit 1 test, bit 2 write, bits 4..6 compare function).
+    pub depth: u32,
+    /// DB_DEPTH_CLEAR: value a cleared depth buffer starts with.
+    pub zclear: f32,
 }
 
-const GVBUF_BYTES: usize = 8 << 20;
+const GVBUF_BYTES: usize = 32 << 20;
 
 pub struct VkTarget {
     pub image: vk::Image,
@@ -119,6 +125,10 @@ pub struct VkRenderer {
     pub rt_fbs: HashMap<usize, vk::Framebuffer>,
     pub rt_dsets: HashMap<usize, vk::DescriptorSet>,
     pub rt_layouts: HashMap<usize, vk::ImageLayout>,
+    pub samplers: HashMap<u32, vk::Sampler>,
+    pub rt_depth: HashMap<usize, (vk::Image, vk::DeviceMemory, vk::ImageView)>,
+    pub rt_quad_pipe: vk::Pipeline,
+    pub view_dsets: HashMap<(u64, u64), vk::DescriptorSet>,
     pub gen_layout: vk::PipelineLayout,
     pub gen_vs: vk::ShaderModule,
     pub gen_pipes: HashMap<(usize, u32, u32), vk::Pipeline>,
@@ -342,6 +352,10 @@ impl VkRenderer {
             rt_fbs: HashMap::new(),
             rt_dsets: HashMap::new(),
             rt_layouts: HashMap::new(),
+            samplers: HashMap::new(),
+            rt_depth: HashMap::new(),
+            rt_quad_pipe: vk::Pipeline::null(),
+            view_dsets: HashMap::new(),
             gen_layout: vk::PipelineLayout::null(),
             gen_vs: vk::ShaderModule::null(),
             gen_pipes: HashMap::new(),
@@ -446,12 +460,12 @@ impl VkRenderer {
             .map_err(|e| format!("sampler: {e}"))?;
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 1024,
+            descriptor_count: 16384,
         }];
         let desc_pool = self
             .device
             .create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default().max_sets(1024).pool_sizes(&pool_sizes),
+                &vk::DescriptorPoolCreateInfo::default().max_sets(16384).pool_sizes(&pool_sizes),
                 None,
             )
             .map_err(|e| format!("desc_pool: {e}"))?;
@@ -756,7 +770,7 @@ impl VkRenderer {
                 return ds;
             }
         }
-        if self.tex_cache.len() >= 900 {
+        if self.tex_cache.len() >= 4096 {
             return self.desc_set;
         }
         let src = std::slice::from_raw_parts(addr as *const u8, avail);
@@ -1325,15 +1339,28 @@ impl VkRenderer {
     unsafe fn rt_passes(&mut self) -> Option<(vk::RenderPass, vk::RenderPass)> {
         if self.rt_rp_load == vk::RenderPass::null() {
             for clear in [true, false] {
-                let att = [vk::AttachmentDescription::default()
-                    .format(vk::Format::B8G8R8A8_UNORM)
-                    .samples(vk::SampleCountFlags::TYPE_1)
-                    .load_op(if clear { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD })
-                    .store_op(vk::AttachmentStoreOp::STORE)
-                    .initial_layout(if clear { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL })
-                    .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+                let att = [
+                    vk::AttachmentDescription::default()
+                        .format(vk::Format::B8G8R8A8_UNORM)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .load_op(if clear { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD })
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .initial_layout(if clear { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL })
+                        .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+                    vk::AttachmentDescription::default()
+                        .format(vk::Format::D32_SFLOAT)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .load_op(if clear { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD })
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .initial_layout(if clear { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL })
+                        .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+                ];
                 let color_ref = [vk::AttachmentReference { attachment: 0, layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL }];
-                let subpass = [vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&color_ref)];
+                let depth_ref = vk::AttachmentReference { attachment: 1, layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+                let subpass = [vk::SubpassDescription::default()
+                    .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                    .color_attachments(&color_ref)
+                    .depth_stencil_attachment(&depth_ref)];
                 let rp = self.device.create_render_pass(&vk::RenderPassCreateInfo::default().attachments(&att).subpasses(&subpass), None).ok()?;
                 if clear {
                     self.rt_rp_clear = rp;
@@ -1341,6 +1368,9 @@ impl VkRenderer {
                     self.rt_rp_load = rp;
                 }
             }
+        }
+        if self.rt_quad_pipe == vk::Pipeline::null() {
+            self.rt_quad_pipe = self.create_quad_pipeline(self.rt_rp_load, self.blit_layout).unwrap_or(vk::Pipeline::null());
         }
         Some((self.rt_rp_clear, self.rt_rp_load))
     }
@@ -1350,14 +1380,61 @@ impl VkRenderer {
         let (_, rp_load) = self.rt_passes()?;
         let fresh = !matches!(self.targets.get(&addr), Some(t) if t.width == w && t.height == h);
         if fresh {
-            self.rt_fbs.remove(&addr);
+            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            if let Some(old) = self.targets.get(&addr) {
+                use ash::vk::Handle;
+                let old_raw = old.view.as_raw();
+                self.view_dsets.retain(|&(v, _), _| v != old_raw);
+            }
+            if let Some(fb) = self.rt_fbs.remove(&addr) {
+                self.device.destroy_framebuffer(fb, None);
+            }
+            if let Some((img, mem, dview)) = self.rt_depth.remove(&addr) {
+                self.device.destroy_image_view(dview, None);
+                self.device.destroy_image(img, None);
+                self.device.free_memory(mem, None);
+            }
             self.rt_dsets.remove(&addr);
             self.rt_layouts.insert(addr, vk::ImageLayout::UNDEFINED);
         }
         let t = self.ensure_target(addr, w, h)?;
         let (image, view) = (t.image, t.view);
         if !self.rt_fbs.contains_key(&addr) {
-            let atts = [view];
+            if !self.rt_depth.contains_key(&addr) {
+                let img = self
+                    .device
+                    .create_image(
+                        &vk::ImageCreateInfo::default()
+                            .image_type(vk::ImageType::TYPE_2D)
+                            .format(vk::Format::D32_SFLOAT)
+                            .extent(vk::Extent3D { width: w, height: h, depth: 1 })
+                            .mip_levels(1)
+                            .array_layers(1)
+                            .samples(vk::SampleCountFlags::TYPE_1)
+                            .tiling(vk::ImageTiling::OPTIMAL)
+                            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                            .initial_layout(vk::ImageLayout::UNDEFINED),
+                        None,
+                    )
+                    .ok()?;
+                let req = self.device.get_image_memory_requirements(img);
+                let mi = self.find_mem_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+                let mem = self.device.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mi), None).ok()?;
+                self.device.bind_image_memory(img, mem, 0).ok()?;
+                let dview = self
+                    .device
+                    .create_image_view(
+                        &vk::ImageViewCreateInfo::default()
+                            .image(img)
+                            .view_type(vk::ImageViewType::TYPE_2D)
+                            .format(vk::Format::D32_SFLOAT)
+                            .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::DEPTH, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 }),
+                        None,
+                    )
+                    .ok()?;
+                self.rt_depth.insert(addr, (img, mem, dview));
+            }
+            let atts = [view, self.rt_depth[&addr].2];
             let fb = self
                 .device
                 .create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(rp_load).attachments(&atts).width(w).height(h).layers(1), None)
@@ -1365,6 +1442,62 @@ impl VkRenderer {
             self.rt_fbs.insert(addr, fb);
         }
         Some((image, self.rt_fbs[&addr]))
+    }
+
+    /// Vulkan sampler for an S#: filter (word 2) and address modes (word 0).
+    unsafe fn sampler_for(&mut self, s: [u32; 4]) -> vk::Sampler {
+        let key = (s[0] & 0x1FF) | (((s[2] >> 20) & 0xF) << 9);
+        if let Some(&x) = self.samplers.get(&key) {
+            return x;
+        }
+        let addr = |m: u32| match m {
+            0 => vk::SamplerAddressMode::REPEAT,
+            1 | 3 | 5 | 7 => vk::SamplerAddressMode::MIRRORED_REPEAT,
+            6 => vk::SamplerAddressMode::CLAMP_TO_BORDER,
+            _ => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        };
+        let filt = |f: u32| if f == 0 { vk::Filter::NEAREST } else { vk::Filter::LINEAR };
+        let mag = filt((s[2] >> 20) & 3);
+        let min = filt((s[2] >> 22) & 3);
+        let u = addr(s[0] & 7);
+        let v = addr((s[0] >> 3) & 7);
+        let w = addr((s[0] >> 6) & 7);
+        if mag == vk::Filter::LINEAR
+            && min == vk::Filter::LINEAR
+            && u == vk::SamplerAddressMode::CLAMP_TO_EDGE
+            && v == vk::SamplerAddressMode::CLAMP_TO_EDGE
+            && w == vk::SamplerAddressMode::CLAMP_TO_EDGE
+        {
+            self.samplers.insert(key, self.sampler);
+            return self.sampler;
+        }
+        let ci = vk::SamplerCreateInfo::default()
+            .mag_filter(mag)
+            .min_filter(min)
+            .address_mode_u(u)
+            .address_mode_v(v)
+            .address_mode_w(w)
+            .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK);
+        let x = self.device.create_sampler(&ci, None).unwrap_or(self.sampler);
+        self.samplers.insert(key, x);
+        x
+    }
+
+    /// Descriptor set for an image view with the sampler an S# describes.
+    unsafe fn dset_for(&mut self, view: vk::ImageView, s: [u32; 4]) -> Option<vk::DescriptorSet> {
+        use ash::vk::Handle;
+        let sampler = self.sampler_for(s);
+        let key = (view.as_raw(), sampler.as_raw());
+        if let Some(&d) = self.view_dsets.get(&key) {
+            return Some(d);
+        }
+        let dsls = [self.blit_dset_layout];
+        let ds = self.device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.desc_pool).set_layouts(&dsls)).ok()?[0];
+        let info = [vk::DescriptorImageInfo::default().sampler(sampler).image_view(view).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let write = [vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&info)];
+        self.device.update_descriptor_sets(&write, &[]);
+        self.view_dsets.insert(key, ds);
+        Some(ds)
     }
 
     /// Descriptor set sampling a render target.
@@ -1467,6 +1600,17 @@ impl VkRenderer {
                         Some((a, w, h, sw)) => self.ensure_sampled_texture(a, w, h, sw),
                         None => self.desc_set,
                     };
+                    // Rebind with the game's sampler (point filtering, wrap modes) when it differs.
+                    let view = match gd.tex {
+                        Some((a, _, _, _)) if sampled_rt == a => self.targets.get(&a).map(|t| t.view),
+                        Some((a, _, _, _)) if gd.layers > 1 => self.array_cache.get(&a).map(|t| t.0.view),
+                        Some((a, _, _, _)) => self.tex_cache.get(&a).map(|t| t.0.view),
+                        None => None,
+                    };
+                    let ds = match view {
+                        Some(v) if ds != self.desc_set && self.sampler_for(gd.samp) != self.sampler => self.dset_for(v, gd.samp).unwrap_or(ds),
+                        _ => ds,
+                    };
                     let [x, y, w, h] = gd.scissor;
                     let scissor = vk::Rect2D { offset: vk::Offset2D { x, y }, extent: vk::Extent2D { width: w.max(0) as u32, height: h.max(0) as u32 } };
                     items.push(Item { rt, first: gd.first_vertex, count: gd.vertex_count, ds, pipe, gen: g as usize, scissor, sampled_rt });
@@ -1552,7 +1696,19 @@ impl VkRenderer {
                         self.rt_barrier(a, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
                     }
                     let cv = if a == display.0 { clear_rgba } else { [0.0, 0.0, 0.0, 0.0] };
-                    let clear = [vk::ClearValue { color: vk::ClearColorValue { float32: cv } }];
+                    let zc = if clear_now {
+                        items
+                            .iter()
+                            .find(|x| x.rt.0 == a && x.pipe != vk::Pipeline::null() && gens[x.gen].depth & 2 != 0)
+                            .map(|x| gens[x.gen].zclear)
+                            .unwrap_or(1.0)
+                    } else {
+                        1.0
+                    };
+                    let clear = [
+                        vk::ClearValue { color: vk::ClearColorValue { float32: cv } },
+                        vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: zc, stencil: 0 } },
+                    ];
                     let bi = vk::RenderPassBeginInfo::default()
                         .render_pass(if clear_now { rp_clear } else { rp_load })
                         .framebuffer(fb)
@@ -1572,7 +1728,7 @@ impl VkRenderer {
                     }
                 }
                 let generic = it.pipe != vk::Pipeline::null();
-                let want = if generic { it.pipe } else { self.quad_pipe };
+                let want = if generic { it.pipe } else { self.rt_quad_pipe };
                 if want == vk::Pipeline::null() {
                     continue;
                 }
@@ -1796,6 +1952,21 @@ impl VkRenderer {
         let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&cba);
         let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let ds = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+        let dc = gd.depth;
+        let zop = match (dc >> 4) & 7 {
+            0 => vk::CompareOp::NEVER,
+            1 => vk::CompareOp::LESS,
+            2 => vk::CompareOp::EQUAL,
+            3 => vk::CompareOp::LESS_OR_EQUAL,
+            4 => vk::CompareOp::GREATER,
+            5 => vk::CompareOp::NOT_EQUAL,
+            6 => vk::CompareOp::GREATER_OR_EQUAL,
+            _ => vk::CompareOp::ALWAYS,
+        };
+        let dss = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(dc & 2 != 0)
+            .depth_write_enable(dc & 2 != 0 && dc & 4 != 0)
+            .depth_compare_op(zop);
         let gp_ci = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vi)
@@ -1804,6 +1975,7 @@ impl VkRenderer {
             .rasterization_state(&rs)
             .multisample_state(&ms)
             .color_blend_state(&cb)
+            .depth_stencil_state(&dss)
             .dynamic_state(&ds)
             .layout(self.gen_layout)
             .render_pass(self.rt_passes().map(|p| p.1).unwrap_or(self.swap_rp))];
@@ -1860,6 +2032,7 @@ impl VkRenderer {
         let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&cba);
         let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let ds = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+        let no_depth = vk::PipelineDepthStencilStateCreateInfo::default();
         let gp_ci = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vi)
@@ -1868,6 +2041,7 @@ impl VkRenderer {
             .rasterization_state(&rs)
             .multisample_state(&ms)
             .color_blend_state(&cb)
+            .depth_stencil_state(&no_depth)
             .dynamic_state(&ds)
             .layout(pl)
             .render_pass(rp)];

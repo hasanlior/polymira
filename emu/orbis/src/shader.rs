@@ -179,7 +179,7 @@ pub fn decode_rdna2(words: &[u32]) -> DecodedShader {
             step = 2;
             let mop = ((w0 >> 18) & 0x7F) as u8;
             let mop16 = ((w0 >> 16) & 0x7F) as u8;
-            if matches!(mop, 0x00..=0x17) && mop16 != 0x1C {
+            if (matches!(mop, 0x00..=0x03) || matches!(mop, 0x08..=0x17)) && mop16 != 0x1C {
                 has_buffer_load = true;
             } else {
                 has_buffer_store = true;

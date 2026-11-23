@@ -121,12 +121,13 @@ pub extern "sysv64" fn umount(a: usize, b: usize) -> i32 {
 }
 
 /// sceSaveDataGetMountInfo(mountPoint*, info*): { blocks, freeBlocks, … }
+/// 1 block = 32 KiB; report 2 GiB (65536 blocks = SCE_SAVE_DATA_BLOCKS_MAX2) with ~1.87 GiB free.
 pub extern "sysv64" fn mount_info(_mp: usize, info: *mut u64) -> i32 {
     if !info.is_null() {
         unsafe {
             std::ptr::write_bytes(info as *mut u8, 0, 0x30);
-            *info = 1 << 20;
-            *info.add(1) = 1 << 19;
+            *info = 65536;     // blocks (2 GiB)
+            *info.add(1) = 60000; // freeBlocks (~1.87 GiB)
         }
     }
     0
@@ -164,7 +165,11 @@ pub extern "sysv64" fn dir_name_search(cond: *const u8, result: *mut u8) -> i32 
             }
             if !infos.is_null() {
                 std::ptr::write_bytes(infos.add(i * 0x30), 0, 0x30);
-                *(infos.add(i * 0x30) as *mut u64) = 1 << 20;
+                // SceSaveDataSearchInfo: { u64 blocks @0x00, u64 freeBlocks @0x08 }
+                // Report realistic per-save size (128 blocks = 4 MiB) + ample free space (32768 blocks = 1 GiB)
+                // so games summing used save blocks do not overflow their save quota.
+                *(infos.add(i * 0x30) as *mut u64) = 128;
+                *(infos.add(i * 0x30 + 8) as *mut u64) = 32768;
             }
         }
     }
@@ -201,9 +206,12 @@ pub extern "sysv64" fn delete(del: *const u8) -> i32 {
 pub fn functions() -> Vec<(&'static str, usize)> {
     vec![
         ("sceSaveDataInitialize3", ok as *const () as usize),
+        ("sceSaveDataMount", mount3 as *const () as usize),
+        ("sceSaveDataMount2", mount3 as *const () as usize),
         ("#ZP4e7rlzOUk", mount3 as *const () as usize), // sceSaveDataMount3
         ("sceSaveDataUmount", umount as *const () as usize),
         ("#uW4vfTwMQVo", umount as *const () as usize), // sceSaveDataUmount2
+        ("sceSaveDataGetMountInfo", mount_info as *const () as usize),
         ("#65VH0Qaaz6s", mount_info as *const () as usize), // sceSaveDataGetMountInfo
         ("sceSaveDataDirNameSearch", dir_name_search as *const () as usize),
         ("#X4MYzukPc3g", dir_name_search as *const () as usize), // sceSaveDataDirNameSearchPs4

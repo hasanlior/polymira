@@ -721,7 +721,8 @@ struct GpuState {
     bound_tex: Option<(usize, u32, u32)>,
     index_base: u64,
     index_count: u32,
-    cs_cache: BTreeMap<usize, (bool, bool, bool)>,
+    index_32bit: bool,
+    cs_cache: BTreeMap<usize, (bool, bool, bool, bool)>,
     frame_verts: Vec<crate::vk::Vertex>,
     frame_idxs: Vec<u32>,
     frame_batches: Vec<crate::vk::DrawBatch>,
@@ -738,6 +739,7 @@ static GPU: Mutex<GpuState> = Mutex::new(GpuState {
     bound_tex: None,
     index_base: 0,
     index_count: 0,
+    index_32bit: false,
     cs_cache: BTreeMap::new(),
     frame_verts: Vec::new(),
     frame_idxs: Vec::new(),
@@ -763,24 +765,62 @@ pub fn take_frame_gen() -> (Vec<crate::vk::GVertex>, Vec<crate::vk::GenDraw>) {
     std::mem::take(&mut *g)
 }
 
+#[cfg(windows)]
+std::thread_local! {
+    static COMMIT_CACHE: std::cell::RefCell<([(usize, usize); 8], usize)> =
+        const { std::cell::RefCell::new(([(0, 0); 8], 0)) };
+}
+
+fn flush_committed_cache() {
+    #[cfg(windows)]
+    COMMIT_CACHE.with(|c| {
+        let mut g = c.borrow_mut();
+        g.0 = [(0, 0); 8];
+        g.1 = 0;
+    });
+}
+
 fn is_committed(addr: usize, len: usize) -> bool {
     if addr < 0x1_0000_0000 || addr > 0x7FFF_FFFF_FFFF || len == 0 {
         return false;
     }
+    let end = addr.saturating_add(len);
     #[cfg(windows)]
-    unsafe {
-        let mut mbi: windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION = std::mem::zeroed();
-        windows_sys::Win32::System::Memory::VirtualQuery(
-            addr as *const std::ffi::c_void,
-            &mut mbi,
-            std::mem::size_of::<windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION>(),
-        ) != 0
-            && mbi.State == windows_sys::Win32::System::Memory::MEM_COMMIT
-            && (mbi.BaseAddress as usize + mbi.RegionSize) >= addr.saturating_add(len)
+    {
+        let hit = COMMIT_CACHE.with(|c| {
+            let g = c.borrow();
+            g.0.iter().any(|&(b, e)| b != 0 && addr >= b && end <= e)
+        });
+        if hit {
+            return true;
+        }
+        unsafe {
+            let mut mbi: windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+            if windows_sys::Win32::System::Memory::VirtualQuery(
+                addr as *const std::ffi::c_void,
+                &mut mbi,
+                std::mem::size_of::<windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION>(),
+            ) != 0
+                && mbi.State == windows_sys::Win32::System::Memory::MEM_COMMIT
+            {
+                let base = mbi.BaseAddress as usize;
+                let reg_end = base.saturating_add(mbi.RegionSize);
+                if reg_end >= end {
+                    COMMIT_CACHE.with(|c| {
+                        let mut g = c.borrow_mut();
+                        let idx = g.1 & 7;
+                        g.0[idx] = (base, reg_end);
+                        g.1 = g.1.wrapping_add(1);
+                    });
+                    return true;
+                }
+            }
+            false
+        }
     }
     #[cfg(not(windows))]
     {
-        let _ = (addr, len);
+        let _ = end;
         false
     }
 }
@@ -890,11 +930,25 @@ fn shader_words(addr: usize) -> Option<&'static [u32]> {
 }
 
 type PsCache = HashMap<(usize, u32, u64), Option<(std::sync::Arc<Vec<u32>>, bool)>>;
+type DecodedCache = HashMap<(usize, u64), std::sync::Arc<crate::rdna::interp::CompiledShader>>;
 /// Shaders with real branches: translated per execution path (key: shader, path hash).
 static PATH_SHADERS: LazyLock<Mutex<std::collections::HashSet<usize>>> = LazyLock::new(|| Mutex::new(Default::default()));
 static PATH_CACHE: LazyLock<Mutex<PsCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static PS_CACHE: LazyLock<Mutex<PsCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static DECODED_CACHE: LazyLock<Mutex<DecodedCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static GEN_STATS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+fn shader_hash(code: &[u32]) -> u64 {
+    code.iter().take(64).fold(0xcbf2_9ce4_8422_2325u64, |h, &w| (h ^ w as u64).wrapping_mul(0x100_0000_01b3))
+}
+
+fn compiled_shader(addr: usize, code: &[u32], hash: u64) -> std::sync::Arc<crate::rdna::interp::CompiledShader> {
+    let mut cache = DECODED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache
+        .entry((addr, hash))
+        .or_insert_with(|| std::sync::Arc::new(crate::rdna::interp::CompiledShader::new(code)))
+        .clone()
+}
 
 /// (generic draws, VS failures, PS untranslatable, skipped) since start.
 pub fn gen_stats() -> [u64; 4] {
@@ -909,13 +963,25 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     let (Some(vs_code), Some(ps_code)) = (shader_words(vs_addr), shader_words(ps_addr)) else {
         return false;
     };
-    let ib = (gpu.index_base as usize).saturating_add(idx_off * 2);
-    if idx_cnt < 3 || !is_committed(ib, idx_cnt * 2) || gpu.frame_gverts.len() + idx_cnt > 50_000 {
-        return false;
-    }
+    let idxs: Vec<u32> = if gpu.index_32bit {
+        let ib = (gpu.index_base as usize).saturating_add(idx_off * 4);
+        if idx_cnt < 3 || !is_committed(ib, idx_cnt * 4) || gpu.frame_gverts.len() + idx_cnt > 200_000 {
+            return false;
+        }
+        unsafe { std::slice::from_raw_parts(ib as *const u32, idx_cnt) }.to_vec()
+    } else {
+        let ib = (gpu.index_base as usize).saturating_add(idx_off * 2);
+        if idx_cnt < 3 || !is_committed(ib, idx_cnt * 2) || gpu.frame_gverts.len() + idx_cnt > 200_000 {
+            return false;
+        }
+        unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt) }.iter().map(|&x| x as u32).collect()
+    };
     // Pixel shader translation (cached per address, input layout and code hash).
     let input_addr = gpu.cx.get(&0x1B4).copied().filter(|&v| v != 0).or_else(|| gpu.cx.get(&0x1B3).copied()).unwrap_or(0x302);
-    let hash = ps_code.iter().take(64).fold(0xcbf2_9ce4_8422_2325u64, |h, &w| (h ^ w as u64).wrapping_mul(0x100_0000_01b3));
+    let hash = shader_hash(ps_code);
+    let vs_hash = shader_hash(vs_code);
+    let vs_sh = compiled_shader(vs_addr, vs_code, vs_hash);
+    let ps_sh = compiled_shader(ps_addr, ps_code, hash);
     let tr = {
         let mut cache = PS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         cache
@@ -952,7 +1018,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     let pre = if path_mode {
         None
     } else {
-        match crate::rdna::interp::run_scalar(ps_code, &mut ps_lane, mem_ok) {
+        match crate::rdna::interp::run_scalar_compiled(&ps_sh, &mut ps_lane, mem_ok) {
             Ok(info) => Some(info),
             Err(_) => {
                 GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
@@ -961,22 +1027,20 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         }
     };
     // Vertex shader per unique index (before the pixel shader's path is known).
-    let idxs: Vec<u16> = unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt) }.to_vec();
     let cntl: [u32; 8] = std::array::from_fn(|n| gpu.cx.get(&(0x191 + n as u32)).map(|v| v & 0x3F).unwrap_or(n as u32));
-    let vs_ud: Vec<u32> = (0..24u32).map(|k| *gpu.sh.get(&(0x8C + k)).unwrap_or(&0)).collect();
-    let mut raw: HashMap<u16, ([f32; 4], [[f32; 4]; 8])> = HashMap::new();
+    let vs_ud: [u32; 24] = std::array::from_fn(|k| *gpu.sh.get(&(0x8C + k as u32)).unwrap_or(&0));
+    let mut raw: HashMap<u32, ([f32; 4], [[f32; 4]; 8])> = HashMap::with_capacity(idxs.len().min(512));
+    let mut lane = crate::rdna::interp::Lane::new();
     for &ix in &idxs {
         if raw.contains_key(&ix) {
             continue;
         }
-        let mut lane = crate::rdna::interp::Lane::new();
+        lane.reset();
         lane.s[3] = 0x101;
-        for (k, &v) in vs_ud.iter().enumerate() {
-            lane.s[8 + k] = v;
-        }
-        lane.v[5] = ix as u32;
+        lane.s[8..32].copy_from_slice(&vs_ud);
+        lane.v[5] = ix;
         lane.v[8] = 0;
-        if crate::rdna::interp::run(vs_code, &mut lane, mem_ok).is_err() {
+        if crate::rdna::interp::run_compiled(&vs_sh, &mut lane, mem_ok).is_err() {
             GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -997,7 +1061,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         (Some((tr, cube)), Some(info)) => (tr, cube, info),
         _ => {
             let attrs = raw[&idxs[0]].1;
-            let Ok((pcs, info)) = crate::rdna::interp::trace_ps(ps_code, &mut ps_lane, &attrs, mem_ok) else {
+            let Ok((pcs, info)) = crate::rdna::interp::trace_ps_compiled(&ps_sh, &mut ps_lane, &attrs, mem_ok) else {
                 GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
                 return false;
             };
@@ -1077,7 +1141,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         let (x1, y1) = (((br & 0x7FFF) as i32).min(rt.1 as i32), (((br >> 16) & 0x7FFF) as i32).min(rt.2 as i32));
         if x1 > x0 && y1 > y0 { [x0, y0, x1 - x0, y1 - y0] } else { [0, 0, rt.1 as i32, rt.2 as i32] }
     };
-    let done: HashMap<u16, crate::vk::GVertex> = raw.iter().map(|(&ix, &(p, attr))| (ix, crate::vk::GVertex { pos: to_target(p), attr })).collect();
+    let done: HashMap<u32, crate::vk::GVertex> = raw.iter().map(|(&ix, &(p, attr))| (ix, crate::vk::GVertex { pos: to_target(p), attr })).collect();
     // Primitive type: triangle list (default) or rect list (3 corners → 2 triangles).
     let prim = gpu.uc.get(&0x242).copied().map(|v| if v > 0xFF { v >> 8 } else { v }).unwrap_or(4);
     let first_vertex = gpu.frame_gverts.len() as u32;
@@ -1128,9 +1192,10 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         return true;
     }
     let blend = gpu.cx.get(&0x1E0).copied().unwrap_or(0);
+    let dctl = gpu.cx.get(&0x200).copied().unwrap_or(0);
     let g = gpu.frame_gens.len() as u32;
     gpu.frame_gens.push(crate::vk::GenDraw {
-        key: (ps_addr ^ hash as usize, blend, wmask),
+        key: (ps_addr ^ hash as usize, blend, wmask | (dctl & 0x76) << 8),
         wmask,
         spirv: tr.clone(),
         blend,
@@ -1141,13 +1206,18 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         layers: if cube { 6 } else { 1 },
         rt,
         scissor,
+        samp: info.images.first().map(|(_, s)| *s).unwrap_or([0; 4]),
+        depth: dctl,
+        // Depth is cleared through HTILE metadata we do not see: start from the far plane of
+        // the compare direction (1.0 for LESS-style tests, 0.0 for GREATER-style ones).
+        zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
     });
     gpu.frame_batches.push(crate::vk::DrawBatch { first_index: 0, index_count: 0, tex_addr: 0, tex_w: 0, tex_h: 0, tex_swiz: 0, gen: Some(g) });
     if std::env::var_os("ORBIS_RT_LOG").is_some() {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        if (15000..15030).contains(&n) {
-            eprintln!("[orbis] DRAW#{n} ps={ps_addr:#x} rt={:#x} {}x{} tex={tex:x?} cube={cube} verts={vertex_count} blend={blend:#x} mask={wmask:#x} sc={scissor:?}", rt.0, rt.1, rt.2);
+        if (15000..15040).contains(&n) {
+            eprintln!("[orbis] DRAW#{n} ps={ps_addr:#x} rt={:#x} {}x{} tex={tex:x?} cube={cube} verts={vertex_count} blend={blend:#x} mask={wmask:#x} sc={scissor:?} dctl={dctl:#x} zclear={:?} db={:x?}", rt.0, rt.1, rt.2, gpu.cx.get(&0x00B), (gpu.cx.get(&0x10), gpu.cx.get(&0x11), gpu.cx.get(&0x12), gpu.cx.get(&0x14)));
         }
     }
     GEN_STATS[0].fetch_add(1, Ordering::Relaxed);
@@ -1357,6 +1427,9 @@ fn execute_stream(
                         }
                     }
                 }
+            }
+            OP_SET_UC_REG_INDEX if len >= 3 && (w[1] >> 28) == 2 => {
+                gpu.index_32bit = (w[2] & 3) == 1;
             }
             OP_SET_UCONFIG_REG | OP_SET_UC_REG_INDEX if len >= 3 => {
                 let base = w[1] & 0xFFFF;
@@ -1652,10 +1725,11 @@ fn execute_stream(
                 let cs_hi = *gpu.sh.get(&0x20D).unwrap_or(&0) as u64;
                 let cs_addr = ((cs_lo | (cs_hi << 32)) << 8) as usize;
                 if cs_addr >= 0x1_0000_0000 && is_committed(cs_addr, 256) {
-                    let (has_load, has_store, has_img) = *gpu.cs_cache.entry(cs_addr).or_insert_with(|| {
-                        let words = unsafe { std::slice::from_raw_parts(cs_addr as *const u32, 64) };
+                    let (has_load, has_store, has_img, is_byte_copy) = *gpu.cs_cache.entry(cs_addr).or_insert_with(|| {
+                        let nwords = if is_committed(cs_addr, 1024) { 256 } else { 64 };
+                        let words = unsafe { std::slice::from_raw_parts(cs_addr as *const u32, nwords) };
                         let d = crate::shader::decode_rdna2(words);
-                        (d.has_buffer_load, d.has_buffer_store, d.has_image_sample)
+                        (d.has_buffer_load, d.has_buffer_store, d.has_image_sample, d.ops.len() > 48)
                     });
                     if !has_img && has_store && !has_load {
                         // Compute buffer clear (SHADER #1 pattern: s[0:3] = V#, s[4:7] = clear RGBA/u32x4)
@@ -1677,8 +1751,10 @@ fn execute_stream(
                             }
                         }
                     } else if !has_img && has_load && has_store {
-                        // Compute buffer copy (SHADER #5 or 3x vec4 constant-buffer offset copy:
-                        //   s[0:3]=src V#, s[4:7]=dst V#, s[8:11]=const V# { +0x00: src_off, +0x10: count, +0x20: dst_off })
+                        // Compute buffer copy:
+                        //   s[0:3]=src V#, s[4:7]=dst V#, s[8:11]=const V#
+                        //   - Dword-aligned copy (ops <= 48): { +0x00: src_off_dw, +0x10: count_dw, +0x20: dst_off_dw }
+                        //   - Unaligned byte copy (ops > 48): { +0x00: count_bytes, +0x10: src_off_bytes, +0x20: dst_off_bytes }
                         if let (Some((src, sbytes)), Some((dst, dbytes))) =
                             (decode_vsharp(&gpu.sh, 0x240), decode_vsharp(&gpu.sh, 0x244))
                         {
@@ -1690,9 +1766,15 @@ fn execute_stream(
                                     let f0 = f32::from_bits(unsafe { *(cb as *const u32) });
                                     let f4 = f32::from_bits(unsafe { *((cb + 0x10) as *const u32) });
                                     let f8 = f32::from_bits(unsafe { *((cb + 0x20) as *const u32) });
-                                    let so = (f0.max(0.0) as usize).saturating_mul(4);
-                                    let cnt = (f4.max(0.0) as usize).saturating_mul(4);
-                                    let doff = (f8.max(0.0) as usize).saturating_mul(4);
+                                    let (so, cnt, doff) = if is_byte_copy {
+                                        (f4.max(0.0) as usize, f0.max(0.0) as usize, f8.max(0.0) as usize)
+                                    } else {
+                                        (
+                                            (f0.max(0.0) as usize).saturating_mul(4),
+                                            (f4.max(0.0) as usize).saturating_mul(4),
+                                            (f8.max(0.0) as usize).saturating_mul(4),
+                                        )
+                                    };
                                     if cnt > 0 && so + cnt <= sbytes && doff + cnt <= dbytes {
                                         src_off = so;
                                         dst_off = doff;
@@ -1708,29 +1790,72 @@ fn execute_stream(
                                 }
                             }
                         }
-                    } else if has_img && std::env::var_os("ORBIS_DUMP_DRAW").is_some() {
-                        static IMG_LOG: AtomicU64 = AtomicU64::new(0);
-                        let il = IMG_LOG.fetch_add(1, Ordering::Relaxed);
-                        if il < 8 {
-                            let r240: Vec<(u32, u32)> = (0x240..0x254).filter_map(|r| gpu.sh.get(&r).map(|&v| (r, v))).collect();
-                            let mut cb_vals = Vec::new();
-                            if let Some((cb, cbytes)) = decode_vsharp(&gpu.sh, 0x248) {
-                                if is_committed(cb, cbytes.min(64)) {
-                                    let sl = unsafe { std::slice::from_raw_parts(cb as *const u32, (cbytes / 4).min(16)) };
-                                    cb_vals.extend_from_slice(sl);
+                    } else if has_img {
+                        // Compute image-to-image slice copy (e.g. populating cubemap faces):
+                        // s[0..7] = source T#, *(u64 at s[12..13]) = destination T#.
+                        let src_t: [u32; 8] = std::array::from_fn(|k| *gpu.sh.get(&(0x240 + k as u32)).unwrap_or(&0));
+                        let dst_tp = ((*gpu.sh.get(&0x24C).unwrap_or(&0) as u64)
+                            | (((*gpu.sh.get(&0x24D).unwrap_or(&0) & 0xFFFF) as u64) << 32)) as usize;
+                        if dst_tp >= 0x1_0000_0000 && is_committed(dst_tp, 32) {
+                            let dst_t: [u32; 8] = unsafe { *(dst_tp as *const [u32; 8]) };
+                            let decode_t = |t: &[u32; 8]| -> (usize, u32, u32, u32, u32, usize) {
+                                let addr = (((t[0] as u64) | (((t[1] & 0xFF) as u64) << 32)) << 8) as usize;
+                                let fmt = (t[1] >> 20) & 0x1FF;
+                                let w = ((t[1] >> 30) | ((t[2] & 0xFFF) << 2)) + 1;
+                                let h = ((t[2] >> 14) & 0x3FFF) + 1;
+                                let swiz = (t[3] >> 20) & 0x1F;
+                                let slice = ((t[4] >> 16) & 0x1FFF) as usize;
+                                (addr, fmt, w, h, swiz, slice)
+                            };
+                            let (sa, sfmt, sw, sh, sswiz, sslice) = decode_t(&src_t);
+                            let (da, dfmt, dw, dh, dswiz, dslice) = decode_t(&dst_t);
+                            if sa >= 0x1_0000_0000
+                                && da >= 0x1_0000_0000
+                                && sfmt == dfmt
+                                && sw == dw
+                                && sh == dh
+                                && sswiz == dswiz
+                                && sw > 0
+                                && sh > 0
+                                && sw <= 4096
+                                && sh <= 4096
+                            {
+                                let slice_bytes = if sswiz == 0 {
+                                    (sw as usize) * (sh as usize) * 4
+                                } else {
+                                    (((sw as usize) + 127) / 128) * (((sh as usize) + 127) / 128) * 65536
+                                };
+                                let src_at = sa.saturating_add(sslice.saturating_mul(slice_bytes));
+                                let dst_at = da.saturating_add(dslice.saturating_mul(slice_bytes));
+                                if is_committed(src_at, slice_bytes) && is_committed(dst_at, slice_bytes) {
+                                    unsafe {
+                                        std::ptr::copy(src_at as *const u8, dst_at as *mut u8, slice_bytes);
+                                    }
                                 }
                             }
-                            let src_p = (*gpu.sh.get(&0x24C).unwrap_or(&0) as u64)
-                                | (((*gpu.sh.get(&0x24D).unwrap_or(&0) & 0xFFFF) as u64) << 32);
-                            let mut src_w = Vec::new();
-                            if is_committed(src_p as usize, 32) {
-                                let sl = unsafe { std::slice::from_raw_parts(src_p as *const u32, 8) };
-                                src_w.extend_from_slice(sl);
+                        }
+                        if std::env::var_os("ORBIS_DUMP_DRAW").is_some() {
+                            static IMG_LOG: AtomicU64 = AtomicU64::new(0);
+                            let il = IMG_LOG.fetch_add(1, Ordering::Relaxed);
+                            if il < 8 {
+                                let r240: Vec<(u32, u32)> = (0x240..0x254).filter_map(|r| gpu.sh.get(&r).map(|&v| (r, v))).collect();
+                                let mut cb_vals = Vec::new();
+                                if let Some((cb, cbytes)) = decode_vsharp(&gpu.sh, 0x248) {
+                                    if is_committed(cb, cbytes.min(64)) {
+                                        let sl = unsafe { std::slice::from_raw_parts(cb as *const u32, (cbytes / 4).min(16)) };
+                                        cb_vals.extend_from_slice(sl);
+                                    }
+                                }
+                                let mut dst_w = Vec::new();
+                                if is_committed(dst_tp, 32) {
+                                    let sl = unsafe { std::slice::from_raw_parts(dst_tp as *const u32, 8) };
+                                    dst_w.extend_from_slice(sl);
+                                }
+                                eprintln!(
+                                    "[orbis] GPU:   IMG_CS#{il} ({},{},{}) cs={cs_addr:#x} sh={r240:x?} cb={cb_vals:x?} dst({dst_tp:#x})={dst_w:x?}",
+                                    w[1], w[2], w[3]
+                                );
                             }
-                            eprintln!(
-                                "[orbis] GPU:   IMG_CS#{il} ({},{},{}) cs={cs_addr:#x} sh={r240:x?} cb={cb_vals:x?} src({src_p:#x})={src_w:x?}",
-                                w[1], w[2], w[3]
-                            );
                         }
                     }
                 }
@@ -1854,6 +1979,7 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
         return INVALID_ARG;
     }
     let flip = {
+        flush_committed_cache();
         let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
         let n = SUBMIT_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
         let trace = (std::env::var_os("ORBIS_TRACE_GPU").is_some() && n <= 3)

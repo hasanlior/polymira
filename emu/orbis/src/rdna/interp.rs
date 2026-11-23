@@ -53,9 +53,17 @@ pub type MemCheck = fn(usize, usize) -> bool;
 
 impl Lane {
     pub fn new() -> Lane {
-        let mut l = Lane { s: [0; 128], v: vec![0; 256], scc: false, exports: vec![] };
+        let mut l = Lane { s: [0; 128], v: vec![0; 256], scc: false, exports: Vec::with_capacity(16) };
         l.set64(EXEC, 1);
         l
+    }
+
+    pub fn reset(&mut self) {
+        self.s.fill(0);
+        self.v.fill(0);
+        self.scc = false;
+        self.exports.clear();
+        self.set64(EXEC, 1);
     }
 
     fn get64(&self, r: usize) -> u64 {
@@ -131,11 +139,13 @@ fn read_u32(addr: u64, ok: MemCheck) -> Result<u32, Error> {
 /// Decodes a buffer element of GFX10 unified format `fmt` at `addr` into 4 components.
 fn load_format(addr: u64, fmt: u32, ok: MemCheck) -> Result<[u32; 4], Error> {
     let one = u(1.0);
-    let rd = |o: u64, n: usize| -> Result<Vec<u8>, Error> {
+    let rd = |o: u64, n: usize| -> Result<[u8; 16], Error> {
+        let mut buf = [0u8; 16];
         if !ok((addr + o) as usize, n) {
             return Err(Error::Memory(addr + o));
         }
-        Ok(unsafe { std::slice::from_raw_parts((addr + o) as *const u8, n) }.to_vec())
+        unsafe { std::ptr::copy_nonoverlapping((addr + o) as *const u8, buf.as_mut_ptr(), n) };
+        Ok(buf)
     };
     let h = |b: &[u8], i: usize| half::f16::from_bits(u16::from_le_bytes([b[i * 2], b[i * 2 + 1]])).to_f32();
     let w = |b: &[u8], i: usize| u32::from_le_bytes([b[i * 4], b[i * 4 + 1], b[i * 4 + 2], b[i * 4 + 3]]);
@@ -186,10 +196,57 @@ fn bfe(x: u64, off: u32, width: u32) -> u64 {
     if width >= 64 { v } else { v & ((1u64 << width) - 1) }
 }
 
-/// Runs the shader for one lane until s_endpgm.
-pub fn run(code: &[u32], lane: &mut Lane, ok: MemCheck) -> Result<(), Error> {
-    let insts = decode_shader(code);
-    let by_pc: std::collections::HashMap<u32, usize> = insts.iter().enumerate().map(|(i, x)| (x.pc, i)).collect();
+/// Pre-decoded RDNA2 shader with O(1) branch table and precomputed scalar slots.
+pub struct CompiledShader {
+    pub insts: Vec<Inst>,
+    pub pc_to_idx: Vec<u32>,
+    pub slots: Vec<[u16; 3]>,
+    pub slot_lens: Vec<u8>,
+    pub end_pc: u32,
+}
+
+impl CompiledShader {
+    pub fn new(code: &[u32]) -> Self {
+        let insts = decode_shader(code);
+        let end_pc = insts.last().map(|x| x.pc).unwrap_or(0);
+        let table_len = (end_pc as usize / 4) + 1;
+        let mut pc_to_idx = vec![u32::MAX; table_len];
+        let mut slots = Vec::with_capacity(insts.len());
+        let mut slot_lens = Vec::with_capacity(insts.len());
+        for (i, inst) in insts.iter().enumerate() {
+            let slot_idx = (inst.pc / 4) as usize;
+            if slot_idx < table_len {
+                pc_to_idx[slot_idx] = i as u32;
+            }
+            let mut s = [0u16; 3];
+            let mut len = 0u8;
+            if matches!(inst.fmt, Fmt::Vop1 | Fmt::Vop2 | Fmt::Vopc | Fmt::Vop3 | Fmt::Vop3p) {
+                for c in scalar_slots(inst) {
+                    if (len as usize) < 3 {
+                        s[len as usize] = c;
+                        len += 1;
+                    }
+                }
+            }
+            slots.push(s);
+            slot_lens.push(len);
+        }
+        Self { insts, pc_to_idx, slots, slot_lens, end_pc }
+    }
+
+    #[inline]
+    fn idx_of(&self, pc: u32) -> Option<usize> {
+        if pc & 3 != 0 {
+            return None;
+        }
+        let v = *self.pc_to_idx.get((pc / 4) as usize)?;
+        if v == u32::MAX { None } else { Some(v as usize) }
+    }
+}
+
+/// Runs a pre-decoded shader for one lane until s_endpgm.
+pub fn run_compiled(sh: &CompiledShader, lane: &mut Lane, ok: MemCheck) -> Result<(), Error> {
+    let insts = &sh.insts;
     let mut i = 0usize;
     let mut steps = 0u32;
     while i < insts.len() {
@@ -204,11 +261,17 @@ pub fn run(code: &[u32], lane: &mut Lane, ok: MemCheck) -> Result<(), Error> {
             Flow::End => return Ok(()),
             Flow::Branch(rel) => {
                 let target = (next_pc as i64 + rel as i64 * 4) as u32;
-                i = *by_pc.get(&target).ok_or(Error::Unsupported("branch target", target))?;
+                i = sh.idx_of(target).ok_or(Error::Unsupported("branch target", target))?;
             }
         }
     }
     Ok(())
+}
+
+/// Runs the shader for one lane until s_endpgm.
+pub fn run(code: &[u32], lane: &mut Lane, ok: MemCheck) -> Result<(), Error> {
+    let sh = CompiledShader::new(code);
+    run_compiled(&sh, lane, ok)
 }
 
 enum Flow {
@@ -711,10 +774,9 @@ pub struct ScalarInfo {
     pub images: Vec<([u32; 8], [u32; 4])>,
 }
 
-/// Runs only the scalar part of a shader (uniform for the whole draw).
-pub fn run_scalar(code: &[u32], lane: &mut Lane, ok: MemCheck) -> Result<ScalarInfo, Error> {
-    let insts = decode_shader(code);
-    let by_pc: std::collections::HashMap<u32, usize> = insts.iter().enumerate().map(|(i, x)| (x.pc, i)).collect();
+/// Runs only the scalar part of a pre-decoded shader (uniform for the whole draw).
+pub fn run_scalar_compiled(sh: &CompiledShader, lane: &mut Lane, ok: MemCheck) -> Result<ScalarInfo, Error> {
+    let insts = &sh.insts;
     let mut info = ScalarInfo::default();
     let mut i = 0usize;
     let mut steps = 0u32;
@@ -727,7 +789,8 @@ pub fn run_scalar(code: &[u32], lane: &mut Lane, ok: MemCheck) -> Result<ScalarI
         let next_pc = inst.pc + inst.words.len() as u32 * 4;
         match inst.fmt {
             Fmt::Vop1 | Fmt::Vop2 | Fmt::Vopc | Fmt::Vop3 | Fmt::Vop3p => {
-                for c in scalar_slots(inst) {
+                let len = sh.slot_lens[i] as usize;
+                for &c in &sh.slots[i][..len] {
                     info.slots.push(lane.src(c, inst.literal));
                 }
                 i += 1;
@@ -758,10 +821,10 @@ pub fn run_scalar(code: &[u32], lane: &mut Lane, ok: MemCheck) -> Result<ScalarI
                 let target = (next_pc as i64 + rel as i64 * 4) as u32;
                 // A jump to the end skips pixels that were all discarded: the translated
                 // shader still runs the rest, so the slots must still be collected.
-                if target >= insts.last().map(|x| x.pc).unwrap_or(0) {
+                if target >= sh.end_pc {
                     i += 1;
                 } else {
-                    i = *by_pc.get(&target).ok_or(Error::Unsupported("branch target", target))?;
+                    i = sh.idx_of(target).ok_or(Error::Unsupported("branch target", target))?;
                 }
             }
         }
@@ -769,15 +832,19 @@ pub fn run_scalar(code: &[u32], lane: &mut Lane, ok: MemCheck) -> Result<ScalarI
     Ok(info)
 }
 
-/// Runs a pixel shader for one pixel on the CPU and records the instructions it executes
-/// (`pcs`, in order) together with the scalar slot values and texture descriptors along that
-/// path. `attrs` are the interpolated attributes; texture reads return zero.
-pub fn trace_ps(code: &[u32], lane: &mut Lane, attrs: &[[f32; 4]; 8], ok: MemCheck) -> Result<(Vec<u32>, ScalarInfo), Error> {
-    let insts = decode_shader(code);
-    let by_pc: std::collections::HashMap<u32, usize> = insts.iter().enumerate().map(|(i, x)| (x.pc, i)).collect();
-    let end_pc = insts.last().map(|x| x.pc).unwrap_or(0);
+/// Runs only the scalar part of a shader (uniform for the whole draw).
+pub fn run_scalar(code: &[u32], lane: &mut Lane, ok: MemCheck) -> Result<ScalarInfo, Error> {
+    let sh = CompiledShader::new(code);
+    run_scalar_compiled(&sh, lane, ok)
+}
+
+/// Runs a pre-decoded pixel shader for one pixel on the CPU and records the instructions it
+/// executes (`pcs`, in order) together with the scalar slot values and texture descriptors.
+pub fn trace_ps_compiled(sh: &CompiledShader, lane: &mut Lane, attrs: &[[f32; 4]; 8], ok: MemCheck) -> Result<(Vec<u32>, ScalarInfo), Error> {
+    let insts = &sh.insts;
+    let end_pc = sh.end_pc;
     let mut info = ScalarInfo::default();
-    let mut pcs = vec![];
+    let mut pcs = Vec::with_capacity(insts.len());
     let mut i = 0usize;
     let mut steps = 0u32;
     while i < insts.len() {
@@ -790,7 +857,8 @@ pub fn trace_ps(code: &[u32], lane: &mut Lane, attrs: &[[f32; 4]; 8], ok: MemChe
         pcs.push(inst.pc);
         match inst.fmt {
             Fmt::Vop1 | Fmt::Vop2 | Fmt::Vopc | Fmt::Vop3 | Fmt::Vop3p => {
-                for c in scalar_slots(inst) {
+                let len = sh.slot_lens[i] as usize;
+                for &c in &sh.slots[i][..len] {
                     info.slots.push(lane.src(c, inst.literal));
                 }
             }
@@ -835,10 +903,18 @@ pub fn trace_ps(code: &[u32], lane: &mut Lane, attrs: &[[f32; 4]; 8], ok: MemChe
                 if target >= end_pc {
                     i += 1; // "all pixels discarded" shortcut: the translated path keeps going
                 } else {
-                    i = *by_pc.get(&target).ok_or(Error::Unsupported("branch target", target))?;
+                    i = sh.idx_of(target).ok_or(Error::Unsupported("branch target", target))?;
                 }
             }
         }
     }
     Ok((pcs, info))
+}
+
+/// Runs a pixel shader for one pixel on the CPU and records the instructions it executes
+/// (`pcs`, in order) together with the scalar slot values and texture descriptors along that
+/// path. `attrs` are the interpolated attributes; texture reads return zero.
+pub fn trace_ps(code: &[u32], lane: &mut Lane, attrs: &[[f32; 4]; 8], ok: MemCheck) -> Result<(Vec<u32>, ScalarInfo), Error> {
+    let sh = CompiledShader::new(code);
+    trace_ps_compiled(&sh, lane, attrs, ok)
 }
