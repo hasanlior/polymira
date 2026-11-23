@@ -65,7 +65,7 @@ pub struct GenDraw {
     pub zclear: f32,
 }
 
-const GVBUF_BYTES: usize = 32 << 20;
+const GVBUF_BYTES: usize = 64 << 20;
 
 pub struct VkTarget {
     pub image: vk::Image,
@@ -130,6 +130,7 @@ pub struct VkRenderer {
     pub samplers: HashMap<u32, vk::Sampler>,
     pub rt_depth: HashMap<usize, (vk::Image, vk::DeviceMemory, vk::ImageView)>,
     pub rt_last_used: HashMap<usize, u64>,
+    pub persistent_rts: std::collections::HashSet<usize>,
     pub frame_seq: u64,
     pub rt_quad_pipe: vk::Pipeline,
     pub view_dsets: HashMap<(u64, u64), vk::DescriptorSet>,
@@ -361,6 +362,7 @@ impl VkRenderer {
             samplers: HashMap::new(),
             rt_depth: HashMap::new(),
             rt_last_used: HashMap::new(),
+            persistent_rts: std::collections::HashSet::new(),
             frame_seq: 0,
             rt_quad_pipe: vk::Pipeline::null(),
             view_dsets: HashMap::new(),
@@ -736,7 +738,7 @@ impl VkRenderer {
                 .array_layers(1)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
                 .initial_layout(vk::ImageLayout::UNDEFINED),
             None,
         ) else {
@@ -1005,7 +1007,7 @@ impl VkRenderer {
                 .array_layers(1)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
                 .initial_layout(vk::ImageLayout::UNDEFINED),
             None,
         ) else {
@@ -1202,7 +1204,7 @@ impl VkRenderer {
                     .array_layers(layers)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
-                    .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+                    .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
                     .initial_layout(vk::ImageLayout::UNDEFINED),
                 None,
             )
@@ -1580,24 +1582,21 @@ impl VkRenderer {
         self.rt_dsets.remove(&addr);
         self.rt_layouts.remove(&addr);
         self.rt_last_used.remove(&addr);
+        self.persistent_rts.remove(&addr);
     }
 
     /// Offscreen colour target for a guest render-target address (created on first use).
     unsafe fn rt_target(&mut self, addr: usize, w: u32, h: u32) -> Option<(vk::Image, vk::Framebuffer)> {
         let (_, rp_load) = self.rt_passes()?;
-        // If this guest address was previously uploaded as a CPU texture, free the stale copy.
-        if self.tex_cache.contains_key(&addr) {
+        // If this guest address was previously uploaded as a CPU texture (e.g. terrain atlas
+        // that later receives animated flipbook draws), preserve its pixels when promoting to RT.
+        let promoted_tex = if self.tex_cache.contains_key(&addr) {
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
-            if let Some((old, _)) = self.tex_cache.remove(&addr) {
-                use ash::vk::Handle;
-                let old_raw = old.view.as_raw();
-                self.view_dsets.retain(|&(v, _), _| v != old_raw);
-                self.device.destroy_image_view(old.view, None);
-                self.device.destroy_image(old.image, None);
-                self.device.free_memory(old.memory, None);
-                self.tex_sums.remove(&addr);
-            }
-        }
+            self.tex_sums.remove(&addr);
+            self.tex_cache.remove(&addr).map(|(old, _)| old)
+        } else {
+            None
+        };
         let fresh = !matches!(self.targets.get(&addr), Some(t) if t.width == w && t.height == h);
         if fresh {
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
@@ -1619,6 +1618,85 @@ impl VkRenderer {
         }
         let t = self.ensure_target(addr, w, h)?;
         let (image, view) = (t.image, t.view);
+        if let Some(old) = promoted_tex {
+            if old.width == w && old.height == h {
+                let _ = self.device.reset_fences(&[self.fence]);
+                let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
+                let _ = self.device.begin_command_buffer(
+                    self.cmd_buf,
+                    &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                );
+                let sub = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+                let to_copy = [
+                    vk::ImageMemoryBarrier::default()
+                        .image(old.image)
+                        .subresource_range(sub)
+                        .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::SHADER_READ)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_READ),
+                    vk::ImageMemoryBarrier::default()
+                        .image(image)
+                        .subresource_range(sub)
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE),
+                ];
+                self.device.cmd_pipeline_barrier(
+                    self.cmd_buf,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &to_copy,
+                );
+                let copy = [vk::ImageCopy {
+                    src_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+                    src_offset: vk::Offset3D::default(),
+                    dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+                    dst_offset: vk::Offset3D::default(),
+                    extent: vk::Extent3D { width: w, height: h, depth: 1 },
+                }];
+                self.device.cmd_copy_image(
+                    self.cmd_buf,
+                    old.image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &copy,
+                );
+                let to_read = [vk::ImageMemoryBarrier::default()
+                    .image(image)
+                    .subresource_range(sub)
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)];
+                self.device.cmd_pipeline_barrier(
+                    self.cmd_buf,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &to_read,
+                );
+                let _ = self.device.end_command_buffer(self.cmd_buf);
+                let cmds = [self.cmd_buf];
+                let submit = [vk::SubmitInfo::default().command_buffers(&cmds)];
+                let _ = self.device.queue_submit(self.queue, &submit, self.fence);
+                let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+                self.rt_layouts.insert(addr, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                self.persistent_rts.insert(addr);
+            }
+            use ash::vk::Handle;
+            let old_raw = old.view.as_raw();
+            self.view_dsets.retain(|&(v, _), _| v != old_raw);
+            self.device.destroy_image_view(old.view, None);
+            self.device.destroy_image(old.image, None);
+            self.device.free_memory(old.memory, None);
+        }
         if !self.rt_fbs.contains_key(&addr) {
             if !self.rt_depth.contains_key(&addr) {
                 let img = self
@@ -1923,6 +2001,7 @@ impl VkRenderer {
             let mut cur_pipe = vk::Pipeline::null();
             let mut cur_vb = vk::Buffer::null();
             let mut last_ds = vk::DescriptorSet::null();
+            let mut prev_was_cohtml_clear = false;
             for it in &items {
                 if it.sampled_rt != 0 {
                     sampled_this_frame.push(it.sampled_rt);
@@ -1940,23 +2019,26 @@ impl VkRenderer {
                     }
                     let (a, w, h) = it.rt;
                     let fb = self.rt_fbs[&a];
-                    // The display buffer starts each frame cleared; other targets keep their
-                    // contents (the game may build them over several frames).
-                    // A target is cleared when first drawn to in this frame, unless the frame
-                    // already read it (then it holds content from an earlier frame).
-                    let is_cohtml_clear = it.pipe != vk::Pipeline::null()
-                        && gens[it.gen].depth == 0x701
+                    // The display buffer starts each frame cleared; persistent offscreen targets
+                    // (Cohtml/OreUI RTs and promoted CPU texture atlases) keep their contents
+                    // across partial dirty-rect updates.
+                    let is_cohtml = it.pipe != vk::Pipeline::null() && gens[it.gen].depth == 0x701;
+                    if a != display.0 && is_cohtml {
+                        self.persistent_rts.insert(a);
+                    }
+                    let is_cohtml_clear = is_cohtml
                         && gens[it.gen].blend == 0x60010001
                         && gens[it.gen].tex.is_none();
                     let has_prev = *self.rt_layouts.get(&a).unwrap_or(&vk::ImageLayout::UNDEFINED) != vk::ImageLayout::UNDEFINED;
+                    let is_persistent = a != display.0 && (is_cohtml_clear || self.persistent_rts.contains(&a));
                     let clear_now = !cleared.contains(&a)
                         && !sampled_this_frame.contains(&a)
-                        && !(a != display.0 && is_cohtml_clear && has_prev);
+                        && !(is_persistent && has_prev);
                     if clear_now {
                         cleared.push(a);
                         self.rt_layouts.insert(a, vk::ImageLayout::UNDEFINED);
                     } else {
-                        if is_cohtml_clear && !cleared.contains(&a) {
+                        if is_persistent && !cleared.contains(&a) {
                             cleared.push(a);
                         }
                         self.rt_barrier(a, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
@@ -1989,6 +2071,7 @@ impl VkRenderer {
                     cur_pipe = vk::Pipeline::null();
                     cur_vb = vk::Buffer::null();
                     last_ds = vk::DescriptorSet::null();
+                    prev_was_cohtml_clear = false;
                     if self.ibuf != vk::Buffer::null() {
                         self.device.cmd_bind_index_buffer(self.cmd_buf, self.ibuf, 0, vk::IndexType::UINT32);
                     }
@@ -2015,7 +2098,8 @@ impl VkRenderer {
                 }
                 self.device.cmd_set_scissor(self.cmd_buf, 0, &[it.scissor]);
                 if generic {
-                    if gens[it.gen].depth == 0x701 && gens[it.gen].blend == 0x60010001 && gens[it.gen].tex.is_none() {
+                    let is_cohtml_clear = gens[it.gen].depth == 0x701 && gens[it.gen].blend == 0x60010001 && gens[it.gen].tex.is_none();
+                    if is_cohtml_clear && !prev_was_cohtml_clear {
                         let ca = [vk::ClearAttachment {
                             aspect_mask: vk::ImageAspectFlags::DEPTH,
                             color_attachment: 0,
@@ -2028,10 +2112,12 @@ impl VkRenderer {
                         }];
                         self.device.cmd_clear_attachments(self.cmd_buf, &ca, &cr);
                     }
+                    prev_was_cohtml_clear = is_cohtml_clear;
                     let bytes = std::slice::from_raw_parts(gens[it.gen].slots.as_ptr() as *const u8, 256);
                     self.device.cmd_push_constants(self.cmd_buf, self.gen_layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
                     self.device.cmd_draw(self.cmd_buf, it.count, 1, it.first, 0);
                 } else {
+                    prev_was_cohtml_clear = false;
                     self.device.cmd_draw_indexed(self.cmd_buf, it.count, 1, it.first, 0, 0);
                 }
             }

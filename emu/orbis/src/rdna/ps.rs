@@ -381,7 +381,7 @@ fn translate_insts(insts: Vec<Inst>, ps_input_addr: u32, path: bool) -> Result<T
                 if inst.name == "s_mov_b64" && (w0 & 0xFF) == 126 {
                     exec_saves.push(((w0 >> 16) & 0x7F) as u16);
                 }
-                if inst.name == "s_and_saveexec_b64" {
+                if inst.name == "s_and_saveexec_b64" && !path {
                     return Err("s_and_saveexec_b64".into());
                 }
                 continue;
@@ -403,7 +403,7 @@ fn translate_insts(insts: Vec<Inst>, ps_input_addr: u32, path: bool) -> Result<T
                     t.b.begin_block(Some(merge)).unwrap();
                 } else if d == 126 || d == 106 {
                     // other writes to exec/vcc would change which pixels run
-                    if !(inst.name == "s_wqm_b64" || (path && d == 106)) {
+                    if !(inst.name == "s_wqm_b64" || (path && (d == 106 || inst.name == "s_andn2_b64" || inst.name == "s_or_b64"))) {
                         return Err(format!("{} to exec/vcc", inst.name));
                     }
                 }

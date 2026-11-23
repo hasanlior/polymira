@@ -1012,13 +1012,13 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     };
     let idxs: Vec<u32> = if gpu.index_32bit {
         let ib = (gpu.index_base as usize).saturating_add(idx_off * 4);
-        if idx_cnt < 3 || !is_committed(ib, idx_cnt * 4) || gpu.frame_gverts.len() + idx_cnt > 200_000 {
+        if idx_cnt < 3 || !is_committed(ib, idx_cnt * 4) || gpu.frame_gverts.len() + idx_cnt > 450_000 {
             return false;
         }
         unsafe { std::slice::from_raw_parts(ib as *const u32, idx_cnt) }.to_vec()
     } else {
         let ib = (gpu.index_base as usize).saturating_add(idx_off * 2);
-        if idx_cnt < 3 || !is_committed(ib, idx_cnt * 2) || gpu.frame_gverts.len() + idx_cnt > 200_000 {
+        if idx_cnt < 3 || !is_committed(ib, idx_cnt * 2) || gpu.frame_gverts.len() + idx_cnt > 450_000 {
             return false;
         }
         unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt) }.iter().map(|&x| x as u32).collect()
@@ -1650,6 +1650,7 @@ fn execute_stream(
             OP_DRAW_INDEX_OFFSET_2 if len >= 5 => {
                 compile_bound_graphics_pipeline(gpu);
                 let idx_off = w[2] as usize;
+                let gen_idx_cnt = (w[3] as usize).min(131_072);
                 let idx_cnt = (w[3] as usize).min(2048);
                 let vs_ud: [u32; 8] = std::array::from_fn(|k| *gpu.sh.get(&(0x8C + k as u32)).unwrap_or(&0));
                 let ps_ud: [u32; 8] = std::array::from_fn(|k| *gpu.sh.get(&(0x0C + k as u32)).unwrap_or(&0));
@@ -1661,8 +1662,15 @@ fn execute_stream(
                 let mvp_ptr = (vs_ud[0] as u64 | (((vs_ud[1] & 0xFFFF) as u64) << 32)) as usize;
                 let vt_ptr = (vs_ud[4] as u64 | (((vs_ud[5] & 0xFFFF) as u64) << 32)) as usize;
                 let ib_ptr = (gpu.index_base as usize).saturating_add(idx_off * 2);
-                let generic_done = std::env::var_os("ORBIS_NO_GENERIC").is_none() && try_generic_draw(gpu, idx_off, idx_cnt);
+                let generic_done = std::env::var_os("ORBIS_NO_GENERIC").is_none() && try_generic_draw(gpu, idx_off, gen_idx_cnt);
+                // Legacy DrawBatch always renders onto the display RT; never let offscreen RT draws
+                // (e.g. 2048x1024 animated terrain atlas updates) leak onto the main display.
+                let rt_a2 = *gpu.cx.get(&0x3B0).unwrap_or(&0);
+                let rt_w = ((rt_a2 >> 14) & 0x3FFF) + 1;
+                let rt_h = (rt_a2 & 0x3FFF) + 1;
+                let is_offscreen_atlas = *gpu.cx.get(&0x318).unwrap_or(&0) != 0 && rt_w != 3840 && rt_h != 2160 && rt_w != 1920 && rt_h != 1080;
                 if !generic_done
+                    && !is_offscreen_atlas
                     && idx_cnt >= 3
                     && gpu.frame_verts.len() < 12000
                     && is_committed(mvp_ptr, 64)
