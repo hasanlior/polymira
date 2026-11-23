@@ -25,13 +25,11 @@ pub fn untile_32bpp(src: &[u8], width: u32, height: u32, swizzle_mode: u32) -> V
         return dst;
     }
 
-    // GFX10 64KB standard swizzle for 32-bpp:
+    // GFX10 64KB standard swizzle (SW_64KB_S, mode 9) for 32-bpp:
     // Macro-tile: 128x128 pixels (65536 bytes).
-    // Within a 128x128 tile, bit interleaving maps (x[6:0], y[6:0]) -> 14-bit pixel index:
-    //   bit 0: x0, bit 1: x1, bit 2: y0, bit 3: y1,
-    //   bit 4: x2, bit 5: y2, bit 6: x3, bit 7: y3,
-    //   bit 8: x4, bit 9: y4, bit 10: x5, bit 11: y5,
-    //   bit 12: x6, bit 13: y6
+    // Byte offset masks (D3D12 / GFX10 SW_64KB_S 32bpp):
+    //   xBytesMask = 0xAA8F -> pixel bits: x0=0, x1=1, x2=5, x3=7, x4=9, x5=11, x6=13
+    //   yMask      = 0x5570 -> pixel bits: y0=2, y1=3, y2=4, y3=6, y4=8, y5=10, y6=12
     let tiles_x = (w + 127) / 128;
     for y in 0..h {
         let ty = y >> 7;
@@ -40,17 +38,16 @@ pub fn untile_32bpp(src: &[u8], width: u32, height: u32, swizzle_mode: u32) -> V
             let tx = x >> 7;
             let lx = x & 127;
             let in_tile = (lx & 3)
-                | ((ly & 3) << 2)
-                | (((lx >> 2) & 1) << 4)
-                | (((ly >> 2) & 1) << 5)
-                | (((lx >> 3) & 1) << 6)
-                | (((ly >> 3) & 1) << 7)
-                | (((lx >> 4) & 1) << 8)
-                | (((ly >> 4) & 1) << 9)
-                | (((lx >> 5) & 1) << 10)
-                | (((ly >> 5) & 1) << 11)
-                | (((lx >> 6) & 1) << 12)
-                | (((ly >> 6) & 1) << 13);
+                | ((ly & 7) << 2)
+                | (((lx >> 2) & 1) << 5)
+                | (((ly >> 3) & 1) << 6)
+                | (((lx >> 3) & 1) << 7)
+                | (((ly >> 4) & 1) << 8)
+                | (((lx >> 4) & 1) << 9)
+                | (((ly >> 5) & 1) << 10)
+                | (((lx >> 5) & 1) << 11)
+                | (((ly >> 6) & 1) << 12)
+                | (((lx >> 6) & 1) << 13);
             let tile_idx = ty * tiles_x + tx;
             let byte_off = (tile_idx * 65536) + (in_tile * 4);
             if byte_off + 4 <= src.len() {

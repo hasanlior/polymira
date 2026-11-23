@@ -18,6 +18,16 @@ pub struct Vertex {
     pub color: [f32; 4],
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct DrawBatch {
+    pub first_index: u32,
+    pub index_count: u32,
+    pub tex_addr: usize,
+    pub tex_w: u32,
+    pub tex_h: u32,
+    pub tex_swiz: u32,
+}
+
 pub struct VkTarget {
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
@@ -68,6 +78,7 @@ pub struct VkRenderer {
     pub ibuf: vk::Buffer,
     pub imem: vk::DeviceMemory,
     pub upload_tex: Option<VkTarget>,
+    pub tex_cache: HashMap<usize, (VkTarget, vk::DescriptorSet)>,
 }
 
 unsafe impl Send for VkRenderer {}
@@ -278,6 +289,7 @@ impl VkRenderer {
             ibuf: vk::Buffer::null(),
             imem: vk::DeviceMemory::null(),
             upload_tex: None,
+            tex_cache: HashMap::new(),
         };
         if let Err(e) = r.init_blit_pipeline() {
             eprintln!("[orbis] Vulkan: blit pipeline init warning: {e}");
@@ -377,12 +389,12 @@ impl VkRenderer {
             .map_err(|e| format!("sampler: {e}"))?;
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 1,
+            descriptor_count: 128,
         }];
         let desc_pool = self
             .device
             .create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes),
+                &vk::DescriptorPoolCreateInfo::default().max_sets(128).pool_sizes(&pool_sizes),
                 None,
             )
             .map_err(|e| format!("desc_pool: {e}"))?;
@@ -452,12 +464,12 @@ impl VkRenderer {
             self.swap_fbs.push(fb);
         }
 
-        // Dynamic host-visible vertex (64 KB) + index (32 KB) buffers for indexed draws
-        if let Some((vb, vm)) = self.alloc_host_buffer(65536, vk::BufferUsageFlags::VERTEX_BUFFER) {
+        // Dynamic host-visible vertex (512 KB) + index (128 KB) buffers for indexed draws
+        if let Some((vb, vm)) = self.alloc_host_buffer(524288, vk::BufferUsageFlags::VERTEX_BUFFER) {
             self.vbuf = vb;
             self.vmem = vm;
         }
-        if let Some((ib, im)) = self.alloc_host_buffer(32768, vk::BufferUsageFlags::INDEX_BUFFER) {
+        if let Some((ib, im)) = self.alloc_host_buffer(131072, vk::BufferUsageFlags::INDEX_BUFFER) {
             self.ibuf = ib;
             self.imem = im;
         }
@@ -621,18 +633,259 @@ impl VkRenderer {
         Some((buf, mem))
     }
 
-    /// Renders a list of indexed vertices directly into the swapchain framebuffer on the RTX 4060.
-    pub fn present_indexed_draws(&mut self, clear_rgba: [f32; 4], vertices: &[Vertex], indices: &[u32]) -> bool {
+    #[cfg(windows)]
+    fn readable_bytes(addr: usize, max_len: usize) -> usize {
+        if addr < 0x1_0000_0000 || max_len == 0 {
+            return 0;
+        }
+        unsafe {
+            let mut mbi: windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+            if windows_sys::Win32::System::Memory::VirtualQuery(
+                addr as *const c_void,
+                &mut mbi,
+                std::mem::size_of::<windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION>(),
+            ) == 0
+                || mbi.State != windows_sys::Win32::System::Memory::MEM_COMMIT
+            {
+                return 0;
+            }
+            let end = (mbi.BaseAddress as usize).saturating_add(mbi.RegionSize);
+            end.saturating_sub(addr).min(max_len)
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn readable_bytes(_addr: usize, _max_len: usize) -> usize {
+        0
+    }
+
+    /// Untiles and uploads a PS5 GFX10 32-bpp RGBA8 texture to a cached VkImage + VkDescriptorSet.
+    unsafe fn ensure_sampled_texture(&mut self, addr: usize, width: u32, height: u32, swiz: u32) -> vk::DescriptorSet {
+        if addr == 0 || width == 0 || height == 0 || width > 4096 || height > 4096 {
+            return self.desc_set;
+        }
+        if let Some((t, ds)) = self.tex_cache.get(&addr) {
+            if t.width == width && t.height == height {
+                return *ds;
+            }
+        }
+        if self.tex_cache.len() >= 120 {
+            return self.desc_set;
+        }
+        let want_src = if swiz == 0 {
+            (width as usize) * (height as usize) * 4
+        } else {
+            (((width as usize) + 127) / 128) * (((height as usize) + 127) / 128) * 65536
+        };
+        let avail = Self::readable_bytes(addr, want_src);
+        if avail < 64 {
+            return self.desc_set;
+        }
+        let src = std::slice::from_raw_parts(addr as *const u8, avail);
+        let pixels = crate::tiling::untile_32bpp(src, width, height, swiz);
+        if let Ok(dir) = std::env::var("ORBIS_DUMP_TEX") {
+            let _ = std::fs::create_dir_all(&dir);
+            let mut bmp = Vec::with_capacity(54 + pixels.len() * 4);
+            let sz = (54 + pixels.len() * 4) as u32;
+            bmp.extend_from_slice(b"BM");
+            bmp.extend_from_slice(&sz.to_le_bytes());
+            bmp.extend_from_slice(&0u32.to_le_bytes());
+            bmp.extend_from_slice(&54u32.to_le_bytes());
+            bmp.extend_from_slice(&40u32.to_le_bytes());
+            bmp.extend_from_slice(&(width as i32).to_le_bytes());
+            bmp.extend_from_slice(&(-(height as i32)).to_le_bytes());
+            bmp.extend_from_slice(&1u16.to_le_bytes());
+            bmp.extend_from_slice(&32u16.to_le_bytes());
+            bmp.extend_from_slice(&[0u8; 24]);
+            for &p in &pixels {
+                // RGBA -> BGRA for BMP
+                let bgra = (p & 0xFF00_FF00) | ((p & 0xFF) << 16) | ((p >> 16) & 0xFF);
+                bmp.extend_from_slice(&bgra.to_le_bytes());
+            }
+            let _ = std::fs::write(format!("{dir}/tex_{width}x{height}_sw{swiz}_{addr:x}.bmp"), &bmp);
+        }
+        let byte_len = pixels.len() * 4;
+        if byte_len == 0 || !self.ensure_staging(byte_len) {
+            return self.desc_set;
+        }
+        let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+        let Ok(mapped) = self.device.map_memory(self.staging_mem, 0, byte_len as u64, vk::MemoryMapFlags::empty()) else {
+            return self.desc_set;
+        };
+        std::ptr::copy_nonoverlapping(pixels.as_ptr() as *const u8, mapped as *mut u8, byte_len);
+        self.device.unmap_memory(self.staging_mem);
+
+        let Ok(img) = self.device.create_image(
+            &vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .extent(vk::Extent3D { width, height, depth: 1 })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+                .initial_layout(vk::ImageLayout::UNDEFINED),
+            None,
+        ) else {
+            return self.desc_set;
+        };
+        let req = self.device.get_image_memory_requirements(img);
+        let Some(mi) = self.find_mem_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL) else {
+            self.device.destroy_image(img, None);
+            return self.desc_set;
+        };
+        let Ok(mem) = self.device.allocate_memory(
+            &vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mi),
+            None,
+        ) else {
+            self.device.destroy_image(img, None);
+            return self.desc_set;
+        };
+        if self.device.bind_image_memory(img, mem, 0).is_err() {
+            self.device.destroy_image(img, None);
+            self.device.free_memory(mem, None);
+            return self.desc_set;
+        }
+        let Ok(view) = self.device.create_image_view(
+            &vk::ImageViewCreateInfo::default()
+                .image(img)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                }),
+            None,
+        ) else {
+            self.device.destroy_image(img, None);
+            self.device.free_memory(mem, None);
+            return self.desc_set;
+        };
+        let dsls = [self.blit_dset_layout];
+        let Ok(sets) = self
+            .device
+            .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.desc_pool).set_layouts(&dsls))
+        else {
+            self.device.destroy_image_view(view, None);
+            self.device.destroy_image(img, None);
+            self.device.free_memory(mem, None);
+            return self.desc_set;
+        };
+        let dset = sets[0];
+
+        let _ = self.device.reset_fences(&[self.fence]);
+        let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
+        let _ = self.device.begin_command_buffer(
+            self.cmd_buf,
+            &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+        );
+        let sub = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let to_dst = [vk::ImageMemoryBarrier::default()
+            .image(img)
+            .subresource_range(sub)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+        self.device.cmd_pipeline_barrier(
+            self.cmd_buf,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &to_dst,
+        );
+        let region = [vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_extent(vk::Extent3D { width, height, depth: 1 })];
+        self.device.cmd_copy_buffer_to_image(self.cmd_buf, self.staging_buf, img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &region);
+        let to_read = [vk::ImageMemoryBarrier::default()
+            .image(img)
+            .subresource_range(sub)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)];
+        self.device.cmd_pipeline_barrier(
+            self.cmd_buf,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &to_read,
+        );
+        let _ = self.device.end_command_buffer(self.cmd_buf);
+        let cmds = [self.cmd_buf];
+        let submit = [vk::SubmitInfo::default().command_buffers(&cmds)];
+        let _ = self.device.queue_submit(self.queue, &submit, self.fence);
+        let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+
+        let img_info = [vk::DescriptorImageInfo::default()
+            .sampler(self.sampler)
+            .image_view(view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let write = [vk::WriteDescriptorSet::default()
+            .dst_set(dset)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&img_info)];
+        self.device.update_descriptor_sets(&write, &[]);
+
+        eprintln!("[orbis] Vulkan: uploaded PS5 texture @{addr:#x} ({width}x{height}, swiz={swiz}) to GPU");
+        self.tex_cache.insert(addr, (VkTarget { image: img, memory: mem, view, width, height }, dset));
+        dset
+    }
+
+    /// Renders per-draw indexed batches (each with its own PS5 texture) directly into the swapchain framebuffer on the RTX 4060.
+    pub fn present_indexed_draws(
+        &mut self,
+        clear_rgba: [f32; 4],
+        vertices: &[Vertex],
+        indices: &[u32],
+        batches: &[DrawBatch],
+    ) -> bool {
         if !self.blit_ready || self.quad_pipe == vk::Pipeline::null() || self.vbuf == vk::Buffer::null() || self.ibuf == vk::Buffer::null() {
             return false;
         }
-        let v_bytes = (vertices.len() * std::mem::size_of::<Vertex>()).min(65536);
-        let i_bytes = (indices.len() * std::mem::size_of::<u32>()).min(32768);
-        let idx_count = (i_bytes / 4) as u32;
-        if v_bytes == 0 || idx_count == 0 {
+        let v_bytes = (vertices.len() * std::mem::size_of::<Vertex>()).min(524288);
+        let i_bytes = (indices.len() * std::mem::size_of::<u32>()).min(131072);
+        let max_idx_count = (i_bytes / 4) as u32;
+        if v_bytes == 0 || max_idx_count == 0 {
             return false;
         }
         unsafe {
+            // Pre-upload any newly seen PS5 textures before beginning the swapchain render pass
+            let mut resolved: Vec<(u32, u32, vk::DescriptorSet)> = Vec::with_capacity(batches.len().max(1));
+            if batches.is_empty() {
+                resolved.push((0, max_idx_count, self.desc_set));
+            } else {
+                for b in batches {
+                    if b.first_index.saturating_add(b.index_count) <= max_idx_count && b.index_count > 0 {
+                        let ds = self.ensure_sampled_texture(b.tex_addr, b.tex_w, b.tex_h, b.tex_swiz);
+                        resolved.push((b.first_index, b.index_count, ds));
+                    }
+                }
+            }
+            if resolved.is_empty() {
+                return false;
+            }
+
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
             if let Ok(vp) = self.device.map_memory(self.vmem, 0, v_bytes as u64, vk::MemoryMapFlags::empty()) {
                 std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const u8, vp as *mut u8, v_bytes);
@@ -659,14 +912,6 @@ impl VkRenderer {
                 .clear_values(&clear);
             self.device.cmd_begin_render_pass(self.cmd_buf, &rp_bi, vk::SubpassContents::INLINE);
             self.device.cmd_bind_pipeline(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, self.quad_pipe);
-            self.device.cmd_bind_descriptor_sets(
-                self.cmd_buf,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.blit_layout,
-                0,
-                &[self.desc_set],
-                &[],
-            );
             let vp = [vk::Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -680,7 +925,21 @@ impl VkRenderer {
             self.device.cmd_set_scissor(self.cmd_buf, 0, &sc);
             self.device.cmd_bind_vertex_buffers(self.cmd_buf, 0, &[self.vbuf], &[0]);
             self.device.cmd_bind_index_buffer(self.cmd_buf, self.ibuf, 0, vk::IndexType::UINT32);
-            self.device.cmd_draw_indexed(self.cmd_buf, idx_count, 1, 0, 0, 0);
+            let mut last_ds = vk::DescriptorSet::null();
+            for &(first_idx, cnt, ds) in &resolved {
+                if ds != last_ds {
+                    self.device.cmd_bind_descriptor_sets(
+                        self.cmd_buf,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.blit_layout,
+                        0,
+                        &[ds],
+                        &[],
+                    );
+                    last_ds = ds;
+                }
+                self.device.cmd_draw_indexed(self.cmd_buf, cnt, 1, first_idx, 0, 0);
+            }
             self.device.cmd_end_render_pass(self.cmd_buf);
             let _ = self.device.end_command_buffer(self.cmd_buf);
 

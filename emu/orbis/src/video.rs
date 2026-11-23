@@ -160,32 +160,39 @@ pub extern "sysv64" fn wait_vblank(_handle: i32) -> i32 {
 
 fn present(buf: &Buffer, n: u64) {
     let (w, h) = (buf.width as usize, buf.height as usize);
-    let pitch = buf.pitch.max(buf.width) as usize;
-    let mut px = if buf.tiling != 0 {
-        let bytes = unsafe { std::slice::from_raw_parts(buf.addr as *const u8, pitch * h * 4) };
-        crate::tiling::untile_32bpp(bytes, buf.width, buf.height, buf.tiling)
-    } else {
-        let src = unsafe { std::slice::from_raw_parts(buf.addr as *const u32, pitch * h) };
-        let mut out = vec![0u32; w * h];
-        for y in 0..h {
-            out[y * w..(y + 1) * w].copy_from_slice(&src[y * pitch..y * pitch + w]);
+    let (verts, idxs, batches) = crate::agc::take_frame_draws();
+    let has_draws = !verts.is_empty() && !idxs.is_empty();
+    let dump_dir = std::env::var("ORBIS_DUMP").ok();
+    let mut has_pixels = false;
+    if !has_draws || dump_dir.is_some() {
+        let pitch = buf.pitch.max(buf.width) as usize;
+        let mut px = if buf.tiling != 0 {
+            let bytes = unsafe { std::slice::from_raw_parts(buf.addr as *const u8, pitch * h * 4) };
+            crate::tiling::untile_32bpp(bytes, buf.width, buf.height, buf.tiling)
+        } else {
+            let src = unsafe { std::slice::from_raw_parts(buf.addr as *const u32, pitch * h) };
+            let mut out = vec![0u32; w * h];
+            for y in 0..h {
+                out[y * w..(y + 1) * w].copy_from_slice(&src[y * pitch..y * pitch + w]);
+            }
+            out
+        };
+        // R and B swap for ABGR-ordered formats; others are shown as stored (BGRA).
+        let swap = (buf.format >> 8) & 0xFF == 0x22 || buf.format & 0xFFFF_FFFF == 0x8000_2200;
+        if swap {
+            for p in &mut px {
+                let v = *p;
+                *p = (v & 0xFF00FF00) | ((v & 0xFF) << 16) | ((v >> 16) & 0xFF);
+            }
         }
-        out
-    };
-    // R and B swap for ABGR-ordered formats; others are shown as stored (BGRA).
-    let swap = (buf.format >> 8) & 0xFF == 0x22 || buf.format & 0xFFFF_FFFF == 0x8000_2200;
-    if swap {
-        for p in &mut px {
-            let v = *p;
-            *p = (v & 0xFF00FF00) | ((v & 0xFF) << 16) | ((v >> 16) & 0xFF);
+        if let Some(dir) = dump_dir {
+            if n == 1 || n % 60 == 0 {
+                let _ = write_bmp(&format!("{dir}/frame{n:05}.bmp"), &px, w, h);
+            }
         }
+        has_pixels = px.iter().step_by(64).any(|&p| (p & 0x00FF_FFFF) != 0);
+        *FRAME.lock().unwrap() = (px, w as u32, h as u32);
     }
-    if let Ok(dir) = std::env::var("ORBIS_DUMP") {
-        if n == 1 || n % 60 == 0 {
-            let _ = write_bmp(&format!("{dir}/frame{n:05}.bmp"), &px, w, h);
-        }
-    }
-    *FRAME.lock().unwrap() = (px, w as u32, h as u32);
     #[cfg(windows)]
     unsafe {
         let hwnd = WINDOW.load(Ordering::SeqCst) as windows_sys::Win32::Foundation::HWND;
@@ -200,13 +207,8 @@ fn present(buf: &Buffer, n: u64) {
                 windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, title.as_ptr());
             }
             let clear = CLEAR_RGBA.lock().map(|c| *c).unwrap_or([0.0, 0.0, 0.0, 1.0]);
-            let (verts, idxs) = crate::agc::take_frame_draws();
-            let has_pixels = {
-                let frame = FRAME.lock().unwrap();
-                frame.0.iter().step_by(64).any(|&p| (p & 0x00FF_FFFF) != 0)
-            };
-            let presented_vk = if !verts.is_empty() && !idxs.is_empty() {
-                crate::vk::with_renderer(|r| r.present_indexed_draws(clear, &verts, &idxs)).unwrap_or(false)
+            let presented_vk = if has_draws {
+                crate::vk::with_renderer(|r| r.present_indexed_draws(clear, &verts, &idxs, &batches)).unwrap_or(false)
             } else if has_pixels {
                 let frame = FRAME.lock().unwrap();
                 crate::vk::with_renderer(|r| r.upload_and_present_rgba(&frame.0, frame.1, frame.2)).unwrap_or(false)
@@ -292,10 +294,27 @@ fn start_window() {
             wc.lpszClassName = class.as_ptr();
             wc.hCursor = LoadCursorW(std::ptr::null_mut(), IDC_ARROW);
             RegisterClassW(&wc);
-            let hwnd = CreateWindowExW(0, class.as_ptr(), title.as_ptr(), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1296, 759, std::ptr::null_mut(), std::ptr::null_mut(), inst, std::ptr::null());
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                title.as_ptr(),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                1296,
+                759,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                inst,
+                std::ptr::null(),
+            );
             WINDOW.store(hwnd as u64, Ordering::SeqCst);
             if std::env::var_os("ORBIS_HIDDEN").is_none() {
+                // First ShowWindow obeys STARTUPINFO.wShowWindow (which may be SW_HIDE);
+                // calling ShowWindow twice guarantees the window becomes visible.
                 ShowWindow(hwnd, SW_SHOW);
+                ShowWindow(hwnd, SW_SHOWNORMAL);
+                SetForegroundWindow(hwnd);
                 crate::vk::init_window(hwnd as *mut c_void, inst as *mut c_void, 1280, 720);
             }
             let mut msg: MSG = std::mem::zeroed();

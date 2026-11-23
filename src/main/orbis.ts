@@ -57,6 +57,7 @@ export async function tryRunGame(game: Game): Promise<{ code: number; log: strin
   const child = spawn(exe, ['run', file], {
     env: { ...process.env, ORBIS_TITLE: game.title },
     detached: true,
+    windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const lines: string[] = []

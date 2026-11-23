@@ -257,6 +257,24 @@ pub extern "sysv64" fn pad_get_info(_handle: i32, info: *mut u8) -> i32 {
     0
 }
 
+pub extern "sysv64" fn np_get_state(_user: i32, state: *mut i32) -> i32 {
+    if !state.is_null() {
+        unsafe { *state = 1 }; // SCE_NP_STATE_SIGNED_OUT
+    }
+    0
+}
+
+pub extern "sysv64" fn netctl_get_state(state: *mut i32) -> i32 {
+    if !state.is_null() {
+        unsafe { *state = 0 }; // SCE_NET_CTL_STATE_DISCONNECTED
+    }
+    0
+}
+
+pub extern "sysv64" fn http2_offline() -> i32 {
+    0x8043_1001u32 as i32 // offline / network unavailable
+}
+
 pub fn functions() -> Vec<(&'static str, usize)> {
     vec![
         ("sceSystemServiceReceiveEvent", system_receive_event as *const () as usize),
@@ -282,5 +300,9 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceKernelCheckedReleaseDirectMemory", ok as *const () as usize),
         ("sceNpCheckCallback", ok as *const () as usize),
         ("sceNetCtlCheckCallback", ok as *const () as usize),
+        ("sceNpGetState", np_get_state as *const () as usize),
+        ("sceNetCtlGetState", netctl_get_state as *const () as usize),
+        ("sceHttp2CreateRequestWithURL", http2_offline as *const () as usize),
+        ("sceHttp2SendRequestAsync", http2_offline as *const () as usize),
     ]
 }
