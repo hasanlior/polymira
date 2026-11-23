@@ -696,7 +696,7 @@ pub extern "sysv64" fn create_interpolant_mapping(regs: *mut u32, _gs: usize, _p
     }
     unsafe {
         for i in 0..32u32 {
-            *regs.add((i * 2) as usize) = 0xA191 + i; // SPI_PS_INPUT_CNTL_0 + i
+            *regs.add((i * 2) as usize) = 0x0191 + i; // SPI_PS_INPUT_CNTL_0 + i (CX-relative)
             *regs.add((i * 2 + 1) as usize) = i;
         }
     }
@@ -720,7 +720,17 @@ struct GpuState {
 
 static GPU: Mutex<GpuState> = Mutex::new(GpuState { cx: BTreeMap::new(), sh: BTreeMap::new(), uc: BTreeMap::new() });
 static SUBMIT_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_DRAWS: AtomicU64 = AtomicU64::new(0);
+static LAST_DISPATCHES: AtomicU64 = AtomicU64::new(0);
 static GPU_TIMESTAMP: AtomicU64 = AtomicU64::new(1);
+
+pub fn stats() -> (u64, u64, u64) {
+    (
+        SUBMIT_COUNT.load(Ordering::Relaxed),
+        LAST_DRAWS.load(Ordering::Relaxed),
+        LAST_DISPATCHES.load(Ordering::Relaxed),
+    )
+}
 
 fn apply_indirect_regs(bank: &mut BTreeMap<u32, u32>, table_addr: u64, count: u32, trace: bool, name: &str) {
     if table_addr == 0 || count == 0 || count > 0x3FFF {
@@ -730,7 +740,7 @@ fn apply_indirect_regs(bank: &mut BTreeMap<u32, u32>, table_addr: u64, count: u3
     for &[reg, val] in pairs {
         bank.insert(reg, val);
         if trace {
-            eprintln!("[orbis] GPU:   {name}[{reg:#06x}] = {val:#010x}");
+            eprintln!("[orbis] GPU:   {name}[{reg:#010x}] = {val:#010x}");
         }
     }
 }
@@ -884,7 +894,22 @@ fn execute_stream(
                     eprintln!("[orbis] GPU:   event_write type={:#x} len={len}", w[1] & 0x3F);
                 }
             }
+            OP_DRAW_INDEX_OFFSET_2 if len >= 5 => {
+                if trace {
+                    eprintln!("[orbis] GPU:   DRAW_INDEX_OFFSET_2 max={} off={} count={} init={:#x}", w[1], w[2], w[3], w[4]);
+                }
+            }
+            OP_DISPATCH_DIRECT if len >= 5 => {
+                if trace {
+                    eprintln!("[orbis] GPU:   DISPATCH ({}, {}, {}) init={:#x}", w[1], w[2], w[3], w[4]);
+                }
+            }
             OP_NOP => match sub {
+                R_DRAW_INDEX_AUTO if len >= 2 => {
+                    if trace {
+                        eprintln!("[orbis] GPU:   DRAW_INDEX_AUTO count={}", w[1]);
+                    }
+                }
                 R_DMA_DATA if len >= 7 => {
                     let dst = (w[1] as u64) | ((w[2] as u64) << 32);
                     let src = (w[3] as u64) | ((w[4] as u64) << 32);
@@ -968,13 +993,23 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
     }
     let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let n = SUBMIT_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-    let trace = std::env::var_os("ORBIS_TRACE_GPU").is_some() && n <= 3;
+    let trace = (std::env::var_os("ORBIS_TRACE_GPU").is_some() && n <= 3)
+        || (std::env::var_os("ORBIS_DUMP_DRAW").is_some() && n == 5);
     let mut stats = BTreeMap::new();
     execute_stream(&mut gpu, addr, dwords, 0, trace, &mut stats);
+    let draws = (*stats.get(&((OP_NOP << 8) | R_DRAW_INDEX_AUTO)).unwrap_or(&0)
+        + *stats.get(&(OP_DRAW_INDEX_OFFSET_2 << 8)).unwrap_or(&0)
+        + *stats.get(&(OP_DRAW_INDIRECT_MULTI << 8)).unwrap_or(&0)
+        + *stats.get(&(OP_DRAW_INDEX_INDIRECT_MULTI << 8)).unwrap_or(&0)) as u64;
+    let dispatches = (*stats.get(&(OP_DISPATCH_DIRECT << 8)).unwrap_or(&0)
+        + *stats.get(&(OP_DISPATCH_INDIRECT << 8)).unwrap_or(&0)) as u64;
+    LAST_DRAWS.store(draws, Ordering::Relaxed);
+    LAST_DISPATCHES.store(dispatches, Ordering::Relaxed);
     crate::equeue::trigger_gpu(0);
     if n <= 5 || n % 60 == 0 || std::env::var_os("ORBIS_TRACE_GPU").is_some() {
         let summary: Vec<String> = stats.iter().map(|(k, v)| format!("{k:#06x}:{v}")).collect();
-        eprintln!("[orbis] GPU: submit #{n} ({dwords} dwords @ {addr:#x}) [{}]", summary.join(" "));
+        let nsh = crate::gpu::SHADERS.lock().map(|s| s.len()).unwrap_or(0);
+        eprintln!("[orbis] GPU: submit #{n} ({dwords} dwords @ {addr:#x}, {nsh} shaders) [{}]", summary.join(" "));
     }
     0
 }

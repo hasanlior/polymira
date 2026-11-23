@@ -174,6 +174,15 @@ fn present(buf: &Buffer, n: u64) {
     unsafe {
         let hwnd = WINDOW.load(Ordering::SeqCst) as windows_sys::Win32::Foundation::HWND;
         if !hwnd.is_null() {
+            if n == 1 || n % 15 == 0 {
+                let (_, draws, dispatches) = crate::agc::stats();
+                let shaders = crate::gpu::SHADERS.lock().map(|s| s.len()).unwrap_or(0);
+                let name = std::env::var("ORBIS_TITLE").unwrap_or_else(|_| "PS5".into());
+                let title: Vec<u16> = format!(
+                    "POLYMIRA Orbis — {name} | {w}x{h} | Frame #{n} | {draws} draws, {dispatches} dispatches, {shaders} shaders\0"
+                ).encode_utf16().collect();
+                windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, title.as_ptr());
+            }
             windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
         }
     }
