@@ -720,6 +720,7 @@ struct GpuState {
     bound_tex: Option<(usize, u32, u32)>,
     index_base: u64,
     index_count: u32,
+    cs_cache: BTreeMap<usize, (bool, bool, usize)>,
 }
 
 static GPU: Mutex<GpuState> = Mutex::new(GpuState {
@@ -730,7 +731,45 @@ static GPU: Mutex<GpuState> = Mutex::new(GpuState {
     bound_tex: None,
     index_base: 0,
     index_count: 0,
+    cs_cache: BTreeMap::new(),
 });
+
+fn is_committed(addr: usize, len: usize) -> bool {
+    if addr < 0x1_0000_0000 || addr > 0x7FFF_FFFF_FFFF || len == 0 {
+        return false;
+    }
+    #[cfg(windows)]
+    unsafe {
+        let mut mbi: windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+        windows_sys::Win32::System::Memory::VirtualQuery(
+            addr as *const std::ffi::c_void,
+            &mut mbi,
+            std::mem::size_of::<windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION>(),
+        ) != 0
+            && mbi.State == windows_sys::Win32::System::Memory::MEM_COMMIT
+            && (mbi.BaseAddress as usize + mbi.RegionSize) >= addr.saturating_add(len)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (addr, len);
+        false
+    }
+}
+
+fn decode_vsharp(sh: &BTreeMap<u32, u32>, base_reg: u32) -> Option<(usize, usize)> {
+    let w0 = *sh.get(&base_reg)?;
+    let w1 = *sh.get(&(base_reg + 1))?;
+    let w2 = *sh.get(&(base_reg + 2))?;
+    let addr = (w0 as u64) | (((w1 & 0xFFFF) as u64) << 32);
+    let stride = ((w1 >> 16) & 0x3FFF) as usize;
+    let num_records = w2 as usize;
+    let bytes = if stride > 0 { stride.saturating_mul(num_records) } else { num_records };
+    if addr >= 0x1_0000_0000 && bytes > 0 && bytes <= 64 * 1024 * 1024 {
+        Some((addr as usize, bytes))
+    } else {
+        None
+    }
+}
 static SUBMIT_COUNT: AtomicU64 = AtomicU64::new(0);
 static LAST_DRAWS: AtomicU64 = AtomicU64::new(0);
 static LAST_DISPATCHES: AtomicU64 = AtomicU64::new(0);
@@ -862,6 +901,11 @@ fn execute_stream(
                     let height = ((vals[2] >> 14) & 0x3FFF) + 1;
                     if addr >= 0x1_0000_0000 && width <= 8192 && height <= 8192 {
                         gpu.bound_tex = Some((addr as usize, width, height));
+                        if trace {
+                            let sample = unsafe { std::slice::from_raw_parts(addr as *const u32, 64) };
+                            let nz = sample.iter().filter(|&&x| x != 0).count();
+                            eprintln!("[orbis] GPU:   bind T# @{addr:#x} {width}x{height} fmt={:#x} nz64={nz}", (vals[1] >> 20) & 0x3FF);
+                        }
                     }
                 } else if base == 0x0C && vals.len() == 4 && vals[2] <= 64 && (vals[1] & 0xFFFF) != 0 {
                     let ptr = (vals[0] as u64) | (((vals[1] & 0xFFFF) as u64) << 32);
@@ -951,8 +995,50 @@ fn execute_stream(
                 }
             }
             OP_DISPATCH_DIRECT if len >= 5 => {
+                let cs_lo = *gpu.sh.get(&0x20C).unwrap_or(&0) as u64;
+                let cs_hi = *gpu.sh.get(&0x20D).unwrap_or(&0) as u64;
+                let cs_addr = ((cs_lo | (cs_hi << 32)) << 8) as usize;
+                if cs_addr >= 0x1_0000_0000 && is_committed(cs_addr, 256) {
+                    let (has_load, has_store, _) = *gpu.cs_cache.entry(cs_addr).or_insert_with(|| {
+                        let words = unsafe { std::slice::from_raw_parts(cs_addr as *const u32, 64) };
+                        let d = crate::shader::decode_rdna2(words);
+                        (d.has_buffer_load, d.has_buffer_store, d.ops.len())
+                    });
+                    if has_store && !has_load {
+                        // Compute buffer clear (SHADER #1 pattern: s[0:3] = V#, s[4:7] = clear RGBA/u32x4)
+                        if let Some((dst, bytes)) = decode_vsharp(&gpu.sh, 0x240) {
+                            if is_committed(dst, bytes) {
+                                let fill = [
+                                    *gpu.sh.get(&0x244).unwrap_or(&0),
+                                    *gpu.sh.get(&0x245).unwrap_or(&0),
+                                    *gpu.sh.get(&0x246).unwrap_or(&0),
+                                    *gpu.sh.get(&0x247).unwrap_or(&0),
+                                ];
+                                let quads = bytes / 16;
+                                unsafe {
+                                    let p = dst as *mut [u32; 4];
+                                    for k in 0..quads {
+                                        *p.add(k) = fill;
+                                    }
+                                }
+                            }
+                        }
+                    } else if has_load && has_store {
+                        // Compute buffer copy (SHADER #5 pattern: s[0:3] = src V#, s[4:7] = dst V#)
+                        if let (Some((src, sbytes)), Some((dst, dbytes))) =
+                            (decode_vsharp(&gpu.sh, 0x240), decode_vsharp(&gpu.sh, 0x244))
+                        {
+                            let n = sbytes.min(dbytes);
+                            if is_committed(src, n) && is_committed(dst, n) {
+                                unsafe {
+                                    std::ptr::copy(src as *const u8, dst as *mut u8, n);
+                                }
+                            }
+                        }
+                    }
+                }
                 if trace {
-                    eprintln!("[orbis] GPU:   DISPATCH ({}, {}, {}) init={:#x}", w[1], w[2], w[3], w[4]);
+                    eprintln!("[orbis] GPU:   DISPATCH ({}, {}, {}) cs={cs_addr:#x}", w[1], w[2], w[3]);
                 }
             }
             OP_NOP => match sub {
@@ -1045,7 +1131,7 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
     let mut gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let n = SUBMIT_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
     let trace = (std::env::var_os("ORBIS_TRACE_GPU").is_some() && n <= 3)
-        || (std::env::var_os("ORBIS_DUMP_DRAW").is_some() && n == 5);
+        || (std::env::var_os("ORBIS_DUMP_DRAW").is_some() && n == 300);
     let mut stats = BTreeMap::new();
     execute_stream(&mut gpu, addr, dwords, 0, trace, &mut stats);
     let draws = (*stats.get(&((OP_NOP << 8) | R_DRAW_INDEX_AUTO)).unwrap_or(&0)

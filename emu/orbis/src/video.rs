@@ -191,7 +191,16 @@ fn present(buf: &Buffer, n: u64) {
                 windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, title.as_ptr());
             }
             let clear = CLEAR_RGBA.lock().map(|c| *c).unwrap_or([0.0, 0.0, 0.0, 1.0]);
-            let presented_vk = crate::vk::with_renderer(|r| r.present_target(buf.addr, clear)).unwrap_or(false);
+            let has_pixels = {
+                let frame = FRAME.lock().unwrap();
+                frame.0.iter().step_by(64).any(|&p| (p & 0x00FF_FFFF) != 0)
+            };
+            let presented_vk = if has_pixels {
+                let frame = FRAME.lock().unwrap();
+                crate::vk::with_renderer(|r| r.upload_and_present_rgba(&frame.0, frame.1, frame.2)).unwrap_or(false)
+            } else {
+                crate::vk::with_renderer(|r| r.present_target(buf.addr, clear)).unwrap_or(false)
+            };
             if !presented_vk {
                 windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
             }

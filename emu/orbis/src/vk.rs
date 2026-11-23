@@ -45,6 +45,13 @@ pub struct VkRenderer {
     pub blit_layout: vk::PipelineLayout,
     pub blit_pipe: vk::Pipeline,
     pub blit_dset_layout: vk::DescriptorSetLayout,
+    pub sampler: vk::Sampler,
+    pub desc_pool: vk::DescriptorPool,
+    pub desc_set: vk::DescriptorSet,
+    pub staging_buf: vk::Buffer,
+    pub staging_mem: vk::DeviceMemory,
+    pub staging_cap: usize,
+    pub upload_tex: Option<VkTarget>,
 }
 
 unsafe impl Send for VkRenderer {}
@@ -240,6 +247,13 @@ impl VkRenderer {
             blit_layout: vk::PipelineLayout::null(),
             blit_pipe: vk::Pipeline::null(),
             blit_dset_layout: vk::DescriptorSetLayout::null(),
+            sampler: vk::Sampler::null(),
+            desc_pool: vk::DescriptorPool::null(),
+            desc_set: vk::DescriptorSet::null(),
+            staging_buf: vk::Buffer::null(),
+            staging_mem: vk::DeviceMemory::null(),
+            staging_cap: 0,
+            upload_tex: None,
         };
         if let Err(e) = r.init_blit_pipeline() {
             eprintln!("[orbis] Vulkan: blit pipeline init warning: {e}");
@@ -326,13 +340,293 @@ impl VkRenderer {
 
         self.device.destroy_shader_module(vs_mod, None);
         self.device.destroy_shader_module(fs_mod, None);
+        let sampler = self
+            .device
+            .create_sampler(
+                &vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::LINEAR)
+                    .min_filter(vk::Filter::LINEAR)
+                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+                None,
+            )
+            .map_err(|e| format!("sampler: {e}"))?;
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 1,
+        }];
+        let desc_pool = self
+            .device
+            .create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes),
+                None,
+            )
+            .map_err(|e| format!("desc_pool: {e}"))?;
+        let dsls_alloc = [dsl];
+        let desc_set = self
+            .device
+            .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(desc_pool).set_layouts(&dsls_alloc))
+            .map_err(|e| format!("desc_set: {e}"))?[0];
+
         self.blit_rp = rp;
         self.blit_layout = pl;
         self.blit_pipe = pipe;
         self.blit_dset_layout = dsl;
+        self.sampler = sampler;
+        self.desc_pool = desc_pool;
+        self.desc_set = desc_set;
         self.blit_ready = true;
-        eprintln!("[orbis] Vulkan: SPIR-V fullscreen blit pipeline compiled on GPU");
+        eprintln!("[orbis] Vulkan: SPIR-V fullscreen blit pipeline + sampler compiled on GPU");
         Ok(())
+    }
+
+    unsafe fn ensure_staging(&mut self, bytes: usize) -> bool {
+        if self.staging_cap >= bytes && self.staging_buf != vk::Buffer::null() {
+            return true;
+        }
+        if self.staging_buf != vk::Buffer::null() {
+            self.device.destroy_buffer(self.staging_buf, None);
+            self.device.free_memory(self.staging_mem, None);
+            self.staging_buf = vk::Buffer::null();
+            self.staging_mem = vk::DeviceMemory::null();
+            self.staging_cap = 0;
+        }
+        let Ok(buf) = self.device.create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(bytes as u64)
+                .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE),
+            None,
+        ) else {
+            return false;
+        };
+        let req = self.device.get_buffer_memory_requirements(buf);
+        let Some(mem_idx) = self.find_mem_type(
+            req.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ) else {
+            self.device.destroy_buffer(buf, None);
+            return false;
+        };
+        let Ok(mem) = self.device.allocate_memory(
+            &vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mem_idx),
+            None,
+        ) else {
+            self.device.destroy_buffer(buf, None);
+            return false;
+        };
+        if self.device.bind_buffer_memory(buf, mem, 0).is_err() {
+            self.device.destroy_buffer(buf, None);
+            self.device.free_memory(mem, None);
+            return false;
+        }
+        self.staging_buf = buf;
+        self.staging_mem = mem;
+        self.staging_cap = bytes;
+        true
+    }
+
+    /// Uploads a host/guest RGBA8/BGRA8 texture to a VkImage and blits it via the SPIR-V pipeline.
+    pub fn upload_and_present_rgba(&mut self, pixels: &[u32], width: u32, height: u32) -> bool {
+        if !self.blit_ready || width == 0 || height == 0 || pixels.len() < (width as usize * height as usize) {
+            return false;
+        }
+        let byte_len = (width as usize) * (height as usize) * 4;
+        unsafe {
+            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            if !self.ensure_staging(byte_len) {
+                return false;
+            }
+            let Ok(mapped) = self.device.map_memory(self.staging_mem, 0, byte_len as u64, vk::MemoryMapFlags::empty()) else {
+                return false;
+            };
+            std::ptr::copy_nonoverlapping(pixels.as_ptr() as *const u8, mapped as *mut u8, byte_len);
+            self.device.unmap_memory(self.staging_mem);
+
+            let need_tex = match &self.upload_tex {
+                Some(t) => t.width != width || t.height != height,
+                None => true,
+            };
+            if need_tex {
+                let Ok(img) = self.device.create_image(
+                    &vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(vk::Format::B8G8R8A8_UNORM)
+                        .extent(vk::Extent3D { width, height, depth: 1 })
+                        .mip_levels(1)
+                        .array_layers(1)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::OPTIMAL)
+                        .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC)
+                        .initial_layout(vk::ImageLayout::UNDEFINED),
+                    None,
+                ) else {
+                    return false;
+                };
+                let req = self.device.get_image_memory_requirements(img);
+                let Some(mi) = self.find_mem_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL) else {
+                    return false;
+                };
+                let Ok(mem) = self.device.allocate_memory(
+                    &vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mi),
+                    None,
+                ) else {
+                    return false;
+                };
+                let _ = self.device.bind_image_memory(img, mem, 0);
+                let Ok(view) = self.device.create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(img)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(vk::Format::B8G8R8A8_UNORM)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        }),
+                    None,
+                ) else {
+                    return false;
+                };
+                self.upload_tex = Some(VkTarget { image: img, memory: mem, view, width, height });
+            }
+            let tex_img = self.upload_tex.as_ref().unwrap().image;
+            let tex_view = self.upload_tex.as_ref().unwrap().view;
+            let img_info = [vk::DescriptorImageInfo::default()
+                .sampler(self.sampler)
+                .image_view(tex_view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let write = [vk::WriteDescriptorSet::default()
+                .dst_set(self.desc_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&img_info)];
+            self.device.update_descriptor_sets(&write, &[]);
+
+            let Ok((img_idx, _)) = self.swapchain_loader.acquire_next_image(self.swapchain, 100_000_000, self.image_avail, vk::Fence::null()) else {
+                return false;
+            };
+            let _ = self.device.reset_fences(&[self.fence]);
+            let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
+            let _ = self.device.begin_command_buffer(
+                self.cmd_buf,
+                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            );
+            let swap_img = self.swap_images[img_idx as usize];
+            let sub = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            let to_tex_dst = vk::ImageMemoryBarrier::default()
+                .image(tex_img)
+                .subresource_range(sub)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+            let to_swap_dst = vk::ImageMemoryBarrier::default()
+                .image(swap_img)
+                .subresource_range(sub)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+            self.device.cmd_pipeline_barrier(
+                self.cmd_buf,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_tex_dst, to_swap_dst],
+            );
+            let region = [vk::BufferImageCopy::default()
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_extent(vk::Extent3D { width, height, depth: 1 })];
+            self.device.cmd_copy_buffer_to_image(
+                self.cmd_buf,
+                self.staging_buf,
+                tex_img,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &region,
+            );
+            let to_tex_src = vk::ImageMemoryBarrier::default()
+                .image(tex_img)
+                .subresource_range(sub)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+            self.device.cmd_pipeline_barrier(
+                self.cmd_buf,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_tex_src],
+            );
+            let blit = [vk::ImageBlit {
+                src_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+                src_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: width as i32, y: height as i32, z: 1 }],
+                dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+                dst_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: self.swap_extent.width as i32, y: self.swap_extent.height as i32, z: 1 }],
+            }];
+            self.device.cmd_blit_image(
+                self.cmd_buf,
+                tex_img,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                swap_img,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &blit,
+                vk::Filter::LINEAR,
+            );
+            let to_present = vk::ImageMemoryBarrier::default()
+                .image(swap_img)
+                .subresource_range(sub)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+            self.device.cmd_pipeline_barrier(
+                self.cmd_buf,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_present],
+            );
+            let _ = self.device.end_command_buffer(self.cmd_buf);
+
+            let wait_sems = [self.image_avail];
+            let sig_sems = [self.render_done];
+            let wait_stages = [vk::PipelineStageFlags::TRANSFER];
+            let cmds = [self.cmd_buf];
+            let submit = [vk::SubmitInfo::default()
+                .wait_semaphores(&wait_sems)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(&cmds)
+                .signal_semaphores(&sig_sems)];
+            if self.device.queue_submit(self.queue, &submit, self.fence).is_err() {
+                return false;
+            }
+            let scs = [self.swapchain];
+            let idxs = [img_idx];
+            let present = vk::PresentInfoKHR::default()
+                .wait_semaphores(&sig_sems)
+                .swapchains(&scs)
+                .image_indices(&idxs);
+            let _ = self.swapchain_loader.queue_present(self.queue, &present);
+            true
+        }
     }
 
     pub fn find_mem_type(&self, type_bits: u32, flags: vk::MemoryPropertyFlags) -> Option<u32> {
