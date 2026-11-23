@@ -171,10 +171,10 @@ pub extern "sysv64" fn map_named_flexible(addr: *mut usize, len: usize, prot: i3
     map_flexible(addr, len, prot, flags)
 }
 
-/// mmap(addr, len, prot, flags, fd, offset): anonymous mappings only for now.
+/// mmap(addr, len, prot, flags, fd, offset): anonymous and file-backed mappings.
 pub extern "sysv64" fn mmap(addr: usize, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> usize {
     let p = vmap(addr, len, flags & 0x10 != 0, prot != 0);
-    if p != 0 && fd >= 3 && flags & 0x1000 == 0 {
+    if p != 0 && prot != 0 && len > 0 && fd >= 3 && flags & 0x1000 == 0 {
         // File mapping: copy the file's contents in.
         use std::io::{Read, Seek, SeekFrom};
         let buf = unsafe { std::slice::from_raw_parts_mut(p as *mut u8, len) };
@@ -723,8 +723,11 @@ pub extern "sysv64" fn sce_close(fd: i32) -> i32 {
 
 pub extern "sysv64" fn sce_read(fd: i32, buf: *mut u8, len: usize) -> i64 {
     use std::io::Read;
-    if fd < 3 {
+    if fd < 3 || len == 0 {
         return 0;
+    }
+    if buf.is_null() {
+        return SCE_KERNEL_ERROR_EINVAL as i64;
     }
     let slice = unsafe { std::slice::from_raw_parts_mut(buf, len) };
     with_file(fd, |f| f.read(slice).map(|n| n as i64).unwrap_or(-1)).unwrap_or(SCE_KERNEL_ERROR_EBADF as i64)
@@ -732,6 +735,12 @@ pub extern "sysv64" fn sce_read(fd: i32, buf: *mut u8, len: usize) -> i64 {
 
 pub extern "sysv64" fn sce_write(fd: i32, buf: *const u8, len: usize) -> i64 {
     use std::io::Write;
+    if len == 0 {
+        return 0;
+    }
+    if buf.is_null() {
+        return SCE_KERNEL_ERROR_EINVAL as i64;
+    }
     let slice = unsafe { std::slice::from_raw_parts(buf, len) };
     if fd == 1 || fd == 2 {
         let mut out = std::io::stdout();
@@ -906,6 +915,9 @@ fn fill_stat(meta: &std::fs::Metadata, st: *mut Stat) {
 }
 
 pub extern "sysv64" fn sce_stat(path: *const c_char, st: *mut Stat) -> i32 {
+    if st.is_null() {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
     let p = text(path);
     match std::fs::metadata(host_path(&p)) {
         Ok(m) => {
@@ -926,6 +938,9 @@ pub extern "sysv64" fn posix_stat(path: *const c_char, st: *mut Stat) -> i32 {
 }
 
 pub extern "sysv64" fn sce_fstat(fd: i32, st: *mut Stat) -> i32 {
+    if st.is_null() {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
     let mut files = FILES.lock().unwrap();
     match files.get_mut((fd - 3).max(0) as usize).and_then(|x| x.as_mut()) {
         Some(FdEntry::File(f)) => match f.metadata() {

@@ -171,7 +171,8 @@ unsafe impl Send for SendPtr {}
 /// scePthreadCreate(thread*, attr*, entry, arg, name)
 pub extern "sysv64" fn create(out: *mut usize, attr: *mut usize, entry: usize, arg: usize, name: *const c_char) -> i32 {
     let a = attr_of(attr);
-    let stack = if a.is_null() { 0x10_0000 } else { unsafe { (*a).stack_size } }.max(0x4_0000) + 0x2_0000;
+    // Guarantee at least 2 MiB stack for PS5 worker threads (world-gen / LevelDB + Windows HLE frames).
+    let stack = if a.is_null() { 0x20_0000 } else { unsafe { (*a).stack_size } }.max(0x20_0000) + 0x2_0000;
     let label = text(name);
     let tp = crate::tls::new_thread_block();
     let t = new_thread(tp, label.clone());
