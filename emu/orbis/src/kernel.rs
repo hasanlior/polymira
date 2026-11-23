@@ -748,7 +748,7 @@ const SCE_KERNEL_ERROR_EINVAL: i32 = 0x8002_0016u32 as i32;
 const SCE_KERNEL_ERROR_ENOTEMPTY: i32 = 0x8002_0042u32 as i32;
 
 fn alloc_fd(entry: FdEntry) -> i32 {
-    let mut f = FILES.lock().unwrap();
+    let mut f = FILES.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((idx, slot)) = f.iter_mut().enumerate().find(|(_, s)| s.is_none()) {
         *slot = Some(entry);
         (idx + 3) as i32
@@ -825,7 +825,7 @@ pub extern "sysv64" fn posix_open(path: *const c_char, flags: i32, _mode: i32) -
 }
 
 fn with_file<R>(fd: i32, f: impl FnOnce(&mut std::fs::File) -> R) -> Option<R> {
-    let mut files = FILES.lock().unwrap();
+    let mut files = FILES.lock().unwrap_or_else(|e| e.into_inner());
     match files.get_mut((fd - 3).max(0) as usize).and_then(|x| x.as_mut()) {
         Some(FdEntry::File(file)) => Some(f(file)),
         _ => None,
@@ -836,7 +836,7 @@ pub extern "sysv64" fn sce_close(fd: i32) -> i32 {
     if fd < 3 {
         return 0;
     }
-    let mut files = FILES.lock().unwrap();
+    let mut files = FILES.lock().unwrap_or_else(|e| e.into_inner());
     match files.get_mut((fd - 3) as usize) {
         Some(slot) => {
             *slot = None;

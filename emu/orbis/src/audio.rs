@@ -572,7 +572,9 @@ pub extern "sysv64" fn a2_port_set_attributes(port: u64, attrs: *const Audio2Att
     if port == 0 || port > 4096 || count == 0 || count > 64 {
         return 0;
     }
-    if !is_readable_range(attrs as *const u8, count * std::mem::size_of::<Audio2Attribute>()) {
+    if (attrs as usize) % std::mem::align_of::<Audio2Attribute>() != 0
+        || !is_readable_range(attrs as *const u8, count * std::mem::size_of::<Audio2Attribute>())
+    {
         return 0;
     }
     let mut ports = lock_unpoison(&A2_PORTS);
