@@ -1137,16 +1137,21 @@ fn execute_stream(
                                     let vp = vb_ptr + vi * stride;
                                     let (x, y, z, u, v) = if is_font_glyph {
                                         unsafe {
-                                            let cx_local = f16_to_f32(*((vp + 4) as *const u16));
-                                            let cy_local = f16_to_f32(*((vp + 6) as *const u16));
+                                            let corner = f16_to_f32(*((vp + 4) as *const u16)).round() as i32;
+                                            let (du, dv) = match corner {
+                                                0 => (0.0, 1.0), // bottom-left
+                                                1 => (1.0, 1.0), // bottom-right
+                                                2 => (1.0, 0.0), // top-right
+                                                _ => (0.0, 0.0), // top-left (3)
+                                            };
                                             let ub = *((vp + 8) as *const u16) as f32 / 65536.0;
                                             let vb_uv = *((vp + 10) as *const u16) as f32 / 65536.0;
                                             (
                                                 f16_to_f32(*(vp as *const u16)),
                                                 f16_to_f32(*((vp + 2) as *const u16)),
                                                 0.0,
-                                                ub + cx_local * (1.0 / 16.0),
-                                                vb_uv + cy_local * (1.0 / 16.0),
+                                                ub + du * (1.0 / 16.0),
+                                                vb_uv + dv * (1.0 / 16.0),
                                             )
                                         }
                                     } else if is_f16 {
@@ -1250,19 +1255,31 @@ fn execute_stream(
                     let st = (vt[1] >> 16) & 0x3FFF;
                     let vb = (vt[0] as u64 | (((vt[1] & 0xFFFF) as u64) << 32)) as usize;
                     let mut vhex = Vec::new();
-                    if st >= 8 && st <= 64 && is_committed(vb, (st * 2) as usize) {
-                        let sl = unsafe { std::slice::from_raw_parts(vb as *const u32, ((st * 2) / 4) as usize) };
+                    let nv = if st == 16 { 8 } else { 2 };
+                    if st >= 8 && st <= 64 && is_committed(vb, (st * nv) as usize) {
+                        let sl = unsafe { std::slice::from_raw_parts(vb as *const u32, ((st * nv) / 4) as usize) };
                         vhex.extend_from_slice(sl);
+                    }
+                    let mut ihex = Vec::new();
+                    if is_committed(ib_ptr, 24) {
+                        let sl = unsafe { std::slice::from_raw_parts(ib_ptr as *const u16, 12) };
+                        ihex.extend_from_slice(sl);
                     }
                     let ps_tex = (ps_ud[1] & 0x0380_0000) == 0x0380_0000;
                     let tw = if ps_tex { ((ps_ud[1] >> 30) | ((ps_ud[2] & 0xFFF) << 2)) + 1 } else { 0 };
                     let th = if ps_tex { ((ps_ud[2] >> 14) & 0x3FFF) + 1 } else { 0 };
-                    let tfmt = if ps_tex { (ps_ud[1] >> 20) & 0x3FF } else { 0 };
-                    let tsw = if ps_tex { (ps_ud[3] >> 20) & 0x1F } else { 0 };
-                    eprintln!(
-                        "[orbis] GPU:   DRAW off={} cnt={} stride={} qv={} qb={} tex=({}x{} fmt={:#x} sw={}) vraw={:08x?}",
-                        w[2], w[3], st, gpu.frame_verts.len(), gpu.frame_batches.len(), tw, th, tfmt, tsw, vhex
-                    );
+                    if st == 16 && tw == 128 && th == 128 && is_committed(vb, (w[3] as usize / 6) * 4 * 16) {
+                        let ng = (w[3] as usize / 6).min(128);
+                        let mut text = String::new();
+                        for g in 0..ng {
+                            let gp = vb + g * 4 * 16;
+                            let u = unsafe { *((gp + 8) as *const u16) } >> 12;
+                            let v = unsafe { *((gp + 10) as *const u16) } >> 12;
+                            let ch = ((v << 4) | u) as u8;
+                            text.push(if ch >= 32 && ch < 127 { ch as char } else { '?' });
+                        }
+                        eprintln!("[orbis] GPU:   TEXT({ng}): \"{text}\"");
+                    }
                 }
             }
             OP_DISPATCH_DIRECT if len >= 5 => {

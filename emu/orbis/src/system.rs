@@ -207,7 +207,7 @@ fn poll_host_pad() -> (u32, u8, u8, u8, u8, u8, u8) {
     (0, 0x80, 0x80, 0x80, 0x80, 0, 0)
 }
 
-/// scePadReadState(handle, data*): fills ScePadData (0x70 bytes) with live XInput/keyboard state.
+/// scePadReadState(handle, data*): fills ScePadData (0x78 = 120 bytes) with live XInput/keyboard state.
 pub extern "sysv64" fn pad_read_state(_handle: i32, data: *mut u8) -> i32 {
     if data.is_null() {
         return 0x8092_0001u32 as i32;
@@ -215,7 +215,7 @@ pub extern "sysv64" fn pad_read_state(_handle: i32, data: *mut u8) -> i32 {
     let (btns, lx, ly, rx, ry, l2, r2) = poll_host_pad();
     let ts = crate::kernel::monotonic_now().as_micros() as u64;
     unsafe {
-        std::ptr::write_bytes(data, 0, 0x70);
+        std::ptr::write_bytes(data, 0, 0x78);
         *(data as *mut u32) = btns;
         *data.add(4) = lx;
         *data.add(5) = ly;
@@ -224,9 +224,9 @@ pub extern "sysv64" fn pad_read_state(_handle: i32, data: *mut u8) -> i32 {
         *data.add(8) = l2;
         *data.add(9) = r2;
         *(data.add(0x18) as *mut f32) = 1.0; // orientation.w
-        *data.add(0x54) = 1; // connected = true
-        *(data.add(0x58) as *mut u64) = ts;
-        *data.add(0x60) = 1; // connectedCount = 1
+        *data.add(0x4C) = 1; // connected = true (offset 0x4C)
+        *(data.add(0x50) as *mut u64) = ts; // timestamp (offset 0x50)
+        *data.add(0x68) = 1; // connectedCount = 1 (offset 104 = 0x68)
     }
     0
 }
@@ -243,15 +243,15 @@ pub extern "sysv64" fn pad_get_info(_handle: i32, info: *mut u8) -> i32 {
     if !info.is_null() {
         unsafe {
             std::ptr::write_bytes(info, 0, 0x20);
-            *(info as *mut f32) = 44.86; // touchpad pixel density
-            *(info.add(4) as *mut u32) = 1920; // touchpad width
-            *(info.add(8) as *mut u32) = 943;  // touchpad height
-            *info.add(0x0C) = 0x04; // stick deadzone
-            *info.add(0x0D) = 0x04;
-            *info.add(0x0E) = 1; // connectionType = local
-            *info.add(0x0F) = 1; // connectedCount
-            *info.add(0x10) = 1; // connected = true
-            *info.add(0x11) = 0; // deviceClass = standard
+            *(info as *mut f32) = 44.86;        // touchPadInfo.pixelDensity
+            *(info.add(4) as *mut u16) = 1920;  // touchPadInfo.resolution.x
+            *(info.add(6) as *mut u16) = 943;   // touchPadInfo.resolution.y
+            *info.add(8) = 0x04;                // stickInfo.deadZoneLeft
+            *info.add(9) = 0x04;                // stickInfo.deadZoneRight
+            *info.add(0x0C) = 0;                // connectionType = LOCAL (0)
+            *info.add(0x0D) = 1;                // connectedCount = 1
+            *info.add(0x0E) = 1;                // connected = true
+            *info.add(0x0F) = 0;                // deviceClass = STANDARD (0)
         }
     }
     0
