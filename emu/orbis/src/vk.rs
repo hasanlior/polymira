@@ -70,17 +70,32 @@ pub struct GenDraw {
     pub depth: u32,
     /// DB_DEPTH_CLEAR: value a cleared depth buffer starts with.
     pub zclear: f32,
+    /// Optional GPU-translated SPIR-V vertex shader (`rdna::vs::translate`).
+    pub vs_spirv: Option<std::sync::Arc<Vec<u32>>>,
+    /// Byte offset (256-byte aligned) into per-frame `vs_ubuf` (`STORAGE_BUFFER_DYNAMIC`).
+    pub vs_param_off: u32,
+    /// Guest vertex buffers `(base_addr, byte_len)` for Set 1 bindings 1..=4.
+    pub vs_vbs: [(usize, usize); 4],
 }
 
-const GVBUF_BYTES: usize = 96 << 20;
-const GIBUF_BYTES: usize = 16 << 20;
+const GVBUF_INIT_BYTES: usize = 32 << 20;
+const GIBUF_INIT_BYTES: usize = 8 << 20;
+const VS_UBUF_INIT_BYTES: usize = 4 << 20;
 
 static READY_GIDXS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+static READY_VS_PARAMS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 /// Swaps the current frame's generic draw index buffer into the renderer handoff slot
 /// (preserves capacity on both sides without touching `video.rs`).
 pub fn swap_gen_indices(src: &mut Vec<u32>) {
     let mut g = READY_GIDXS.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::swap(&mut *g, src);
+    src.clear();
+}
+
+/// Swaps the current frame's GPU-VS uniform parameter buffer into the renderer handoff slot.
+pub fn swap_vs_params(src: &mut Vec<u32>) {
+    let mut g = READY_VS_PARAMS.lock().unwrap_or_else(|e| e.into_inner());
     std::mem::swap(&mut *g, src);
     src.clear();
 }
@@ -160,8 +175,23 @@ pub struct VkRenderer {
     pub gen_pipes: HashMap<(usize, u32, u32), vk::Pipeline>,
     pub gvbuf: vk::Buffer,
     pub gvmem: vk::DeviceMemory,
+    pub gvbuf_cap: usize,
     pub gibuf: vk::Buffer,
     pub gimem: vk::DeviceMemory,
+    pub gibuf_cap: usize,
+    // GPU-VS offload resources (Set 1: dynamic VS params + 4 cached guest VB storage buffers).
+    pub vs_dset_layout: vk::DescriptorSetLayout,
+    pub gpu_vs_layout: vk::PipelineLayout,
+    pub vs_ubuf: vk::Buffer,
+    pub vs_umem: vk::DeviceMemory,
+    pub vs_ubuf_cap: usize,
+    pub vs_dummy_buf: vk::Buffer,
+    pub vs_dummy_mem: vk::DeviceMemory,
+    pub vs_modules: HashMap<usize, vk::ShaderModule>,
+    /// Guest VB cache: addr -> (buf, mem, cap, last_checksum, last_frame_used).
+    pub guest_vb_cache: HashMap<usize, (vk::Buffer, vk::DeviceMemory, usize, u64, u64)>,
+    pub guest_vb_checked: HashMap<usize, u64>,
+    pub vs_dsets: HashMap<[u64; 4], vk::DescriptorSet>,
 }
 
 unsafe impl Send for VkRenderer {}
@@ -397,8 +427,21 @@ impl VkRenderer {
             gen_pipes: HashMap::new(),
             gvbuf: vk::Buffer::null(),
             gvmem: vk::DeviceMemory::null(),
+            gvbuf_cap: 0,
             gibuf: vk::Buffer::null(),
             gimem: vk::DeviceMemory::null(),
+            gibuf_cap: 0,
+            vs_dset_layout: vk::DescriptorSetLayout::null(),
+            gpu_vs_layout: vk::PipelineLayout::null(),
+            vs_ubuf: vk::Buffer::null(),
+            vs_umem: vk::DeviceMemory::null(),
+            vs_ubuf_cap: 0,
+            vs_dummy_buf: vk::Buffer::null(),
+            vs_dummy_mem: vk::DeviceMemory::null(),
+            vs_modules: HashMap::new(),
+            guest_vb_cache: HashMap::new(),
+            guest_vb_checked: HashMap::new(),
+            vs_dsets: HashMap::new(),
         };
         if let Err(e) = r.init_blit_pipeline() {
             eprintln!("[orbis] Vulkan: blit pipeline init warning: {e}");
@@ -496,14 +539,24 @@ impl VkRenderer {
                 None,
             )
             .map_err(|e| format!("sampler: {e}"))?;
-        let pool_sizes = [vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 65536,
-        }];
+        let pool_sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 65536,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 65536,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER_DYNAMIC,
+                descriptor_count: 16384,
+            },
+        ];
         let desc_pool = self
             .device
             .create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default().max_sets(32768).pool_sizes(&pool_sizes),
+                &vk::DescriptorPoolCreateInfo::default().max_sets(49152).pool_sizes(&pool_sizes),
                 None,
             )
             .map_err(|e| format!("desc_pool: {e}"))?;
@@ -1359,13 +1412,14 @@ impl VkRenderer {
         if (v_bytes == 0 || max_idx_count == 0) && gens.is_empty() {
             return false;
         }
-        let g_bytes = (gverts.len() * std::mem::size_of::<GVertex>()).min(GVBUF_BYTES);
+        let g_bytes = (gverts.len() * std::mem::size_of::<GVertex>()).min(self.gvbuf_cap.max(GVBUF_INIT_BYTES));
         let g_max = (g_bytes / std::mem::size_of::<GVertex>()) as u32;
         unsafe {
             if !gens.is_empty() && self.gvbuf == vk::Buffer::null() {
-                if let Some((b, m)) = self.alloc_host_buffer(GVBUF_BYTES, vk::BufferUsageFlags::VERTEX_BUFFER) {
+                if let Some((b, m)) = self.alloc_host_buffer(GVBUF_INIT_BYTES, vk::BufferUsageFlags::VERTEX_BUFFER) {
                     self.gvbuf = b;
                     self.gvmem = m;
+                    self.gvbuf_cap = GVBUF_INIT_BYTES;
                 }
             }
             // Pre-upload newly seen PS5 textures and build generic pipelines before beginning the
@@ -1889,6 +1943,141 @@ impl VkRenderer {
         Some(ds)
     }
 
+    /// Ensures a cached host-visible GPU `STORAGE_BUFFER` holds up-to-date raw bytes of a
+    /// guest vertex buffer `(addr, need_bytes)`. Static Minecraft chunk VBs upload once and
+    /// hit cache on every subsequent frame with zero PCIe copy.
+    unsafe fn ensure_guest_vb(&mut self, addr: usize, need_bytes: usize) -> vk::Buffer {
+        if addr < 0x1_0000_0000 || need_bytes == 0 || need_bytes > (64 << 20) {
+            return self.vs_dummy_buf;
+        }
+        let need = (need_bytes + 15) & !15;
+        let avail = Self::readable_bytes(addr, need);
+        if avail < 16 {
+            return self.vs_dummy_buf;
+        }
+        let upload_len = avail.min(need);
+        if self.guest_vb_checked.get(&addr) == Some(&self.frame_no) {
+            if let Some(entry) = self.guest_vb_cache.get_mut(&addr) {
+                if entry.2 >= upload_len {
+                    entry.4 = self.frame_no;
+                    return entry.0;
+                }
+            }
+        }
+        self.guest_vb_checked.insert(addr, self.frame_no);
+        // Fast sampled checksum (64 u64s) to detect dynamic VB rewrites.
+        let sum = {
+            let words = upload_len / 8;
+            let step = (words / 64).max(1);
+            let p = addr as *const u64;
+            let mut h = 0xcbf2_9ce4_8422_2325u64 ^ (upload_len as u64);
+            let mut k = 0;
+            while k < words {
+                h = (h ^ p.add(k).read_unaligned()).wrapping_mul(0x100_0000_01b3);
+                k += step;
+            }
+            h
+        };
+        if let Some(entry) = self.guest_vb_cache.get_mut(&addr) {
+            if entry.2 >= upload_len {
+                entry.4 = self.frame_no;
+                if entry.3 != sum {
+                    let mem = entry.1;
+                    let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+                    if let Ok(p) = self.device.map_memory(mem, 0, upload_len as u64, vk::MemoryMapFlags::empty()) {
+                        std::ptr::copy_nonoverlapping(addr as *const u8, p as *mut u8, upload_len);
+                        self.device.unmap_memory(mem);
+                    }
+                    entry.3 = sum;
+                }
+                return entry.0;
+            }
+            // Need larger capacity: free old buffer.
+            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            if let Some((ob, om, _, _, _)) = self.guest_vb_cache.remove(&addr) {
+                use ash::vk::Handle;
+                let raw = ob.as_raw();
+                self.vs_dsets.retain(|k, _| !k.contains(&raw));
+                self.device.destroy_buffer(ob, None);
+                self.device.free_memory(om, None);
+            }
+        }
+        // Evict stale chunk VBs if cache grows beyond 2048 buffers.
+        if self.guest_vb_cache.len() >= 2048 {
+            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            let mut old: Vec<(u64, usize)> = self.guest_vb_cache.iter().map(|(&a, e)| (e.4, a)).collect();
+            old.sort_by_key(|&(f, _)| f);
+            for &(_, a) in old.iter().take(256) {
+                if let Some((ob, om, _, _, _)) = self.guest_vb_cache.remove(&a) {
+                    use ash::vk::Handle;
+                    let raw = ob.as_raw();
+                    self.vs_dsets.retain(|k, _| !k.contains(&raw));
+                    self.device.destroy_buffer(ob, None);
+                    self.device.free_memory(om, None);
+                }
+            }
+        }
+        let alloc_sz = upload_len.max(4096).next_power_of_two();
+        let Some((buf, mem)) = self.alloc_host_buffer(alloc_sz, vk::BufferUsageFlags::STORAGE_BUFFER) else {
+            return self.vs_dummy_buf;
+        };
+        if let Ok(p) = self.device.map_memory(mem, 0, upload_len as u64, vk::MemoryMapFlags::empty()) {
+            std::ptr::copy_nonoverlapping(addr as *const u8, p as *mut u8, upload_len);
+            self.device.unmap_memory(mem);
+        }
+        self.guest_vb_cache.insert(addr, (buf, mem, alloc_sz, sum, self.frame_no));
+        buf
+    }
+
+    /// Descriptor set (Set 1) for GPU-VS: binding 0 = dynamic `vs_ubuf`, bindings 1..=4 = VBs.
+    unsafe fn vs_dset_for(&mut self, vbs: [vk::Buffer; 4]) -> Option<vk::DescriptorSet> {
+        use ash::vk::Handle;
+        if self.vs_dset_layout == vk::DescriptorSetLayout::null() || self.vs_ubuf == vk::Buffer::null() {
+            return None;
+        }
+        let key = vbs.map(|b| b.as_raw());
+        if let Some(&d) = self.vs_dsets.get(&key) {
+            return Some(d);
+        }
+        let dsls = [self.vs_dset_layout];
+        let ds = self
+            .device
+            .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.desc_pool).set_layouts(&dsls))
+            .ok()?[0];
+        let u_info = [vk::DescriptorBufferInfo::default().buffer(self.vs_ubuf).offset(0).range(16384)];
+        let vb_infos = vbs.map(|b| [vk::DescriptorBufferInfo::default().buffer(b).offset(0).range(vk::WHOLE_SIZE)]);
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(ds)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER_DYNAMIC)
+                .buffer_info(&u_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(ds)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&vb_infos[0]),
+            vk::WriteDescriptorSet::default()
+                .dst_set(ds)
+                .dst_binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&vb_infos[1]),
+            vk::WriteDescriptorSet::default()
+                .dst_set(ds)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&vb_infos[2]),
+            vk::WriteDescriptorSet::default()
+                .dst_set(ds)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&vb_infos[3]),
+        ];
+        self.device.update_descriptor_sets(&writes, &[]);
+        self.vs_dsets.insert(key, ds);
+        Some(ds)
+    }
+
     /// Descriptor set sampling a render target.
     unsafe fn rt_dset(&mut self, addr: usize) -> Option<vk::DescriptorSet> {
         if let Some(&d) = self.rt_dsets.get(&addr) {
@@ -1943,26 +2132,76 @@ impl VkRenderer {
             if self.rt_passes().is_none() {
                 return false;
             }
-            if !gens.is_empty() && self.gvbuf == vk::Buffer::null() {
-                if let Some((b, m)) = self.alloc_host_buffer(GVBUF_BYTES, vk::BufferUsageFlags::VERTEX_BUFFER) {
-                    self.gvbuf = b;
-                    self.gvmem = m;
-                }
-            }
-            if !gens.is_empty() && self.gibuf == vk::Buffer::null() {
-                if let Some((b, m)) = self.alloc_host_buffer(GIBUF_BYTES, vk::BufferUsageFlags::INDEX_BUFFER) {
-                    self.gibuf = b;
-                    self.gimem = m;
-                }
-            }
             let gidxs_guard = READY_GIDXS.lock().unwrap_or_else(|e| e.into_inner());
             let gidxs: &[u32] = &gidxs_guard;
-            let gi_bytes = (gidxs.len() * 4).min(GIBUF_BYTES);
+            let vs_params_guard = READY_VS_PARAMS.lock().unwrap_or_else(|e| e.into_inner());
+            let vs_params: &[u32] = &vs_params_guard;
+            let need_g = gverts.len() * std::mem::size_of::<GVertex>();
+            let need_gi = gidxs.len() * 4;
+            let need_vsu = (vs_params.len() * 4).saturating_add(16384);
+            // Dynamically grow GVBUF / GIBUF / VS_UBUF so 1,200+ draw frames NEVER clip HUD or white out!
+            if !gens.is_empty() && (self.gvbuf == vk::Buffer::null() || need_g > self.gvbuf_cap) {
+                let new_cap = need_g.max(GVBUF_INIT_BYTES).next_power_of_two().min(512 << 20);
+                if self.gvbuf != vk::Buffer::null() {
+                    let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+                    self.device.destroy_buffer(self.gvbuf, None);
+                    self.device.free_memory(self.gvmem, None);
+                    self.gvbuf = vk::Buffer::null();
+                    self.gvmem = vk::DeviceMemory::null();
+                    self.gvbuf_cap = 0;
+                }
+                if let Some((b, m)) = self.alloc_host_buffer(new_cap, vk::BufferUsageFlags::VERTEX_BUFFER) {
+                    self.gvbuf = b;
+                    self.gvmem = m;
+                    self.gvbuf_cap = new_cap;
+                }
+            }
+            if !gens.is_empty() && (self.gibuf == vk::Buffer::null() || need_gi > self.gibuf_cap) {
+                let new_cap = need_gi.max(GIBUF_INIT_BYTES).next_power_of_two().min(128 << 20);
+                if self.gibuf != vk::Buffer::null() {
+                    let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+                    self.device.destroy_buffer(self.gibuf, None);
+                    self.device.free_memory(self.gimem, None);
+                    self.gibuf = vk::Buffer::null();
+                    self.gimem = vk::DeviceMemory::null();
+                    self.gibuf_cap = 0;
+                }
+                if let Some((b, m)) = self.alloc_host_buffer(new_cap, vk::BufferUsageFlags::INDEX_BUFFER) {
+                    self.gibuf = b;
+                    self.gimem = m;
+                    self.gibuf_cap = new_cap;
+                }
+            }
+            if !vs_params.is_empty() && (self.vs_ubuf == vk::Buffer::null() || need_vsu > self.vs_ubuf_cap) {
+                let new_cap = need_vsu.max(VS_UBUF_INIT_BYTES).next_power_of_two().min(64 << 20);
+                if self.vs_ubuf != vk::Buffer::null() {
+                    let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+                    self.vs_dsets.clear();
+                    self.device.destroy_buffer(self.vs_ubuf, None);
+                    self.device.free_memory(self.vs_umem, None);
+                    self.vs_ubuf = vk::Buffer::null();
+                    self.vs_umem = vk::DeviceMemory::null();
+                    self.vs_ubuf_cap = 0;
+                }
+                if let Some((b, m)) = self.alloc_host_buffer(new_cap, vk::BufferUsageFlags::STORAGE_BUFFER) {
+                    self.vs_ubuf = b;
+                    self.vs_umem = m;
+                    self.vs_ubuf_cap = new_cap;
+                }
+            }
+            if !vs_params.is_empty() && self.vs_dummy_buf == vk::Buffer::null() {
+                if let Some((b, m)) = self.alloc_host_buffer(256, vk::BufferUsageFlags::STORAGE_BUFFER) {
+                    self.vs_dummy_buf = b;
+                    self.vs_dummy_mem = m;
+                }
+            }
+            let gi_bytes = need_gi.min(self.gibuf_cap);
             let gi_max = (gi_bytes / 4) as u32;
+            let vsu_bytes = (vs_params.len() * 4).min(self.vs_ubuf_cap);
             let v_bytes = (vertices.len() * std::mem::size_of::<Vertex>()).min(524288);
             let i_bytes = (indices.len() * 4).min(131072);
             let max_idx = (i_bytes / 4) as u32;
-            let g_bytes = (gverts.len() * std::mem::size_of::<GVertex>()).min(GVBUF_BYTES);
+            let g_bytes = need_g.min(self.gvbuf_cap);
             let g_max = (g_bytes / std::mem::size_of::<GVertex>()) as u32;
 
             // Pre-create all render targets used this frame BEFORE resolving sampled textures,
@@ -2020,6 +2259,8 @@ impl VkRenderer {
                 count: u32,
                 indexed: bool,
                 ds: vk::DescriptorSet,
+                vs_ds: vk::DescriptorSet,
+                vs_off: u32,
                 pipe: vk::Pipeline,
                 gen: usize,
                 scissor: vk::Rect2D,
@@ -2139,6 +2380,18 @@ impl VkRenderer {
                         }
                     }
                     let ds = self.gen_dset_for(slot_vs).unwrap_or(self.desc_set);
+                    let (vs_ds, vs_off) = if gd.vs_spirv.is_some() {
+                        let vbs = [
+                            self.ensure_guest_vb(gd.vs_vbs[0].0, gd.vs_vbs[0].1),
+                            self.ensure_guest_vb(gd.vs_vbs[1].0, gd.vs_vbs[1].1),
+                            self.ensure_guest_vb(gd.vs_vbs[2].0, gd.vs_vbs[2].1),
+                            self.ensure_guest_vb(gd.vs_vbs[3].0, gd.vs_vbs[3].1),
+                        ];
+                        let Some(vds) = self.vs_dset_for(vbs) else { continue };
+                        (vds, gd.vs_param_off)
+                    } else {
+                        (vk::DescriptorSet::null(), 0)
+                    };
                     let [x, y, w, h] = gd.scissor;
                     let scissor = vk::Rect2D { offset: vk::Offset2D { x, y }, extent: vk::Extent2D { width: w.max(0) as u32, height: h.max(0) as u32 } };
                     let (first, count, indexed) = if gd.index_count > 0 {
@@ -2146,10 +2399,10 @@ impl VkRenderer {
                     } else {
                         (gd.first_vertex, gd.vertex_count, false)
                     };
-                    items.push(Item { rt, first, count, indexed, ds, pipe, gen: g as usize, scissor, sampled_rts });
+                    items.push(Item { rt, first, count, indexed, ds, vs_ds, vs_off, pipe, gen: g as usize, scissor, sampled_rts });
                 } else if b.index_count > 0 && b.first_index.saturating_add(b.index_count) <= max_idx {
                     let ds = self.ensure_sampled_texture(b.tex_addr, b.tex_w, b.tex_h, b.tex_swiz);
-                    items.push(Item { rt: display, first: b.first_index, count: b.index_count, indexed: true, ds, pipe: vk::Pipeline::null(), gen: 0, scissor: full(display.1, display.2), sampled_rts: [0; 4] });
+                    items.push(Item { rt: display, first: b.first_index, count: b.index_count, indexed: true, ds, vs_ds: vk::DescriptorSet::null(), vs_off: 0, pipe: vk::Pipeline::null(), gen: 0, scissor: full(display.1, display.2), sampled_rts: [0; 4] });
                 }
             }
             if items.is_empty() {
@@ -2169,7 +2422,14 @@ impl VkRenderer {
                     self.device.unmap_memory(self.gimem);
                 }
             }
+            if vsu_bytes > 0 && self.vs_umem != vk::DeviceMemory::null() {
+                if let Ok(p) = self.device.map_memory(self.vs_umem, 0, vsu_bytes as u64, vk::MemoryMapFlags::empty()) {
+                    std::ptr::copy_nonoverlapping(vs_params.as_ptr() as *const u8, p as *mut u8, vsu_bytes);
+                    self.device.unmap_memory(self.vs_umem);
+                }
+            }
             drop(gidxs_guard);
+            drop(vs_params_guard);
             if v_bytes > 0 {
                 if let Ok(p) = self.device.map_memory(self.vmem, 0, v_bytes as u64, vk::MemoryMapFlags::empty()) {
                     std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const u8, p as *mut u8, v_bytes);
@@ -2281,10 +2541,13 @@ impl VkRenderer {
                     cur_pipe = want;
                     last_ds = vk::DescriptorSet::null();
                 }
-                let vb = if generic { self.gvbuf } else { self.vbuf };
-                if vb != cur_vb {
-                    self.device.cmd_bind_vertex_buffers(self.cmd_buf, 0, &[vb], &[0]);
-                    cur_vb = vb;
+                let gpu_vs = it.vs_ds != vk::DescriptorSet::null();
+                if !gpu_vs {
+                    let vb = if generic { self.gvbuf } else { self.vbuf };
+                    if vb != cur_vb {
+                        self.device.cmd_bind_vertex_buffers(self.cmd_buf, 0, &[vb], &[0]);
+                        cur_vb = vb;
+                    }
                 }
                 if it.indexed {
                     let ib = if generic { self.gibuf } else { self.ibuf };
@@ -2293,15 +2556,24 @@ impl VkRenderer {
                         cur_ib = ib;
                     }
                 }
-                let layout = if generic { self.gen_layout } else { self.blit_layout };
+                let layout = if gpu_vs {
+                    self.gpu_vs_layout
+                } else if generic {
+                    self.gen_layout
+                } else {
+                    self.blit_layout
+                };
                 if it.ds != last_ds {
                     self.device.cmd_bind_descriptor_sets(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, layout, 0, &[it.ds], &[]);
                     last_ds = it.ds;
                 }
+                if gpu_vs {
+                    self.device.cmd_bind_descriptor_sets(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, self.gpu_vs_layout, 1, &[it.vs_ds], &[it.vs_off]);
+                }
                 self.device.cmd_set_scissor(self.cmd_buf, 0, &[it.scissor]);
                 if generic {
                     let bytes = std::slice::from_raw_parts(gens[it.gen].slots.as_ptr() as *const u8, 256);
-                    self.device.cmd_push_constants(self.cmd_buf, self.gen_layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
+                    self.device.cmd_push_constants(self.cmd_buf, layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
                     if it.indexed {
                         self.device.cmd_draw_indexed(self.cmd_buf, it.count, 1, it.first, 0, 0);
                     } else {
@@ -2349,7 +2621,7 @@ impl VkRenderer {
             let n = DUMP_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (ew, eh) = (self.swap_extent.width, self.swap_extent.height);
             let dump = dump_dir.is_some()
-                && (n % 120 == 60 || n % 120 == 61 || (gverts.len() > 5000 && n % 30 == 0))
+                && (n % 120 == 60 || n % 120 == 61 || ((gverts.len() > 5000 || gi_max > 5000) && n % 30 == 0))
                 && self.ensure_staging((ew * eh * 4) as usize);
             let mut swap_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
             if dump {
@@ -2446,6 +2718,47 @@ impl VkRenderer {
                 .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&dsls).push_constant_ranges(&pcr), None)
                 .map_err(|e| format!("layout: {e}"))?;
         }
+        if self.vs_dset_layout == vk::DescriptorSetLayout::null() {
+            let bindings = [
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER_DYNAMIC)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::VERTEX),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::VERTEX),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(2)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::VERTEX),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(3)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::VERTEX),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(4)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::VERTEX),
+            ];
+            self.vs_dset_layout = self
+                .device
+                .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)
+                .map_err(|e| format!("vs_dset_layout: {e}"))?;
+        }
+        if self.gpu_vs_layout == vk::PipelineLayout::null() {
+            let dsls = [self.gen_dset_layout, self.vs_dset_layout];
+            let pcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::FRAGMENT, offset: 0, size: 256 }];
+            self.gpu_vs_layout = self
+                .device
+                .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&dsls).push_constant_ranges(&pcr), None)
+                .map_err(|e| format!("gpu_vs_layout: {e}"))?;
+        }
         if self.gen_vs == vk::ShaderModule::null() {
             let code = crate::rdna::ps::passthrough_vs();
             self.gen_vs = self
@@ -2453,13 +2766,29 @@ impl VkRenderer {
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)
                 .map_err(|e| format!("vs: {e}"))?;
         }
+        let is_gpu_vs = gd.vs_spirv.is_some();
+        let vs_mod = if let Some(spv) = gd.vs_spirv.as_ref() {
+            let key = std::sync::Arc::as_ptr(spv) as usize;
+            if let Some(&m) = self.vs_modules.get(&key) {
+                m
+            } else {
+                let m = self
+                    .device
+                    .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(spv), None)
+                    .map_err(|e| format!("gpu_vs: {e}"))?;
+                self.vs_modules.insert(key, m);
+                m
+            }
+        } else {
+            self.gen_vs
+        };
         let fs_mod = self
             .device
             .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&gd.spirv), None)
             .map_err(|e| format!("fs: {e}"))?;
         let entry = c"main";
         let stages = [
-            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(self.gen_vs).name(entry),
+            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vs_mod).name(entry),
             vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fs_mod).name(entry),
         ];
         let vbind = [vk::VertexInputBindingDescription {
@@ -2470,9 +2799,13 @@ impl VkRenderer {
         let vattr: Vec<vk::VertexInputAttributeDescription> = (0..9u32)
             .map(|k| vk::VertexInputAttributeDescription { location: k, binding: 0, format: vk::Format::R32G32B32A32_SFLOAT, offset: k * 16 })
             .collect();
-        let vi = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(&vbind)
-            .vertex_attribute_descriptions(&vattr);
+        let vi = if is_gpu_vs {
+            vk::PipelineVertexInputStateCreateInfo::default()
+        } else {
+            vk::PipelineVertexInputStateCreateInfo::default()
+                .vertex_binding_descriptions(&vbind)
+                .vertex_attribute_descriptions(&vattr)
+        };
         let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
         let rs = vk::PipelineRasterizationStateCreateInfo::default()
@@ -2544,7 +2877,7 @@ impl VkRenderer {
             .color_blend_state(&cb)
             .depth_stencil_state(&dss)
             .dynamic_state(&ds)
-            .layout(self.gen_layout)
+            .layout(if is_gpu_vs { self.gpu_vs_layout } else { self.gen_layout })
             .render_pass(self.rt_passes().map(|p| p.1).unwrap_or(self.swap_rp))];
         let r = self.device.create_graphics_pipelines(vk::PipelineCache::null(), &gp_ci, None).map_err(|(_, e)| format!("pipeline: {e}"));
         self.device.destroy_shader_module(fs_mod, None);

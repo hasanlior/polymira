@@ -172,6 +172,60 @@ fn untile_32bpp_raw(src: &[u8], width: u32, height: u32, swizzle_mode: u32, dst_
         return dst;
     }
 
+    // GFX10.3 / RDNA2 SW_64KB_R_X (mode 27, 32-bpp, 128x128 = 64 KiB, PS5 Oberon 16-pipe):
+    //   256B micro-tile (8x8): x0, x1, y0, y1, x2, y2
+    //   64KB macro-tile with 16-pipe _X XOR: bits [6..9] = (x3, y3, x4, y4) ^ (y6, x6, y5, x5)
+    //   upper bits [10..13] = (x5, y5, x6, y6).
+    if swizzle_mode == 27 || swizzle_mode == 25 || swizzle_mode == 26 {
+        let tiles_x = (w + 127) / 128;
+        let is_rx = swizzle_mode == 27;
+        for y in 0..h {
+            let ty = y >> 7;
+            let ly = y & 127;
+            for x in 0..w {
+                let tx = x >> 7;
+                let lx = x & 127;
+                let x5 = (lx >> 5) & 1;
+                let y5 = (ly >> 5) & 1;
+                let x6 = (lx >> 6) & 1;
+                let y6 = (ly >> 6) & 1;
+                let mut b6 = (lx >> 3) & 1;
+                let mut b7 = (ly >> 3) & 1;
+                let mut b8 = (lx >> 4) & 1;
+                let mut b9 = (ly >> 4) & 1;
+                if is_rx {
+                    b6 ^= y6;
+                    b7 ^= x6;
+                    b8 ^= y5;
+                    b9 ^= x5;
+                }
+                let in_tile = (lx & 3)
+                    | ((ly & 3) << 2)
+                    | (((lx >> 2) & 1) << 4)
+                    | (((ly >> 2) & 1) << 5)
+                    | (b6 << 6)
+                    | (b7 << 7)
+                    | (b8 << 8)
+                    | (b9 << 9)
+                    | (x5 << 10)
+                    | (y5 << 11)
+                    | (x6 << 12)
+                    | (y6 << 13);
+                let tile_idx = ty * tiles_x + tx;
+                let byte_off = (tile_idx * 65536) + (in_tile * 4);
+                if byte_off + 4 <= src.len() {
+                    dst[y * w + x] = map_px([
+                        src[byte_off],
+                        src[byte_off + 1],
+                        src[byte_off + 2],
+                        src[byte_off + 3],
+                    ]);
+                }
+            }
+        }
+        return dst;
+    }
+
     // GFX10 64KB standard swizzle (SW_64KB_S, mode 9) for 32-bpp:
     // Macro-tile: 128x128 pixels (65536 bytes).
     // Byte offset masks (D3D12 / GFX10 SW_64KB_S 32bpp):
@@ -256,5 +310,22 @@ mod tests {
         let out = untile_32bpp(&src, 128, 128, 9);
         assert_eq!(out[0], 0xDEAD_BEEF);
         assert_eq!(out.len(), 128 * 128);
+    }
+
+    #[test]
+    fn swizzle_64kb_rx_is_bijection() {
+        let mut src = vec![0u8; 65536];
+        for i in 0..16384u32 {
+            let b = (i as usize) * 4;
+            src[b..b + 4].copy_from_slice(&(i + 1).to_le_bytes());
+        }
+        let out = untile_32bpp(&src, 128, 128, 27);
+        assert_eq!(out.len(), 16384);
+        let mut seen = vec![false; 16384];
+        for &v in &out {
+            assert!(v >= 1 && v <= 16384);
+            assert!(!seen[(v - 1) as usize]);
+            seen[(v - 1) as usize] = true;
+        }
     }
 }

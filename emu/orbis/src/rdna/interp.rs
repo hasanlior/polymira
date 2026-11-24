@@ -79,6 +79,11 @@ impl Lane {
         self.s[EXEC] & 1 != 0
     }
 
+    /// Public wrapper for `src` used by `rdna::vs`.
+    pub fn src_pub(&self, code: u16, lit: Option<u32>) -> u32 {
+        self.src(code, lit)
+    }
+
     /// Scalar/vector source operand (9-bit encoding).
     fn src(&self, code: u16, lit: Option<u32>) -> u32 {
         match code {
@@ -352,6 +357,11 @@ enum Flow {
     Next,
     End,
     Branch(i16),
+}
+
+/// Executes a single scalar/SMEM instruction for `rdna::vs::extract_gpu_vs_draw`.
+pub fn step_scalar_for_gpu(inst: &Inst, l: &mut Lane, ok: MemCheck) -> Option<()> {
+    step(inst, l, ok).ok().map(|_| ())
 }
 
 fn step(inst: &Inst, l: &mut Lane, ok: MemCheck) -> Result<Flow, Error> {
