@@ -749,6 +749,7 @@ struct GpuState {
     frame_idxs: Vec<u32>,
     frame_batches: Vec<crate::vk::DrawBatch>,
     frame_gverts: Vec<crate::vk::GVertex>,
+    frame_gidxs: Vec<u32>,
     frame_gens: Vec<crate::vk::GenDraw>,
     pending_flip: Option<(i32, i32, i32, i64)>,
     // Reusable scratch buffers for try_generic_draw (eliminates ~200 MB/frame of heap alloc/zeroing).
@@ -773,6 +774,7 @@ static GPU: Mutex<GpuState> = Mutex::new(GpuState {
     frame_idxs: Vec::new(),
     frame_batches: Vec::new(),
     frame_gverts: Vec::new(),
+    frame_gidxs: Vec::new(),
     frame_gens: Vec::new(),
     pending_flip: None,
     scratch_seen: Vec::new(),
@@ -1112,6 +1114,9 @@ static DECODED_CACHE: LazyLock<Mutex<DecodedCache>> = LazyLock::new(|| Mutex::ne
 static GEN_STATS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 static FRAME_STATS_ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("ORBIS_FRAME_STATS").is_some());
 static PERF_VS_NS: AtomicU64 = AtomicU64::new(0);
+static PERF_PREP_NS: AtomicU64 = AtomicU64::new(0);
+static PERF_DEDUP_NS: AtomicU64 = AtomicU64::new(0);
+static PERF_PS_NS: AtomicU64 = AtomicU64::new(0);
 static PERF_CS_NS: AtomicU64 = AtomicU64::new(0);
 static PERF_CS_CNT: AtomicU64 = AtomicU64::new(0);
 static PERF_CS_THR: AtomicU64 = AtomicU64::new(0);
@@ -1139,6 +1144,7 @@ pub fn gen_stats() -> [u64; 4] {
 /// CPU per vertex, the pixel shader is translated to SPIR-V. Returns false to let the older
 /// layout-guessing path try the draw.
 fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool {
+    let t_prep = (*FRAME_STATS_ON).then(std::time::Instant::now);
     // CB_TARGET_MASK (MRT0 bits): nothing written → stencil/depth-only pass, skip before VS!
     let wmask = gpu.cx.get(&0x8E).copied().unwrap_or(0xF) & 0xF;
     if wmask == 0 {
@@ -1149,19 +1155,11 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     let (Some(vs_code), Some(ps_code)) = (shader_words(vs_addr), shader_words(ps_addr)) else {
         return false;
     };
-    let idxs: Vec<u32> = if gpu.index_32bit {
-        let ib = (gpu.index_base as usize).saturating_add(idx_off * 4);
-        if idx_cnt < 3 || !is_committed(ib, idx_cnt * 4) || gpu.frame_gverts.len() + idx_cnt > 450_000 {
-            return false;
-        }
-        unsafe { std::slice::from_raw_parts(ib as *const u32, idx_cnt) }.to_vec()
-    } else {
-        let ib = (gpu.index_base as usize).saturating_add(idx_off * 2);
-        if idx_cnt < 3 || !is_committed(ib, idx_cnt * 2) || gpu.frame_gverts.len() + idx_cnt > 450_000 {
-            return false;
-        }
-        unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt) }.iter().map(|&x| x as u32).collect()
-    };
+    let ib_bytes = if gpu.index_32bit { idx_cnt * 4 } else { idx_cnt * 2 };
+    let ib = (gpu.index_base as usize).saturating_add(if gpu.index_32bit { idx_off * 4 } else { idx_off * 2 });
+    if idx_cnt < 3 || !is_committed(ib, ib_bytes) || gpu.frame_gverts.len() >= 600_000 {
+        return false;
+    }
     // Pixel shader translation (cached per address, input layout and code hash).
     let input_addr = gpu.cx.get(&0x1B4).copied().filter(|&v| v != 0).or_else(|| gpu.cx.get(&0x1B3).copied()).unwrap_or(0x302);
     let hash = shader_hash(ps_code);
@@ -1230,14 +1228,29 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             [p[0], -p[1], p[2], p[3]]
         }
     };
-    // Deduplicate indices into reusable scratch buffers (zero heap alloc/zeroing per draw).
+    // Deduplicate indices directly from guest IB into reusable scratch buffers (zero heap alloc).
+    if let Some(t) = t_prep {
+        PERF_PREP_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_dedup = (*FRAME_STATS_ON).then(std::time::Instant::now);
     let cntl: [u32; 8] = std::array::from_fn(|n| gpu.cx.get(&(0x191 + n as u32)).map(|v| v & 0x3F).unwrap_or(n as u32));
     let vs_ud: [u32; 24] = std::array::from_fn(|k| *gpu.sh.get(&(0x8C + k as u32)).unwrap_or(&0));
-    let (min_ix, max_ix) = idxs.iter().fold((u32::MAX, 0u32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let (min_ix, max_ix) = if gpu.index_32bit {
+        unsafe { std::slice::from_raw_parts(ib as *const u32, idx_cnt) }
+            .iter()
+            .fold((u32::MAX, 0u32), |(lo, hi), &v| (lo.min(v), hi.max(v)))
+    } else {
+        unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt) }
+            .iter()
+            .fold((u32::MAX, 0u32), |(lo, hi), &v| {
+                let v = v as u32;
+                (lo.min(v), hi.max(v))
+            })
+    };
     let span = max_ix.saturating_sub(min_ix) as usize;
     gpu.scratch_unique.clear();
     gpu.scratch_remap.clear();
-    gpu.scratch_remap.reserve(idxs.len());
+    gpu.scratch_remap.reserve(idx_cnt);
     if span < 131_072 {
         if gpu.scratch_seen.len() <= span {
             gpu.scratch_seen.resize(span + 1, (0, 0));
@@ -1248,22 +1261,42 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             gpu.scratch_gen = 1;
         }
         let gen_tag = gpu.scratch_gen;
-        for &ix in &idxs {
-            let slot = (ix - min_ix) as usize;
-            let entry = &mut gpu.scratch_seen[slot];
-            let u = if entry.0 == gen_tag {
-                entry.1
-            } else {
-                let id = gpu.scratch_unique.len() as u32;
-                *entry = (gen_tag, id);
-                gpu.scratch_unique.push(ix);
-                id
-            };
-            gpu.scratch_remap.push(u);
+        if gpu.index_32bit {
+            for &ix in unsafe { std::slice::from_raw_parts(ib as *const u32, idx_cnt) } {
+                let entry = &mut gpu.scratch_seen[(ix - min_ix) as usize];
+                let u = if entry.0 == gen_tag {
+                    entry.1
+                } else {
+                    let id = gpu.scratch_unique.len() as u32;
+                    *entry = (gen_tag, id);
+                    gpu.scratch_unique.push(ix);
+                    id
+                };
+                gpu.scratch_remap.push(u);
+            }
+        } else {
+            for &ix16 in unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt) } {
+                let ix = ix16 as u32;
+                let entry = &mut gpu.scratch_seen[(ix - min_ix) as usize];
+                let u = if entry.0 == gen_tag {
+                    entry.1
+                } else {
+                    let id = gpu.scratch_unique.len() as u32;
+                    *entry = (gen_tag, id);
+                    gpu.scratch_unique.push(ix);
+                    id
+                };
+                gpu.scratch_remap.push(u);
+            }
         }
     } else {
-        let mut seen: HashMap<u32, u32> = HashMap::with_capacity(idxs.len().min(4096));
-        for &ix in &idxs {
+        let mut seen: HashMap<u32, u32> = HashMap::with_capacity(idx_cnt.min(4096));
+        for k in 0..idx_cnt {
+            let ix = if gpu.index_32bit {
+                unsafe { *(ib as *const u32).add(k) }
+            } else {
+                unsafe { *(ib as *const u16).add(k) as u32 }
+            };
             let u = *seen.entry(ix).or_insert_with(|| {
                 let id = gpu.scratch_unique.len() as u32;
                 gpu.scratch_unique.push(ix);
@@ -1272,10 +1305,27 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             gpu.scratch_remap.push(u);
         }
     }
+    if let Some(t) = t_dedup {
+        PERF_DEDUP_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
     let unique_len = gpu.scratch_unique.len();
-    gpu.scratch_verts.resize(unique_len, crate::vk::GVertex::default());
+    let prim = gpu.uc.get(&0x242).copied().map(|v| if v > 0xFF { v >> 8 } else { v }).unwrap_or(4);
+    let indexed_draw = prim != 0x11;
+    let first_vertex = gpu.frame_gverts.len() as u32;
+    if indexed_draw {
+        if gpu.frame_gverts.len() + unique_len > 600_000 {
+            return false;
+        }
+        gpu.frame_gverts.resize(first_vertex as usize + unique_len, crate::vk::GVertex::default());
+    } else {
+        gpu.scratch_verts.resize(unique_len, crate::vk::GVertex::default());
+    }
     let unique = gpu.scratch_unique.as_slice();
-    let verts_ptr = gpu.scratch_verts.as_mut_ptr() as usize;
+    let verts_ptr = if indexed_draw {
+        unsafe { gpu.frame_gverts.as_mut_ptr().add(first_vertex as usize) as usize }
+    } else {
+        gpu.scratch_verts.as_mut_ptr() as usize
+    };
     let failed = std::sync::atomic::AtomicBool::new(false);
     let t_vs = (*FRAME_STATS_ON).then(std::time::Instant::now);
     let hoisted = crate::rdna::interp::hoist_vs_draw(&vs_sh, &vs_ud, max_ix, mem_ok);
@@ -1368,14 +1418,25 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         }
     }
     if failed.load(Ordering::Relaxed) {
+        if indexed_draw {
+            gpu.frame_gverts.truncate(first_vertex as usize);
+        }
         GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
         return false;
     }
+    let t_ps = (*FRAME_STATS_ON).then(std::time::Instant::now);
     let (tr, cube, info) = match (tr, pre) {
         (Some((tr, cube)), Some(info)) => (tr, cube, info),
         _ => {
-            let attrs = gpu.scratch_verts[gpu.scratch_remap[0] as usize].attr;
+            let attrs = if indexed_draw {
+                gpu.frame_gverts[first_vertex as usize + gpu.scratch_remap[0] as usize].attr
+            } else {
+                gpu.scratch_verts[gpu.scratch_remap[0] as usize].attr
+            };
             let Ok((pcs, info)) = crate::rdna::interp::trace_ps_compiled(&ps_sh, &mut ps_lane, &attrs, mem_ok) else {
+                if indexed_draw {
+                    gpu.frame_gverts.truncate(first_vertex as usize);
+                }
                 GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
                 return false;
             };
@@ -1393,12 +1454,18 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 })
                 .clone();
             let Some((tr, cube)) = got else {
+                if indexed_draw {
+                    gpu.frame_gverts.truncate(first_vertex as usize);
+                }
                 GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
                 return false;
             };
             (tr, cube, info)
         }
     };
+    if let Some(t) = t_ps {
+        PERF_PS_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
     let hash = hash ^ (std::sync::Arc::as_ptr(&tr) as u64);
     let decode_img = |(t, _): &([u32; 8], [u32; 4])| {
         let addr = (((t[0] as u64) | (((t[1] & 0xFF) as u64) << 32)) << 8) as usize;
@@ -1440,10 +1507,16 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         let (x1, y1) = (((br & 0x7FFF) as i32).min(rt.1 as i32), (((br >> 16) & 0x7FFF) as i32).min(rt.2 as i32));
         if x1 > x0 && y1 > y0 { [x0, y0, x1 - x0, y1 - y0] } else { [0, 0, rt.1 as i32, rt.2 as i32] }
     };
-    // Primitive type: triangle list (default) or rect list (3 corners → 2 triangles).
-    let prim = gpu.uc.get(&0x242).copied().map(|v| if v > 0xFF { v >> 8 } else { v }).unwrap_or(4);
-    let first_vertex = gpu.frame_gverts.len() as u32;
-    if prim == 0x11 {
+    // Primitive type: triangle list (indexed directly in gibuf!) or rect list (3 corners → 2 triangles).
+    let (vertex_count, first_index, index_count) = if indexed_draw {
+        let n_out = gpu.scratch_remap.len() / 3 * 3;
+        let fi = gpu.frame_gidxs.len() as u32;
+        gpu.frame_gidxs.reserve(n_out);
+        for &r in &gpu.scratch_remap[..n_out] {
+            gpu.frame_gidxs.push(first_vertex + r);
+        }
+        (unique_len as u32, fi, n_out as u32)
+    } else {
         for tri in gpu.scratch_remap.chunks_exact(3) {
             let (a, b, c) = (
                 gpu.scratch_verts[tri[0] as usize],
@@ -1457,14 +1530,8 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             }
             gpu.frame_gverts.extend_from_slice(&[a, b, c, c, b, d]);
         }
-    } else {
-        let n_out = gpu.scratch_remap.len() / 3 * 3;
-        gpu.frame_gverts.reserve(n_out);
-        for &r in &gpu.scratch_remap[..n_out] {
-            gpu.frame_gverts.push(gpu.scratch_verts[r as usize]);
-        }
-    }
-    let vertex_count = gpu.frame_gverts.len() as u32 - first_vertex;
+        (gpu.frame_gverts.len() as u32 - first_vertex, 0, 0)
+    };
         if let Ok(dir) = std::env::var("ORBIS_GEN_DUMP").map(|d| d).and_then(|d| if std::path::Path::new(&format!("{d}/ps_{ps_addr:x}.bin")).exists() { Err(std::env::VarError::NotPresent) } else { Ok(d) }) {
             let n = crate::rdna::decode_shader(ps_code).last().map(|i| i.pc as usize / 4 + i.words.len()).unwrap_or(0);
             let b: Vec<u8> = ps_code[..n].iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -1499,6 +1566,8 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         blend,
         first_vertex,
         vertex_count,
+        first_index,
+        index_count,
         slots,
         tex,
         extra_texs,
@@ -2398,6 +2467,7 @@ fn execute_stream(
                                 gpu.frame_gverts.clear();
                                 std::mem::swap(&mut rg.1, &mut gpu.frame_gens);
                                 gpu.frame_gens.clear();
+                                crate::vk::swap_gen_indices(&mut gpu.frame_gidxs);
                             }
                         }
                     } else {
@@ -2405,6 +2475,7 @@ fn execute_stream(
                         gpu.frame_idxs.clear();
                         gpu.frame_batches.clear();
                         gpu.frame_gverts.clear();
+                        gpu.frame_gidxs.clear();
                         gpu.frame_gens.clear();
                     }
                     gpu.pending_flip = Some((handle, index, mode, arg));
@@ -2428,6 +2499,9 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
     let t_sub = (*FRAME_STATS_ON).then(std::time::Instant::now);
     if *FRAME_STATS_ON {
         PERF_VS_NS.store(0, Ordering::Relaxed);
+        PERF_PREP_NS.store(0, Ordering::Relaxed);
+        PERF_DEDUP_NS.store(0, Ordering::Relaxed);
+        PERF_PS_NS.store(0, Ordering::Relaxed);
         PERF_CS_NS.store(0, Ordering::Relaxed);
         PERF_CS_CNT.store(0, Ordering::Relaxed);
         PERF_CS_THR.store(0, Ordering::Relaxed);
@@ -2468,12 +2542,15 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
         let total_ms = t0.elapsed().as_nanos() as f64 / 1e6;
         if n % 60 == 0 || total_ms >= 50.0 {
             let vs_ms = PERF_VS_NS.load(Ordering::Relaxed) as f64 / 1e6;
+            let prep_ms = PERF_PREP_NS.load(Ordering::Relaxed) as f64 / 1e6;
+            let dedup_ms = PERF_DEDUP_NS.load(Ordering::Relaxed) as f64 / 1e6;
+            let ps_ms = PERF_PS_NS.load(Ordering::Relaxed) as f64 / 1e6;
             let cs_ms = PERF_CS_NS.load(Ordering::Relaxed) as f64 / 1e6;
             let cs_cnt = PERF_CS_CNT.load(Ordering::Relaxed);
             let cs_thr = PERF_CS_THR.load(Ordering::Relaxed);
             let flip_ms = t_flip.map(|tf| tf.elapsed().as_nanos() as f64 / 1e6).unwrap_or(0.0);
             eprintln!(
-                "[orbis] PERF submit #{n}: total={total_ms:.1}ms vs={vs_ms:.1}ms cs={cs_ms:.1}ms({cs_cnt}x/{cs_thr}thr) flip={flip_ms:.1}ms"
+                "[orbis] PERF submit #{n}: total={total_ms:.1}ms vs={vs_ms:.1}ms prep={prep_ms:.1}ms dedup={dedup_ms:.1}ms ps={ps_ms:.1}ms cs={cs_ms:.1}ms({cs_cnt}x/{cs_thr}thr) flip={flip_ms:.1}ms"
             );
             if total_ms >= 50.0 {
                 let mut v: Vec<_> = PERF_VS_MAP.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(&a, &s)| (a, s)).collect();

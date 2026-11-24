@@ -49,6 +49,9 @@ pub struct GenDraw {
     pub blend: u32,
     pub first_vertex: u32,
     pub vertex_count: u32,
+    /// When `index_count > 0`, draw indexed from `gibuf` (`first_index..first_index+index_count`).
+    pub first_index: u32,
+    pub index_count: u32,
     pub slots: [u32; 64],
     pub tex: Option<(usize, u32, u32, u32)>,
     /// Additional textures (bindings 1..3) for multi-texture pixel shaders (e.g. terrain + lightmap).
@@ -69,7 +72,18 @@ pub struct GenDraw {
     pub zclear: f32,
 }
 
-const GVBUF_BYTES: usize = 64 << 20;
+const GVBUF_BYTES: usize = 96 << 20;
+const GIBUF_BYTES: usize = 16 << 20;
+
+static READY_GIDXS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Swaps the current frame's generic draw index buffer into the renderer handoff slot
+/// (preserves capacity on both sides without touching `video.rs`).
+pub fn swap_gen_indices(src: &mut Vec<u32>) {
+    let mut g = READY_GIDXS.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::swap(&mut *g, src);
+    src.clear();
+}
 
 pub struct VkTarget {
     pub image: vk::Image,
@@ -146,6 +160,8 @@ pub struct VkRenderer {
     pub gen_pipes: HashMap<(usize, u32, u32), vk::Pipeline>,
     pub gvbuf: vk::Buffer,
     pub gvmem: vk::DeviceMemory,
+    pub gibuf: vk::Buffer,
+    pub gimem: vk::DeviceMemory,
 }
 
 unsafe impl Send for VkRenderer {}
@@ -381,6 +397,8 @@ impl VkRenderer {
             gen_pipes: HashMap::new(),
             gvbuf: vk::Buffer::null(),
             gvmem: vk::DeviceMemory::null(),
+            gibuf: vk::Buffer::null(),
+            gimem: vk::DeviceMemory::null(),
         };
         if let Err(e) = r.init_blit_pipeline() {
             eprintln!("[orbis] Vulkan: blit pipeline init warning: {e}");
@@ -1722,17 +1740,20 @@ impl VkRenderer {
                 let step = (words / 512).max(1);
                 let p = addr as *const u64;
                 let mut hsum = 0xcbf2_9ce4_8422_2325u64;
-                let mut any_nz = false;
+                let mut nz_cnt = 0u32;
                 let mut k = 0;
                 while k < words {
                     let v = p.add(k).read_unaligned();
                     if v != 0 {
-                        any_nz = true;
+                        nz_cnt += 1;
                     }
                     hsum = (hsum ^ v).wrapping_mul(0x100_0000_01b3);
                     k += step;
                 }
-                if any_nz {
+                if std::env::var_os("ORBIS_FRAME_STATS").is_some() {
+                    eprintln!("[orbis] ATLAS-SYNC(rt_target) {addr:#x} {w}x{h} avail={avail} nz={nz_cnt}/512");
+                }
+                if nz_cnt > 0 {
                     let src = std::slice::from_raw_parts(addr as *const u8, avail);
                     let pixels = crate::tiling::untile_32bpp(src, w, h, 27 | (56 << 8) | (0xFAC << 20));
                     self.reupload_texture(image, w, h, &pixels);
@@ -1928,6 +1949,16 @@ impl VkRenderer {
                     self.gvmem = m;
                 }
             }
+            if !gens.is_empty() && self.gibuf == vk::Buffer::null() {
+                if let Some((b, m)) = self.alloc_host_buffer(GIBUF_BYTES, vk::BufferUsageFlags::INDEX_BUFFER) {
+                    self.gibuf = b;
+                    self.gimem = m;
+                }
+            }
+            let gidxs_guard = READY_GIDXS.lock().unwrap_or_else(|e| e.into_inner());
+            let gidxs: &[u32] = &gidxs_guard;
+            let gi_bytes = (gidxs.len() * 4).min(GIBUF_BYTES);
+            let gi_max = (gi_bytes / 4) as u32;
             let v_bytes = (vertices.len() * std::mem::size_of::<Vertex>()).min(524288);
             let i_bytes = (indices.len() * 4).min(131072);
             let max_idx = (i_bytes / 4) as u32;
@@ -1944,7 +1975,11 @@ impl VkRenderer {
             for b in batches {
                 if let Some(g) = b.gen {
                     if let Some(gd) = gens.get(g as usize) {
-                        if self.gvbuf != vk::Buffer::null() && gd.vertex_count > 0 && gd.first_vertex.saturating_add(gd.vertex_count) <= g_max {
+                        if self.gvbuf != vk::Buffer::null()
+                            && gd.first_vertex.saturating_add(gd.vertex_count) <= g_max
+                            && ((gd.index_count > 0 && gd.first_index.saturating_add(gd.index_count) <= gi_max)
+                                || (gd.index_count == 0 && gd.vertex_count > 0))
+                        {
                             let rt = if gd.rt.0 != 0 && gd.rt.1 <= 8192 && gd.rt.2 <= 8192 { gd.rt } else { display };
                             used.push(rt);
                         }
@@ -1983,6 +2018,7 @@ impl VkRenderer {
                 rt: (usize, u32, u32),
                 first: u32,
                 count: u32,
+                indexed: bool,
                 ds: vk::DescriptorSet,
                 pipe: vk::Pipeline,
                 gen: usize,
@@ -1995,7 +2031,11 @@ impl VkRenderer {
             for b in batches {
                 if let Some(g) = b.gen {
                     let Some(gd) = gens.get(g as usize) else { continue };
-                    if self.gvbuf == vk::Buffer::null() || gd.vertex_count == 0 || gd.first_vertex.saturating_add(gd.vertex_count) > g_max {
+                    if self.gvbuf == vk::Buffer::null()
+                        || gd.first_vertex.saturating_add(gd.vertex_count) > g_max
+                        || (gd.index_count > 0 && (self.gibuf == vk::Buffer::null() || gd.first_index.saturating_add(gd.index_count) > gi_max))
+                        || (gd.index_count == 0 && gd.vertex_count == 0)
+                    {
                         continue;
                     }
                     let rt = if gd.rt.0 != 0 && gd.rt.1 <= 8192 && gd.rt.2 <= 8192 { gd.rt } else { display };
@@ -2027,20 +2067,23 @@ impl VkRenderer {
                                         let step = (words / 512).max(1);
                                         let p = a as *const u64;
                                         let mut hsum = 0xcbf2_9ce4_8422_2325u64;
-                                        let mut any_nz = false;
+                                        let mut nz_cnt = 0u32;
                                         let mut j = 0;
                                         while j < words {
                                             let val = p.add(j).read_unaligned();
                                             if val != 0 {
-                                                any_nz = true;
+                                                nz_cnt += 1;
                                             }
                                             hsum = (hsum ^ val).wrapping_mul(0x100_0000_01b3);
                                             j += step;
                                         }
-                                        if any_nz && self.rt_guest_sums.get(&a) != Some(&hsum) {
+                                        if nz_cnt > 0 && self.rt_guest_sums.get(&a) != Some(&hsum) {
                                             if let Some(t) = self.targets.get(&a) {
                                                 let img = t.image;
                                                 let (tw, th) = (t.width, t.height);
+                                                if std::env::var_os("ORBIS_FRAME_STATS").is_some() {
+                                                    eprintln!("[orbis] ATLAS-SYNC(sample) {a:#x} target={tw}x{th} tex={w}x{h} sw={sw_mode} nz={nz_cnt}/512");
+                                                }
                                                 if tw == w && th == h {
                                                     let src = std::slice::from_raw_parts(a as *const u8, avail);
                                                     let pixels = crate::tiling::untile_32bpp(src, w, h, sw);
@@ -2098,10 +2141,15 @@ impl VkRenderer {
                     let ds = self.gen_dset_for(slot_vs).unwrap_or(self.desc_set);
                     let [x, y, w, h] = gd.scissor;
                     let scissor = vk::Rect2D { offset: vk::Offset2D { x, y }, extent: vk::Extent2D { width: w.max(0) as u32, height: h.max(0) as u32 } };
-                    items.push(Item { rt, first: gd.first_vertex, count: gd.vertex_count, ds, pipe, gen: g as usize, scissor, sampled_rts });
+                    let (first, count, indexed) = if gd.index_count > 0 {
+                        (gd.first_index, gd.index_count, true)
+                    } else {
+                        (gd.first_vertex, gd.vertex_count, false)
+                    };
+                    items.push(Item { rt, first, count, indexed, ds, pipe, gen: g as usize, scissor, sampled_rts });
                 } else if b.index_count > 0 && b.first_index.saturating_add(b.index_count) <= max_idx {
                     let ds = self.ensure_sampled_texture(b.tex_addr, b.tex_w, b.tex_h, b.tex_swiz);
-                    items.push(Item { rt: display, first: b.first_index, count: b.index_count, ds, pipe: vk::Pipeline::null(), gen: 0, scissor: full(display.1, display.2), sampled_rts: [0; 4] });
+                    items.push(Item { rt: display, first: b.first_index, count: b.index_count, indexed: true, ds, pipe: vk::Pipeline::null(), gen: 0, scissor: full(display.1, display.2), sampled_rts: [0; 4] });
                 }
             }
             if items.is_empty() {
@@ -2115,6 +2163,13 @@ impl VkRenderer {
                     self.device.unmap_memory(self.gvmem);
                 }
             }
+            if gi_bytes > 0 && self.gimem != vk::DeviceMemory::null() {
+                if let Ok(p) = self.device.map_memory(self.gimem, 0, gi_bytes as u64, vk::MemoryMapFlags::empty()) {
+                    std::ptr::copy_nonoverlapping(gidxs.as_ptr() as *const u8, p as *mut u8, gi_bytes);
+                    self.device.unmap_memory(self.gimem);
+                }
+            }
+            drop(gidxs_guard);
             if v_bytes > 0 {
                 if let Ok(p) = self.device.map_memory(self.vmem, 0, v_bytes as u64, vk::MemoryMapFlags::empty()) {
                     std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const u8, p as *mut u8, v_bytes);
@@ -2141,6 +2196,7 @@ impl VkRenderer {
             let mut cur_rt = 0usize;
             let mut cur_pipe = vk::Pipeline::null();
             let mut cur_vb = vk::Buffer::null();
+            let mut cur_ib = vk::Buffer::null();
             let mut last_ds = vk::DescriptorSet::null();
             for it in &items {
                 for &sr in &it.sampled_rts {
@@ -2213,9 +2269,7 @@ impl VkRenderer {
                     cur_pipe = vk::Pipeline::null();
                     cur_vb = vk::Buffer::null();
                     last_ds = vk::DescriptorSet::null();
-                    if self.ibuf != vk::Buffer::null() {
-                        self.device.cmd_bind_index_buffer(self.cmd_buf, self.ibuf, 0, vk::IndexType::UINT32);
-                    }
+                    cur_ib = vk::Buffer::null();
                 }
                 let generic = it.pipe != vk::Pipeline::null();
                 let want = if generic { it.pipe } else { self.rt_quad_pipe };
@@ -2232,6 +2286,13 @@ impl VkRenderer {
                     self.device.cmd_bind_vertex_buffers(self.cmd_buf, 0, &[vb], &[0]);
                     cur_vb = vb;
                 }
+                if it.indexed {
+                    let ib = if generic { self.gibuf } else { self.ibuf };
+                    if ib != cur_ib && ib != vk::Buffer::null() {
+                        self.device.cmd_bind_index_buffer(self.cmd_buf, ib, 0, vk::IndexType::UINT32);
+                        cur_ib = ib;
+                    }
+                }
                 let layout = if generic { self.gen_layout } else { self.blit_layout };
                 if it.ds != last_ds {
                     self.device.cmd_bind_descriptor_sets(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, layout, 0, &[it.ds], &[]);
@@ -2241,7 +2302,11 @@ impl VkRenderer {
                 if generic {
                     let bytes = std::slice::from_raw_parts(gens[it.gen].slots.as_ptr() as *const u8, 256);
                     self.device.cmd_push_constants(self.cmd_buf, self.gen_layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
-                    self.device.cmd_draw(self.cmd_buf, it.count, 1, it.first, 0);
+                    if it.indexed {
+                        self.device.cmd_draw_indexed(self.cmd_buf, it.count, 1, it.first, 0, 0);
+                    } else {
+                        self.device.cmd_draw(self.cmd_buf, it.count, 1, it.first, 0);
+                    }
                 } else {
                     self.device.cmd_draw_indexed(self.cmd_buf, it.count, 1, it.first, 0, 0);
                 }
