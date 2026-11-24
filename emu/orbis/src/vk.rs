@@ -72,6 +72,8 @@ pub struct GenDraw {
     pub zclear: f32,
     /// Optional GPU-translated SPIR-V vertex shader (`rdna::vs::translate`).
     pub vs_spirv: Option<std::sync::Arc<Vec<u32>>>,
+    /// Guest VA of the vertex shader (for runtime auto-heal quarantine if GPU-VS stalls/faults).
+    pub vs_addr: usize,
     /// Byte offset (256-byte aligned) into per-frame `vs_ubuf` (`STORAGE_BUFFER_DYNAMIC`).
     pub vs_param_off: u32,
     /// Guest vertex buffers `(base_addr, byte_len)` for Set 1 bindings 1..=4.
@@ -84,6 +86,28 @@ const VS_UBUF_INIT_BYTES: usize = 4 << 20;
 
 static READY_GIDXS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static READY_VS_PARAMS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+static QUARANTINED_GPU_VS: std::sync::LazyLock<Mutex<std::collections::HashSet<usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+static SAVED_WINDOW: Mutex<Option<(usize, usize, u32, u32)>> = Mutex::new(None);
+
+/// Quarantines a faulty GPU-VS shader at runtime so subsequent frames automatically fall back
+/// to the CPU hoisted vertex shader without crashing or stalling the GPU.
+pub fn quarantine_gpu_vs(addr: usize, reason: &str) {
+    if addr == 0 {
+        return;
+    }
+    let mut g = QUARANTINED_GPU_VS.lock().unwrap_or_else(|e| e.into_inner());
+    if g.insert(addr) {
+        eprintln!("[orbis] AUTO-HEAL: quarantined GPU-VS {addr:#x} ({reason}) -> falling back to CPU hoisted VS");
+    }
+}
+
+pub fn is_gpu_vs_quarantined(addr: usize) -> bool {
+    if addr == 0 {
+        return false;
+    }
+    QUARANTINED_GPU_VS.lock().unwrap_or_else(|e| e.into_inner()).contains(&addr)
+}
 
 /// Swaps the current frame's generic draw index buffer into the renderer handoff slot
 /// (preserves capacity on both sides without touching `video.rs`).
@@ -192,6 +216,11 @@ pub struct VkRenderer {
     pub guest_vb_cache: HashMap<usize, (vk::Buffer, vk::DeviceMemory, usize, usize, u64, u64)>,
     pub guest_vb_checked: HashMap<usize, u64>,
     pub vs_dsets: HashMap<[u64; 4], vk::DescriptorSet>,
+    /// Runtime self-healing state: GPU-VS shaders active on the in-flight frame, shaders proven
+    /// healthy (<120ms GPU completion), and device-lost recovery flag.
+    pub last_frame_gpu_vs: Vec<usize>,
+    pub healthy_gpu_vs: std::collections::HashSet<usize>,
+    pub device_lost: bool,
 }
 
 unsafe impl Send for VkRenderer {}
@@ -201,6 +230,21 @@ static RENDERER: OnceLock<Mutex<Option<VkRenderer>>> = OnceLock::new();
 pub fn with_renderer<R>(f: impl FnOnce(&mut VkRenderer) -> R) -> Option<R> {
     let m = RENDERER.get()?;
     let mut g = m.lock().ok()?;
+    #[cfg(windows)]
+    if g.as_ref().map(|r| r.device_lost).unwrap_or(false) {
+        if let Some((hwnd, hinst, w, h)) = *SAVED_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) {
+            *g = None;
+            match unsafe { VkRenderer::new_win32(hwnd as *mut c_void, hinst as *mut c_void, w, h) } {
+                Ok(r) => {
+                    eprintln!("[orbis] AUTO-HEAL: Vulkan device & swapchain recreated cleanly after DEVICE_LOST!");
+                    *g = Some(r);
+                }
+                Err(e) => {
+                    eprintln!("[orbis] AUTO-HEAL: Vulkan device recovery failed ({e})");
+                }
+            }
+        }
+    }
     g.as_mut().map(f)
 }
 
@@ -210,6 +254,7 @@ pub fn init_window(hwnd: *mut c_void, hinstance: *mut c_void, width: u32, height
     if std::env::var_os("ORBIS_HIDDEN").is_some() || std::env::var_os("ORBIS_NO_VK").is_some() {
         return;
     }
+    *SAVED_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = Some((hwnd as usize, hinstance as usize, width, height));
     let cell = RENDERER.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().unwrap();
     if guard.is_some() {
@@ -442,6 +487,9 @@ impl VkRenderer {
             guest_vb_cache: HashMap::new(),
             guest_vb_checked: HashMap::new(),
             vs_dsets: HashMap::new(),
+            last_frame_gpu_vs: Vec::new(),
+            healthy_gpu_vs: std::collections::HashSet::new(),
+            device_lost: false,
         };
         if let Err(e) = r.init_blit_pipeline() {
             eprintln!("[orbis] Vulkan: blit pipeline init warning: {e}");
@@ -779,7 +827,32 @@ impl VkRenderer {
                     .ok()
                     .map(|(idx, _)| idx)
             }
-            Err(_) => None,
+            Err(e) => {
+                if e == vk::Result::ERROR_DEVICE_LOST {
+                    eprintln!("[orbis] AUTO-HEAL: acquire_next_image returned VK_ERROR_DEVICE_LOST -> scheduling live Vulkan recovery");
+                    self.quarantine_active_gpu_vs("acquire DEVICE_LOST");
+                    self.device_lost = true;
+                } else {
+                    static ACQ_ERR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    if ACQ_ERR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 5 {
+                        eprintln!("[orbis] Vulkan: acquire_next_image failed ({e:?})");
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn quarantine_active_gpu_vs(&mut self, reason: &str) {
+        let suspects: Vec<usize> = self
+            .last_frame_gpu_vs
+            .iter()
+            .copied()
+            .filter(|a| !self.healthy_gpu_vs.contains(a))
+            .collect();
+        let targets = if suspects.is_empty() { &self.last_frame_gpu_vs } else { &suspects };
+        for &addr in targets {
+            quarantine_gpu_vs(addr, reason);
         }
     }
 
@@ -1946,24 +2019,31 @@ impl VkRenderer {
     /// Ensures a cached host-visible GPU `STORAGE_BUFFER` holds up-to-date raw bytes of a
     /// guest vertex buffer `(addr, need_bytes)`. Static Minecraft chunk VBs upload once and
     /// hit cache on every subsequent frame with zero PCIe copy.
-    unsafe fn ensure_guest_vb(&mut self, addr: usize, need_bytes: usize) -> vk::Buffer {
-        if addr < 0x1_0000_0000 || need_bytes == 0 || need_bytes > (64 << 20) {
-            return self.vs_dummy_buf;
+    /// Returns `Some(vs_dummy_buf)` ONLY for unused slots (`need_bytes == 0`), and `None` if a
+    /// real VB cannot be read or allocated (never binds a 256B dummy buffer for a large VB!).
+    unsafe fn ensure_guest_vb(&mut self, addr: usize, need_bytes: usize) -> Option<vk::Buffer> {
+        if need_bytes == 0 || addr == 0 {
+            return Some(self.vs_dummy_buf);
+        }
+        if addr < 0x1_0000_0000 || need_bytes > (64 << 20) {
+            return None;
         }
         let need = (need_bytes + 15) & !15;
-        let avail = Self::readable_bytes(addr, need);
-        if avail < 16 {
-            return self.vs_dummy_buf;
-        }
-        let upload_len = avail.min(need);
-        if self.guest_vb_checked.get(&addr) == Some(&self.frame_no) {
-            if let Some(entry) = self.guest_vb_cache.get_mut(&addr) {
-                if entry.3 >= upload_len {
+        // Fast path: already checked this frame, OR static chunk VB (>= 4 KiB) validated recently.
+        if let Some(entry) = self.guest_vb_cache.get_mut(&addr) {
+            if entry.3 >= need {
+                let last_chk = self.guest_vb_checked.get(&addr).copied().unwrap_or(0);
+                if last_chk == self.frame_no || (need >= 4096 && self.frame_no.saturating_sub(last_chk) < 16) {
                     entry.5 = self.frame_no;
-                    return entry.0;
+                    return Some(entry.0);
                 }
             }
         }
+        let avail = Self::readable_bytes(addr, need);
+        if avail < 16 {
+            return None;
+        }
+        let upload_len = avail.min(need);
         self.guest_vb_checked.insert(addr, self.frame_no);
         // Fast sampled checksum (64 u64s) to detect dynamic VB rewrites.
         let sum = {
@@ -1991,7 +2071,7 @@ impl VkRenderer {
                     entry.3 = upload_len;
                     entry.4 = sum;
                 }
-                return entry.0;
+                return Some(entry.0);
             }
             // Need larger capacity: free old buffer.
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
@@ -2020,14 +2100,14 @@ impl VkRenderer {
         }
         let alloc_sz = upload_len.max(4096).next_power_of_two();
         let Some((buf, mem)) = self.alloc_host_buffer(alloc_sz, vk::BufferUsageFlags::STORAGE_BUFFER) else {
-            return self.vs_dummy_buf;
+            return None;
         };
         if let Ok(p) = self.device.map_memory(mem, 0, upload_len as u64, vk::MemoryMapFlags::empty()) {
             std::ptr::copy_nonoverlapping(addr as *const u8, p as *mut u8, upload_len);
             self.device.unmap_memory(mem);
         }
         self.guest_vb_cache.insert(addr, (buf, mem, alloc_sz, upload_len, sum, self.frame_no));
-        buf
+        Some(buf)
     }
 
     /// Descriptor set (Set 1) for GPU-VS: binding 0 = dynamic `vs_ubuf`, bindings 1..=4 = VBs.
@@ -2382,13 +2462,19 @@ impl VkRenderer {
                     }
                     let ds = self.gen_dset_for(slot_vs).unwrap_or(self.desc_set);
                     let (vs_ds, vs_off) = if gd.vs_spirv.is_some() {
-                        let vbs = [
+                        let (Some(b0), Some(b1), Some(b2), Some(b3)) = (
                             self.ensure_guest_vb(gd.vs_vbs[0].0, gd.vs_vbs[0].1),
                             self.ensure_guest_vb(gd.vs_vbs[1].0, gd.vs_vbs[1].1),
                             self.ensure_guest_vb(gd.vs_vbs[2].0, gd.vs_vbs[2].1),
                             self.ensure_guest_vb(gd.vs_vbs[3].0, gd.vs_vbs[3].1),
-                        ];
-                        let Some(vds) = self.vs_dset_for(vbs) else { continue };
+                        ) else {
+                            quarantine_gpu_vs(gd.vs_addr, "guest VB alloc/read failed");
+                            continue;
+                        };
+                        let Some(vds) = self.vs_dset_for([b0, b1, b2, b3]) else {
+                            quarantine_gpu_vs(gd.vs_addr, "vs_dset_for failed");
+                            continue;
+                        };
                         (vds, gd.vs_param_off)
                     } else {
                         (vk::DescriptorSet::null(), 0)
@@ -2410,7 +2496,41 @@ impl VkRenderer {
                 return false;
             }
 
-            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            // Runtime GPU watchdog: detect slow/hanging GPU-VS shaders BEFORE Windows 2s TDR!
+            let t_fence = std::time::Instant::now();
+            match self.device.wait_for_fences(&[self.fence], true, 400_000_000) {
+                Ok(()) => {
+                    let wait_ms = t_fence.elapsed().as_secs_f64() * 1000.0;
+                    if !self.last_frame_gpu_vs.is_empty() {
+                        if wait_ms > 200.0 {
+                            self.quarantine_active_gpu_vs(&format!("GPU stall {wait_ms:.0}ms"));
+                        } else if wait_ms < 120.0 {
+                            for &a in &self.last_frame_gpu_vs {
+                                self.healthy_gpu_vs.insert(a);
+                            }
+                        }
+                    }
+                }
+                Err(vk::Result::TIMEOUT) => {
+                    self.quarantine_active_gpu_vs("GPU fence timeout >400ms");
+                    if let Err(e2) = self.device.wait_for_fences(&[self.fence], true, 2_000_000_000) {
+                        if e2 == vk::Result::ERROR_DEVICE_LOST {
+                            eprintln!("[orbis] AUTO-HEAL: wait_for_fences DEVICE_LOST -> scheduling live Vulkan recovery");
+                            self.device_lost = true;
+                            return false;
+                        }
+                    }
+                }
+                Err(vk::Result::ERROR_DEVICE_LOST) => {
+                    eprintln!("[orbis] AUTO-HEAL: wait_for_fences DEVICE_LOST -> scheduling live Vulkan recovery");
+                    self.quarantine_active_gpu_vs("wait_for_fences DEVICE_LOST");
+                    self.device_lost = true;
+                    return false;
+                }
+                Err(e) => {
+                    eprintln!("[orbis] Vulkan: wait_for_fences error ({e:?})");
+                }
+            }
             if g_bytes > 0 {
                 if let Ok(p) = self.device.map_memory(self.gvmem, 0, g_bytes as u64, vk::MemoryMapFlags::empty()) {
                     std::ptr::copy_nonoverlapping(gverts.as_ptr() as *const u8, p as *mut u8, g_bytes);
@@ -2652,12 +2772,34 @@ impl VkRenderer {
             let wait_stages = [vk::PipelineStageFlags::TRANSFER];
             let cmds = [self.cmd_buf];
             let submit = [vk::SubmitInfo::default().wait_semaphores(&wait_sems).wait_dst_stage_mask(&wait_stages).command_buffers(&cmds).signal_semaphores(&sig_sems)];
-            if self.device.queue_submit(self.queue, &submit, self.fence).is_err() {
+            // Record active GPU-VS shaders in this frame for the next frame's GPU watchdog.
+            self.last_frame_gpu_vs.clear();
+            for it in &items {
+                if it.vs_ds != vk::DescriptorSet::null() {
+                    let va = gens[it.gen].vs_addr;
+                    if va != 0 && !self.last_frame_gpu_vs.contains(&va) {
+                        self.last_frame_gpu_vs.push(va);
+                    }
+                }
+            }
+            if let Err(e) = self.device.queue_submit(self.queue, &submit, self.fence) {
+                eprintln!("[orbis] AUTO-HEAL: queue_submit failed ({e:?})");
+                self.quarantine_active_gpu_vs(&format!("queue_submit {e:?}"));
+                if e == vk::Result::ERROR_DEVICE_LOST {
+                    self.device_lost = true;
+                }
                 return false;
             }
             self.present_swapchain_image(img_idx);
             if dump {
-                let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+                if let Err(e) = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000) {
+                    eprintln!("[orbis] AUTO-HEAL: dump wait_for_fences failed ({e:?})");
+                    self.quarantine_active_gpu_vs(&format!("dump fence {e:?}"));
+                    if e == vk::Result::ERROR_DEVICE_LOST {
+                        self.device_lost = true;
+                    }
+                    return false;
+                }
                 let bytes = (ew * eh * 4) as usize;
                 if let Ok(p) = self.device.map_memory(self.staging_mem, 0, bytes as u64, vk::MemoryMapFlags::empty()) {
                     let px = std::slice::from_raw_parts(p as *const u8, bytes);
@@ -2691,6 +2833,9 @@ impl VkRenderer {
         }
         let p = self.create_gen_pipeline(gd).unwrap_or_else(|e| {
             eprintln!("[orbis] Vulkan: generic pipeline for ps {:#x}: {e}", gd.key.0);
+            if gd.vs_spirv.is_some() {
+                quarantine_gpu_vs(gd.vs_addr, &format!("pipeline compile failed: {e}"));
+            }
             vk::Pipeline::null()
         });
         self.gen_pipes.insert(gd.key, p);

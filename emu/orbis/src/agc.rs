@@ -1258,7 +1258,8 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
 
     // Runtime Auto-GPU Vertex Shader Offload: run large 3D triangle-list draws (>= 36 indices)
     // natively on the GPU via translated SPIR-V VS (zero CPU per-vertex shading, zero GVBUF bloat!).
-    if indexed_draw && idx_cnt >= 36 && tr.is_some() && pre.is_some() {
+    // Shaders quarantined by the live Vulkan watchdog automatically fall back to CPU hoisted VS.
+    if indexed_draw && idx_cnt >= 36 && tr.is_some() && pre.is_some() && !crate::vk::is_gpu_vs_quarantined(vs_addr) {
         let vp = [
             xs.to_bits(),
             xo.to_bits(),
@@ -1356,6 +1357,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                     depth: dctl,
                     zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
                     vs_spirv: Some(vs_spv),
+                    vs_addr,
                     vs_param_off,
                     vs_vbs: gpu_data.vbs,
                 });
@@ -1723,6 +1725,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         // the compare direction (1.0 for LESS-style tests, 0.0 for GREATER-style ones).
         zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
         vs_spirv: None,
+        vs_addr: 0,
         vs_param_off: 0,
         vs_vbs: [(0, 0); 4],
     });
