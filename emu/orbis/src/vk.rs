@@ -188,8 +188,8 @@ pub struct VkRenderer {
     pub vs_dummy_buf: vk::Buffer,
     pub vs_dummy_mem: vk::DeviceMemory,
     pub vs_modules: HashMap<usize, vk::ShaderModule>,
-    /// Guest VB cache: addr -> (buf, mem, cap, last_checksum, last_frame_used).
-    pub guest_vb_cache: HashMap<usize, (vk::Buffer, vk::DeviceMemory, usize, u64, u64)>,
+    /// Guest VB cache: addr -> (buf, mem, cap, uploaded_len, last_checksum, last_frame_used).
+    pub guest_vb_cache: HashMap<usize, (vk::Buffer, vk::DeviceMemory, usize, usize, u64, u64)>,
     pub guest_vb_checked: HashMap<usize, u64>,
     pub vs_dsets: HashMap<[u64; 4], vk::DescriptorSet>,
 }
@@ -1958,8 +1958,8 @@ impl VkRenderer {
         let upload_len = avail.min(need);
         if self.guest_vb_checked.get(&addr) == Some(&self.frame_no) {
             if let Some(entry) = self.guest_vb_cache.get_mut(&addr) {
-                if entry.2 >= upload_len {
-                    entry.4 = self.frame_no;
+                if entry.3 >= upload_len {
+                    entry.5 = self.frame_no;
                     return entry.0;
                 }
             }
@@ -1980,21 +1980,22 @@ impl VkRenderer {
         };
         if let Some(entry) = self.guest_vb_cache.get_mut(&addr) {
             if entry.2 >= upload_len {
-                entry.4 = self.frame_no;
-                if entry.3 != sum {
+                entry.5 = self.frame_no;
+                if entry.3 < upload_len || entry.4 != sum {
                     let mem = entry.1;
                     let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
                     if let Ok(p) = self.device.map_memory(mem, 0, upload_len as u64, vk::MemoryMapFlags::empty()) {
                         std::ptr::copy_nonoverlapping(addr as *const u8, p as *mut u8, upload_len);
                         self.device.unmap_memory(mem);
                     }
-                    entry.3 = sum;
+                    entry.3 = upload_len;
+                    entry.4 = sum;
                 }
                 return entry.0;
             }
             // Need larger capacity: free old buffer.
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
-            if let Some((ob, om, _, _, _)) = self.guest_vb_cache.remove(&addr) {
+            if let Some((ob, om, _, _, _, _)) = self.guest_vb_cache.remove(&addr) {
                 use ash::vk::Handle;
                 let raw = ob.as_raw();
                 self.vs_dsets.retain(|k, _| !k.contains(&raw));
@@ -2005,10 +2006,10 @@ impl VkRenderer {
         // Evict stale chunk VBs if cache grows beyond 2048 buffers.
         if self.guest_vb_cache.len() >= 2048 {
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
-            let mut old: Vec<(u64, usize)> = self.guest_vb_cache.iter().map(|(&a, e)| (e.4, a)).collect();
+            let mut old: Vec<(u64, usize)> = self.guest_vb_cache.iter().map(|(&a, e)| (e.5, a)).collect();
             old.sort_by_key(|&(f, _)| f);
             for &(_, a) in old.iter().take(256) {
-                if let Some((ob, om, _, _, _)) = self.guest_vb_cache.remove(&a) {
+                if let Some((ob, om, _, _, _, _)) = self.guest_vb_cache.remove(&a) {
                     use ash::vk::Handle;
                     let raw = ob.as_raw();
                     self.vs_dsets.retain(|k, _| !k.contains(&raw));
@@ -2025,7 +2026,7 @@ impl VkRenderer {
             std::ptr::copy_nonoverlapping(addr as *const u8, p as *mut u8, upload_len);
             self.device.unmap_memory(mem);
         }
-        self.guest_vb_cache.insert(addr, (buf, mem, alloc_sz, sum, self.frame_no));
+        self.guest_vb_cache.insert(addr, (buf, mem, alloc_sz, upload_len, sum, self.frame_no));
         buf
     }
 

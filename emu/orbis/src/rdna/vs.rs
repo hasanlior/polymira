@@ -58,52 +58,7 @@ pub struct GpuVsDrawData {
 /// Allows branch-free shaders AND simple forward `v_cmpx_*` + `s_cbranch_execz` predication
 /// (e.g. Minecraft's 184-inst transparent `RenderChunk` VS).
 pub fn is_gpu_vs_eligible(sh: &CompiledShader) -> bool {
-    let mut has_exp_pos = false;
-    for inst in &sh.insts {
-        match inst.fmt {
-            Fmt::Sopp => match inst.name {
-                "s_cbranch_execz" => {
-                    let imm = (inst.w0() & 0xFFFF) as i16;
-                    if imm < 0 {
-                        return false; // no backward loops
-                    }
-                }
-                "s_branch"
-                | "s_cbranch_scc0"
-                | "s_cbranch_scc1"
-                | "s_cbranch_vccz"
-                | "s_cbranch_vccnz"
-                | "s_cbranch_execnz" => return false,
-                _ => {}
-            },
-            Fmt::Ds | Fmt::Mimg | Fmt::Flat | Fmt::Global | Fmt::Scratch | Fmt::Vintrp | Fmt::Vop3p => {
-                return false;
-            }
-            Fmt::Vopc => {
-                if !inst.name.starts_with("v_cmpx_") {
-                    return false;
-                }
-            }
-            Fmt::Vop1 | Fmt::Vop2 | Fmt::Vop3 => {
-                if inst.name.starts_with("v_cmp")
-                    || inst.name.starts_with("v_readfirstlane")
-                    || inst.name.starts_with("v_readlane")
-                    || inst.ext == Ext::Dpp16
-                    || inst.ext == Ext::Dpp8
-                {
-                    return false;
-                }
-            }
-            Fmt::Exp => {
-                let target = (inst.w0() >> 4) & 0x3F;
-                if target == 12 {
-                    has_exp_pos = true;
-                }
-            }
-            _ => {}
-        }
-    }
-    has_exp_pos
+    sh.gpu_vs_eligible
 }
 
 /// Runs the scalar/SMEM instructions of `sh` once on the CPU and packs all per-draw

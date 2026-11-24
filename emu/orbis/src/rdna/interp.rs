@@ -216,6 +216,8 @@ pub struct CompiledShader {
     /// True when the entire shader is branch-free and has no vector->scalar writes (no Vopc,
     /// no readlane), so ALL scalar/SMEM instructions can be hoisted once per draw via `VsDrawPlan`.
     pub can_hoist_scalar: bool,
+    /// True when eligible for GPU SPIR-V VS translation (`rdna::vs::translate`).
+    pub gpu_vs_eligible: bool,
 }
 
 impl CompiledShader {
@@ -294,7 +296,36 @@ impl CompiledShader {
                 _ => true,
             }
         }) && has_exp;
-        Self { insts, pc_to_idx, slots, slot_lens, end_pc, scalar_prefix_len, can_hoist_scalar }
+        let mut has_exp_pos = false;
+        let gpu_vs_eligible = insts.iter().all(|inst| match inst.fmt {
+            Fmt::Sopp => match inst.name {
+                "s_cbranch_execz" => ((inst.w0() & 0xFFFF) as i16) >= 0,
+                "s_branch"
+                | "s_cbranch_scc0"
+                | "s_cbranch_scc1"
+                | "s_cbranch_vccz"
+                | "s_cbranch_vccnz"
+                | "s_cbranch_execnz" => false,
+                _ => true,
+            },
+            Fmt::Ds | Fmt::Mimg | Fmt::Flat | Fmt::Global | Fmt::Scratch | Fmt::Vintrp | Fmt::Vop3p => false,
+            Fmt::Vopc => inst.name.starts_with("v_cmpx_"),
+            Fmt::Vop1 | Fmt::Vop2 | Fmt::Vop3 => {
+                !inst.name.starts_with("v_cmp")
+                    && !inst.name.starts_with("v_readfirstlane")
+                    && !inst.name.starts_with("v_readlane")
+                    && inst.ext != Ext::Dpp16
+                    && inst.ext != Ext::Dpp8
+            }
+            Fmt::Exp => {
+                if ((inst.w0() >> 4) & 0x3F) == 12 {
+                    has_exp_pos = true;
+                }
+                true
+            }
+            _ => true,
+        }) && has_exp_pos;
+        Self { insts, pc_to_idx, slots, slot_lens, end_pc, scalar_prefix_len, can_hoist_scalar, gpu_vs_eligible }
     }
 
     #[inline]

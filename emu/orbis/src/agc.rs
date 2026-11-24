@@ -1371,6 +1371,16 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 if *FRAME_STATS_ON {
                     PERF_GPU_VS_DRAWS.fetch_add(1, Ordering::Relaxed);
                     PERF_GPU_VS_IDXS.fetch_add(n_out as u64, Ordering::Relaxed);
+                    static GVS_DIAG: AtomicU64 = AtomicU64::new(0);
+                    if GVS_DIAG.fetch_add(1, Ordering::Relaxed) < 3 {
+                        eprintln!(
+                            "[orbis] GPU-VS-DIAG vs={vs_addr:#x} idx={n_out} max_ix={max_ix} mk={:x?} vbs={:x?} vp={:?} mubuf_off_str={:?}",
+                            &gpu_data.mubuf_key[..gpu_data.n_mubuf as usize],
+                            &gpu_data.vbs[..gpu_data.n_vbs as usize],
+                            (xs, xo, ys, yo, tw, th, have_vp),
+                            &gpu_data.params[8..8 + (gpu_data.n_mubuf as usize) * 2]
+                        );
+                    }
                 }
                 GEN_STATS[0].fetch_add(1, Ordering::Relaxed);
                 return true;
