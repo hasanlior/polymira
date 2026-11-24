@@ -225,6 +225,24 @@ pub struct VkRenderer {
 
 unsafe impl Send for VkRenderer {}
 
+impl Drop for VkRenderer {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.device.device_wait_idle();
+            if self.swapchain != vk::SwapchainKHR::null() {
+                self.swapchain_loader.destroy_swapchain(self.swapchain, None);
+                self.swapchain = vk::SwapchainKHR::null();
+            }
+            if self.surface != vk::SurfaceKHR::null() {
+                self.surface_loader.destroy_surface(self.surface, None);
+                self.surface = vk::SurfaceKHR::null();
+            }
+            self.device.destroy_device(None);
+            self.instance.destroy_instance(None);
+        }
+    }
+}
+
 static RENDERER: OnceLock<Mutex<Option<VkRenderer>>> = OnceLock::new();
 
 pub fn with_renderer<R>(f: impl FnOnce(&mut VkRenderer) -> R) -> Option<R> {
@@ -2083,10 +2101,17 @@ impl VkRenderer {
                 self.device.free_memory(om, None);
             }
         }
-        // Evict stale chunk VBs if cache grows beyond 2048 buffers.
+        // Evict stale chunk VBs from PREVIOUS frames if cache grows beyond 2048 buffers
+        // (NEVER evict a buffer already bound in the current frame!).
         if self.guest_vb_cache.len() >= 2048 {
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
-            let mut old: Vec<(u64, usize)> = self.guest_vb_cache.iter().map(|(&a, e)| (e.5, a)).collect();
+            let cur_f = self.frame_no;
+            let mut old: Vec<(u64, usize)> = self
+                .guest_vb_cache
+                .iter()
+                .filter(|(_, e)| e.5 < cur_f)
+                .map(|(&a, e)| (e.5, a))
+                .collect();
             old.sort_by_key(|&(f, _)| f);
             for &(_, a) in old.iter().take(256) {
                 if let Some((ob, om, _, _, _, _)) = self.guest_vb_cache.remove(&a) {
@@ -2331,6 +2356,32 @@ impl VkRenderer {
                     return false;
                 }
                 self.rt_last_used.insert(a, seq);
+            }
+
+            // Pre-size and upload all GPU-VS guest VBs to their per-frame maximum needed length
+            // BEFORE building any descriptor sets — prevents destroying a shared chunk VB arena
+            // mid-frame while an earlier draw's `vs_dset` already references it!
+            if !vs_params.is_empty() {
+                let mut vb_max: HashMap<usize, usize> = HashMap::new();
+                for b in batches {
+                    if let Some(g) = b.gen {
+                        if let Some(gd) = gens.get(g as usize) {
+                            if gd.vs_spirv.is_some() {
+                                for &(addr, len) in &gd.vs_vbs {
+                                    if addr >= 0x1_0000_0000 && len > 0 {
+                                        let e = vb_max.entry(addr).or_insert(0);
+                                        if len > *e {
+                                            *e = len;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                for (addr, max_len) in vb_max {
+                    let _ = self.ensure_guest_vb(addr, max_len);
+                }
             }
 
             // Resolve every draw before recording: textures, pipelines, targets.
