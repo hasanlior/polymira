@@ -1901,6 +1901,28 @@ impl VkRenderer {
                 if nz_cnt > 0 {
                     let src = std::slice::from_raw_parts(addr as *const u8, avail);
                     let pixels = crate::tiling::untile_32bpp(src, w, h, 27 | (56 << 8) | (0xFAC << 20));
+                    if w == 2048 && h == 1024 {
+                        if let Ok(dir) = std::env::var("ORBIS_VK_DUMP") {
+                            let bytes = (w as usize) * (h as usize) * 4;
+                            let mut bmp = Vec::with_capacity(54 + bytes);
+                            bmp.extend_from_slice(b"BM");
+                            bmp.extend_from_slice(&((54 + bytes) as u32).to_le_bytes());
+                            bmp.extend_from_slice(&0u32.to_le_bytes());
+                            bmp.extend_from_slice(&54u32.to_le_bytes());
+                            bmp.extend_from_slice(&40u32.to_le_bytes());
+                            bmp.extend_from_slice(&(w as i32).to_le_bytes());
+                            bmp.extend_from_slice(&(-(h as i32)).to_le_bytes());
+                            bmp.extend_from_slice(&1u16.to_le_bytes());
+                            bmp.extend_from_slice(&32u16.to_le_bytes());
+                            bmp.extend_from_slice(&[0u8; 24]);
+                            for &px in &pixels {
+                                let [r, g, b, a] = px.to_le_bytes();
+                                bmp.extend_from_slice(&[b, g, r, a]);
+                            }
+                            let _ = std::fs::create_dir_all(&dir);
+                            let _ = std::fs::write(format!("{dir}/atlas_{w}x{h}.bmp"), bmp);
+                        }
+                    }
                     self.reupload_texture(image, w, h, &pixels);
                     self.rt_layouts.insert(addr, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
                     self.persistent_rts.insert(addr);
@@ -2489,7 +2511,7 @@ impl VkRenderer {
                             slot_vs[k] = (view, sampler);
                         }
                     }
-                    if gd.extra_texs[0].is_some() && gd.vertex_count >= 100 && std::env::var_os("ORBIS_FRAME_STATS").is_some() {
+                    if gd.extra_texs[0].is_some() && (gd.vertex_count >= 100 || gd.index_count >= 100) && std::env::var_os("ORBIS_FRAME_STATS").is_some() {
                         static MT_SEEN: std::sync::LazyLock<Mutex<std::collections::HashSet<usize>>> = std::sync::LazyLock::new(|| Mutex::new(Default::default()));
                         if MT_SEEN.lock().unwrap_or_else(|e| e.into_inner()).insert(gd.key.0) {
                             let mut desc = String::new();

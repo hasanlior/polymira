@@ -905,13 +905,13 @@ fn bound_shader_pair(gpu: &GpuState) -> (usize, usize) {
 /// never thrash VirtualQuery syscalls.
 fn mem_ok(addr: usize, len: usize) -> bool {
     thread_local! {
-        static REGIONS: std::cell::Cell<[(usize, usize); 8]> = const { std::cell::Cell::new([(0, 0); 8]) };
+        static REGIONS: std::cell::RefCell<[(usize, usize); 64]> = const { std::cell::RefCell::new([(0, 0); 64]) };
         static NEXT_SLOT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
     let end = addr.saturating_add(len);
     let hit = REGIONS.with(|r| {
-        let arr = r.get();
-        for &(lo, hi) in &arr {
+        let arr = r.borrow();
+        for &(lo, hi) in arr.iter() {
             if addr >= lo && end <= hi {
                 return true;
             }
@@ -933,14 +933,13 @@ fn mem_ok(addr: usize, len: usize) -> bool {
         }
         let (b, e) = (mbi.BaseAddress as usize, mbi.BaseAddress as usize + mbi.RegionSize);
         REGIONS.with(|r| {
-            let mut arr = r.get();
+            let mut arr = r.borrow_mut();
             let slot = NEXT_SLOT.with(|s| {
                 let i = s.get();
-                s.set((i + 1) & 7);
+                s.set((i + 1) & 63);
                 i
             });
             arr[slot] = (b, e);
-            r.set(arr);
         });
         return end <= e;
     }
@@ -1134,11 +1133,39 @@ fn shader_hash(code: &[u32]) -> u64 {
 }
 
 fn compiled_shader(addr: usize, code: &[u32], hash: u64) -> std::sync::Arc<crate::rdna::interp::CompiledShader> {
-    let mut cache = DECODED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    cache
-        .entry((addr, hash))
-        .or_insert_with(|| std::sync::Arc::new(crate::rdna::interp::CompiledShader::new(code)))
-        .clone()
+    thread_local! {
+        static LAST: std::cell::RefCell<[(usize, u64, Option<std::sync::Arc<crate::rdna::interp::CompiledShader>>); 4]> =
+            const { std::cell::RefCell::new([(0, 0, None), (0, 0, None), (0, 0, None), (0, 0, None)]) };
+        static NEXT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    if let Some(hit) = LAST.with(|c| {
+        let arr = c.borrow();
+        for (a, h, sh) in arr.iter() {
+            if *a == addr && *h == hash {
+                return sh.clone();
+            }
+        }
+        None
+    }) {
+        return hit;
+    }
+    let sh = {
+        let mut cache = DECODED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .entry((addr, hash))
+            .or_insert_with(|| std::sync::Arc::new(crate::rdna::interp::CompiledShader::new(code)))
+            .clone()
+    };
+    LAST.with(|c| {
+        let mut arr = c.borrow_mut();
+        let i = NEXT.with(|n| {
+            let v = n.get();
+            n.set((v + 1) & 3);
+            v
+        });
+        arr[i] = (addr, hash, Some(sh.clone()));
+    });
+    sh
 }
 
 /// (generic draws, VS failures, PS untranslatable, skipped) since start.
@@ -1163,7 +1190,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     };
     let ib_bytes = if gpu.index_32bit { idx_cnt * 4 } else { idx_cnt * 2 };
     let ib = (gpu.index_base as usize).saturating_add(if gpu.index_32bit { idx_off * 4 } else { idx_off * 2 });
-    if idx_cnt < 3 || !is_committed(ib, ib_bytes) || gpu.frame_gverts.len() >= 2_000_000 {
+    if idx_cnt < 3 || !mem_ok(ib, ib_bytes) || gpu.frame_gverts.len() >= 2_000_000 {
         return false;
     }
     // Pixel shader translation (cached per address, input layout and code hash).
@@ -1328,9 +1355,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 if gpu.index_32bit {
                     gpu.frame_gidxs.extend_from_slice(unsafe { std::slice::from_raw_parts(ib as *const u32, n_out) });
                 } else {
-                    for &ix16 in unsafe { std::slice::from_raw_parts(ib as *const u16, n_out) } {
-                        gpu.frame_gidxs.push(ix16 as u32);
-                    }
+                    gpu.frame_gidxs.extend(unsafe { std::slice::from_raw_parts(ib as *const u16, n_out) }.iter().map(|&ix16| ix16 as u32));
                 }
                 let blend = gpu.cx.get(&0x1E0).copied().unwrap_or(0);
                 let dctl = gpu.cx.get(&0x200).copied().unwrap_or(0);

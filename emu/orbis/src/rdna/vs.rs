@@ -81,7 +81,8 @@ pub fn extract_gpu_vs_draw(
     let mut n_mubuf = 0usize;
     let mut vbs: [(usize, usize); MAX_VBS] = [(0, 0); MAX_VBS];
     let mut n_vbs = 0usize;
-    let mut params = vec![0u32; SLOT_BASE as usize];
+    let mut params = Vec::with_capacity(SLOT_BASE as usize + 64);
+    params.resize(SLOT_BASE as usize, 0);
     params[0..8].copy_from_slice(&vp);
 
     for inst in &sh.insts {
