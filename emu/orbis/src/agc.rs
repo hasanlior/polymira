@@ -1249,66 +1249,83 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             remap.push(u);
         }
     }
-    // Run uniform scalar prefix of VS once per draw (hoists all CB/V# s_load instructions).
-    let mut prefix_lane = crate::rdna::interp::Lane::new();
-    prefix_lane.s[3] = 0x101;
-    prefix_lane.s[8..32].copy_from_slice(&vs_ud);
-    if vs_sh.scalar_prefix_len > 0
-        && crate::rdna::interp::run_compiled_prefix(&vs_sh, &mut prefix_lane, mem_ok).is_err()
-    {
-        GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
-        return false;
-    }
-    let base_s = prefix_lane.s;
-    let base_scc = prefix_lane.scc;
-    let start_pc = vs_sh.scalar_prefix_len;
     let mut verts = vec![crate::vk::GVertex::default(); unique.len()];
     let verts_ptr = verts.as_mut_ptr() as usize;
     let failed = std::sync::atomic::AtomicBool::new(false);
     let t_vs = (*FRAME_STATS_ON).then(std::time::Instant::now);
-    vs_parallel_for(unique.len(), |start, end| {
-        if failed.load(Ordering::Relaxed) {
-            return;
-        }
-        thread_local! {
-            static TL_LANE: std::cell::RefCell<crate::rdna::interp::Lane> = std::cell::RefCell::new(crate::rdna::interp::Lane::new());
-        }
-        TL_LANE.with(|cell| {
-            let mut lane = cell.borrow_mut();
+    let hoisted = crate::rdna::interp::hoist_vs_draw(&vs_sh, &vs_ud, max_ix, mem_ok);
+    if let Some(plan) = hoisted.as_ref() {
+        vs_parallel_for(unique.len(), |start, end| {
+            if failed.load(Ordering::Relaxed) {
+                return;
+            }
             let out_slice = unsafe { std::slice::from_raw_parts_mut((verts_ptr as *mut crate::vk::GVertex).add(start), end - start) };
             for (&ix, dst) in unique[start..end].iter().zip(out_slice.iter_mut()) {
-                lane.s = base_s;
-                lane.scc = base_scc;
-                lane.v.fill(0);
-                lane.exports.clear();
-                lane.v[5] = ix;
-                lane.v[8] = 0;
-                if crate::rdna::interp::run_compiled_from(&vs_sh, start_pc, &mut lane, mem_ok).is_err() {
-                    failed.store(true, Ordering::Relaxed);
-                    return;
-                }
-                let mut pos = None;
-                let mut attr = [[0f32; 4]; 8];
-                for e in &lane.exports {
-                    if e.target == 12 {
-                        pos = Some(e.value);
-                    } else if (32..96).contains(&e.target) {
-                        let p = e.target - 32;
-                        for n in 0..8 {
-                            if cntl[n] == p {
-                                attr[n] = e.value;
-                            }
-                        }
-                    }
-                }
-                let Some(p) = pos else {
+                let Some((p, attr)) = crate::rdna::interp::eval_vs_hoisted(plan, ix, &cntl) else {
                     failed.store(true, Ordering::Relaxed);
                     return;
                 };
                 *dst = crate::vk::GVertex { pos: to_target(p), attr };
             }
         });
-    });
+    } else {
+        // Fallback: scalar prefix + general interpreter.
+        let mut prefix_lane = crate::rdna::interp::Lane::new();
+        prefix_lane.s[3] = 0x101;
+        prefix_lane.s[8..32].copy_from_slice(&vs_ud);
+        if vs_sh.scalar_prefix_len > 0
+            && crate::rdna::interp::run_compiled_prefix(&vs_sh, &mut prefix_lane, mem_ok).is_err()
+        {
+            GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        let base_s = prefix_lane.s;
+        let base_scc = prefix_lane.scc;
+        let start_pc = vs_sh.scalar_prefix_len;
+        vs_parallel_for(unique.len(), |start, end| {
+            if failed.load(Ordering::Relaxed) {
+                return;
+            }
+            thread_local! {
+                static TL_LANE: std::cell::RefCell<crate::rdna::interp::Lane> = std::cell::RefCell::new(crate::rdna::interp::Lane::new());
+            }
+            TL_LANE.with(|cell| {
+                let mut lane = cell.borrow_mut();
+                let out_slice = unsafe { std::slice::from_raw_parts_mut((verts_ptr as *mut crate::vk::GVertex).add(start), end - start) };
+                for (&ix, dst) in unique[start..end].iter().zip(out_slice.iter_mut()) {
+                    lane.s = base_s;
+                    lane.scc = base_scc;
+                    lane.v.fill(0);
+                    lane.exports.clear();
+                    lane.v[5] = ix;
+                    lane.v[8] = 0;
+                    if crate::rdna::interp::run_compiled_from(&vs_sh, start_pc, &mut lane, mem_ok).is_err() {
+                        failed.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    let mut pos = None;
+                    let mut attr = [[0f32; 4]; 8];
+                    for e in &lane.exports {
+                        if e.target == 12 {
+                            pos = Some(e.value);
+                        } else if (32..96).contains(&e.target) {
+                            let p = e.target - 32;
+                            for n in 0..8 {
+                                if cntl[n] == p {
+                                    attr[n] = e.value;
+                                }
+                            }
+                        }
+                    }
+                    let Some(p) = pos else {
+                        failed.store(true, Ordering::Relaxed);
+                        return;
+                    };
+                    *dst = crate::vk::GVertex { pos: to_target(p), attr };
+                }
+            });
+        });
+    }
     if let Some(t) = t_vs {
         let dt = t.elapsed().as_nanos() as u64;
         PERF_VS_NS.fetch_add(dt, Ordering::Relaxed);
@@ -1317,6 +1334,12 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         e.0 += 1;
         e.1 += unique.len() as u64;
         e.3 += dt;
+        if unique.len() >= 1000 && hoisted.is_none() {
+            static MISS_VS: LazyLock<Mutex<std::collections::HashSet<usize>>> = LazyLock::new(|| Mutex::new(Default::default()));
+            if MISS_VS.lock().unwrap_or_else(|e| e.into_inner()).insert(vs_addr) {
+                eprintln!("[orbis] VS-HOIST-MISS {vs_addr:#x}: can_hoist={} insts={} unique={}", vs_sh.can_hoist_scalar, vs_sh.insts.len(), unique.len());
+            }
+        }
     }
     if failed.load(Ordering::Relaxed) {
         GEN_STATS[1].fetch_add(1, Ordering::Relaxed);

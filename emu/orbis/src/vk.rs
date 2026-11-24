@@ -1998,6 +1998,28 @@ impl VkRenderer {
                             slot_vs[k] = (view, sampler);
                         }
                     }
+                    if gd.extra_texs[0].is_some() && gd.vertex_count >= 100 && std::env::var_os("ORBIS_FRAME_STATS").is_some() {
+                        static MT_SEEN: std::sync::LazyLock<Mutex<std::collections::HashSet<usize>>> = std::sync::LazyLock::new(|| Mutex::new(Default::default()));
+                        if MT_SEEN.lock().unwrap_or_else(|e| e.into_inner()).insert(gd.key.0) {
+                            let mut desc = String::new();
+                            for k in 0..4 {
+                                if let Some((a, w, h, sw)) = tex_list[k] {
+                                    let is_rt = self.targets.contains_key(&a);
+                                    let fmt = (sw >> 8) & 0x1FF;
+                                    let swm = sw & 0x1F;
+                                    let dsel = (sw >> 20) & 0xFFF;
+                                    let sample_u32 = if !is_rt && Self::readable_bytes(a, 64) >= 64 {
+                                        let p = a as *const u32;
+                                        (0..16).map(|i| p.add(i).read_unaligned()).find(|&x| x != 0).unwrap_or(0)
+                                    } else {
+                                        0
+                                    };
+                                    desc += &format!(" t{k}=({a:#x} {w}x{h} fmt={fmt} sw={swm} sel={dsel:#x} rt={is_rt} px={sample_u32:#x})");
+                                }
+                            }
+                            eprintln!("[orbis] MULTITEX ps={:#x} verts={}:{desc}", gd.key.0, gd.vertex_count);
+                        }
+                    }
                     let ds = self.gen_dset_for(slot_vs).unwrap_or(self.desc_set);
                     let [x, y, w, h] = gd.scissor;
                     let scissor = vk::Rect2D { offset: vk::Offset2D { x, y }, extent: vk::Extent2D { width: w.max(0) as u32, height: h.max(0) as u32 } };

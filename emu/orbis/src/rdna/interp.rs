@@ -208,6 +208,9 @@ pub struct CompiledShader {
     /// Leading contiguous pure-scalar (VGPR-independent, branch-free) instructions that can be
     /// evaluated once per draw and shared across all vertices.
     pub scalar_prefix_len: usize,
+    /// True when the entire shader is branch-free and has no vector->scalar writes (no Vopc,
+    /// no readlane), so ALL scalar/SMEM instructions can be hoisted once per draw via `VsDrawPlan`.
+    pub can_hoist_scalar: bool,
 }
 
 impl CompiledShader {
@@ -258,7 +261,35 @@ impl CompiledShader {
             }
             scalar_prefix_len += 1;
         }
-        Self { insts, pc_to_idx, slots, slot_lens, end_pc, scalar_prefix_len }
+        let mut has_exp = false;
+        let can_hoist_scalar = insts.iter().all(|inst| {
+            match inst.fmt {
+                Fmt::Sopp => !matches!(
+                    inst.name,
+                    "s_branch"
+                        | "s_cbranch_scc0"
+                        | "s_cbranch_scc1"
+                        | "s_cbranch_vccz"
+                        | "s_cbranch_vccnz"
+                        | "s_cbranch_execz"
+                        | "s_cbranch_execnz"
+                ),
+                Fmt::Vopc | Fmt::Ds | Fmt::Mimg | Fmt::Flat | Fmt::Global | Fmt::Scratch | Fmt::Vintrp | Fmt::Vop3p => false,
+                Fmt::Vop1 | Fmt::Vop2 | Fmt::Vop3 => {
+                    !inst.name.starts_with("v_cmp")
+                        && !inst.name.starts_with("v_readfirstlane")
+                        && !inst.name.starts_with("v_readlane")
+                        && inst.ext != Ext::Dpp16
+                        && inst.ext != Ext::Dpp8
+                }
+                Fmt::Exp => {
+                    has_exp = true;
+                    true
+                }
+                _ => true,
+            }
+        }) && has_exp;
+        Self { insts, pc_to_idx, slots, slot_lens, end_pc, scalar_prefix_len, can_hoist_scalar }
     }
 
     #[inline]
@@ -1157,4 +1188,437 @@ fn image_op(inst: &Inst, l: &mut Lane, ok: MemCheck) -> Result<(), Error> {
     } else {
         Err(Error::Unsupported(n, inst.pc))
     }
+}
+
+// ── Scalar-hoisted pre-decoded VS fast path ─────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+pub enum VsSrc {
+    V(u8),
+    C(u32),
+}
+
+impl VsSrc {
+    #[inline(always)]
+    fn get(self, v: &[u32; 256]) -> u32 {
+        match self {
+            VsSrc::V(r) => v[r as usize],
+            VsSrc::C(c) => c,
+        }
+    }
+    #[inline(always)]
+    fn get_f(self, v: &[u32; 256]) -> f32 {
+        f32::from_bits(self.get(v))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum VsFastOp {
+    Mov { dst: u8, a: VsSrc },
+    AddF32 { dst: u8, a: VsSrc, b: VsSrc },
+    SubF32 { dst: u8, a: VsSrc, b: VsSrc },
+    SubRevF32 { dst: u8, a: VsSrc, b: VsSrc },
+    MulF32 { dst: u8, a: VsSrc, b: VsSrc },
+    MacF32 { dst: u8, a: VsSrc, b: VsSrc },
+    MadF32 { dst: u8, a: VsSrc, b: VsSrc, c: VsSrc },
+    FmaF32 { dst: u8, a: VsSrc, b: VsSrc, c: VsSrc },
+    MadF32Mod { dst: u8, a: VsSrc, b: VsSrc, c: VsSrc, abs: u8, neg: u8, omod: u8, clamp: bool },
+    VopF32Mod { op: u8, dst: u8, a: VsSrc, b: VsSrc, abs: u8, neg: u8, omod: u8, clamp: bool },
+    MaxF32 { dst: u8, a: VsSrc, b: VsSrc },
+    MinF32 { dst: u8, a: VsSrc, b: VsSrc },
+    RcpF32 { dst: u8, a: VsSrc },
+    RsqF32 { dst: u8, a: VsSrc },
+    SqrtF32 { dst: u8, a: VsSrc },
+    FloorF32 { dst: u8, a: VsSrc },
+    FractF32 { dst: u8, a: VsSrc },
+    CvtF32U32 { dst: u8, a: VsSrc },
+    CvtF32I32 { dst: u8, a: VsSrc },
+    CvtU32F32 { dst: u8, a: VsSrc },
+    CvtI32F32 { dst: u8, a: VsSrc },
+    AndB32 { dst: u8, a: VsSrc, b: VsSrc },
+    OrB32 { dst: u8, a: VsSrc, b: VsSrc },
+    XorB32 { dst: u8, a: VsSrc, b: VsSrc },
+    LshlRevB32 { dst: u8, a: VsSrc, b: VsSrc },
+    LshrRevB32 { dst: u8, a: VsSrc, b: VsSrc },
+    AddU32 { dst: u8, a: VsSrc, b: VsSrc },
+    SubU32 { dst: u8, a: VsSrc, b: VsSrc },
+    MulLoU32 { dst: u8, a: VsSrc, b: VsSrc },
+    BfeU32 { dst: u8, a: VsSrc, b: VsSrc, c: VsSrc },
+    SdwaF32 { op: u8, dst: u8, a: VsSrc, b: VsSrc, s: u32 },
+    BufLoadFmt { base: u64, stride: u64, fmt: u32, vaddr: u8, vdata: u8, comps: u8 },
+    BufLoadDw { base: u64, stride: u64, vaddr: u8, vdata: u8, cnt: u8 },
+    Exp { target: u8, compr: bool, regs: [u8; 4] },
+}
+
+pub struct VsDrawPlan {
+    pub ops: Vec<VsFastOp>,
+    pub max_vgpr: usize,
+}
+
+#[inline(always)]
+fn apply_fmod(mut v: f32, abs: bool, neg: bool) -> f32 {
+    if abs {
+        v = v.abs();
+    }
+    if neg {
+        v = -v;
+    }
+    v
+}
+
+#[inline(always)]
+fn apply_omod_clamp(mut v: f32, omod: u8, clamp: bool) -> f32 {
+    match omod {
+        1 => v *= 2.0,
+        2 => v *= 4.0,
+        3 => v *= 0.5,
+        _ => {}
+    }
+    if clamp {
+        v = v.clamp(0.0, 1.0);
+    }
+    v
+}
+
+#[inline(always)]
+fn always_ok(_: usize, _: usize) -> bool {
+    true
+}
+
+/// Evaluates all scalar/SMEM instructions of a branch-free VS once per draw, folding scalar
+/// operands into constants and pre-validating vertex buffer ranges.
+pub fn hoist_vs_draw(sh: &CompiledShader, vs_ud: &[u32; 24], max_ix: u32, ok: MemCheck) -> Option<VsDrawPlan> {
+    if !sh.can_hoist_scalar {
+        return None;
+    }
+    let mut lane = Lane::new();
+    lane.s[3] = 0x101;
+    lane.s[8..32].copy_from_slice(vs_ud);
+    let mut ops = Vec::with_capacity(sh.insts.len() / 2);
+    let mut max_vgpr = 9usize; // v[5], v[8]
+
+    let resolve = |code: u16, lit: Option<u32>, l: &Lane| -> VsSrc {
+        if code >= 256 && code <= 511 {
+            VsSrc::V((code - 256) as u8)
+        } else {
+            VsSrc::C(l.src(code, lit))
+        }
+    };
+
+    for inst in &sh.insts {
+        let w0 = inst.w0();
+        let w1 = inst.w1();
+        let lit = inst.literal;
+        match inst.fmt {
+            Fmt::Sop1 | Fmt::Sop2 | Fmt::Sopc | Fmt::Sopk | Fmt::Smem => {
+                step(inst, &mut lane, ok).ok()?;
+            }
+            Fmt::Sopp => {
+                if inst.name == "s_endpgm" {
+                    break;
+                }
+            }
+            Fmt::Exp => {
+                let target = ((w0 >> 4) & 0x3F) as u8;
+                if target == 20 || !lane.exec_on() {
+                    continue;
+                }
+                let compr = w0 & (1 << 10) != 0;
+                let regs = [(w1 & 0xFF) as u8, ((w1 >> 8) & 0xFF) as u8, ((w1 >> 16) & 0xFF) as u8, ((w1 >> 24) & 0xFF) as u8];
+                ops.push(VsFastOp::Exp { target, compr, regs });
+            }
+            Fmt::Mubuf | Fmt::Mtbuf => {
+                if !lane.exec_on() {
+                    continue;
+                }
+                let inst_off = (w0 & 0xFFF) as u64;
+                let offen = w0 & (1 << 12) != 0;
+                let idxen = w0 & (1 << 13) != 0;
+                if !idxen || offen {
+                    return None;
+                }
+                let vaddr = (w1 & 0xFF) as u8;
+                let vdata = ((w1 >> 8) & 0xFF) as u8;
+                let srsrc = (((w1 >> 16) & 0x1F) * 4) as usize;
+                let soff = lane.src(((w1 >> 24) & 0xFF) as u16, None) as u64;
+                let (base, stride, vfmt) = vsharp(&lane, srsrc);
+                let base_addr = base.wrapping_add(soff).wrapping_add(inst_off);
+                let fmt = if inst.fmt == Fmt::Mtbuf { (w0 >> 19) & 0x7F } else { vfmt };
+                let need = (max_ix as usize + 1).saturating_mul(stride as usize).saturating_add(16);
+                if !ok(base_addr as usize, need) {
+                    return None;
+                }
+                let n = inst.name;
+                if n.contains("load_format") {
+                    let comps = if n.contains("xyzw") { 4 } else if n.contains("xyz") { 3 } else if n.contains("xy") { 2 } else { 1 };
+                    max_vgpr = max_vgpr.max(vdata as usize + comps as usize);
+                    ops.push(VsFastOp::BufLoadFmt { base: base_addr, stride, fmt, vaddr, vdata, comps });
+                } else if n.starts_with("buffer_load_dword") {
+                    let cnt = if n.ends_with("x4") { 4 } else if n.ends_with("x3") { 3 } else if n.ends_with("x2") { 2 } else { 1 };
+                    max_vgpr = max_vgpr.max(vdata as usize + cnt as usize);
+                    ops.push(VsFastOp::BufLoadDw { base: base_addr, stride, vaddr, vdata, cnt });
+                } else {
+                    return None;
+                }
+            }
+            Fmt::Vop1 | Fmt::Vop2 | Fmt::Vop3 => {
+                if !lane.exec_on() {
+                    continue;
+                }
+                let n = inst.name.trim_end_matches("_e32").trim_end_matches("_e64").trim_end_matches("_sdwa");
+                if inst.ext == Ext::Sdwa {
+                    let s = inst.words[1];
+                    let dst = ((w0 >> 17) & 0xFF) as u8;
+                    max_vgpr = max_vgpr.max(dst as usize + 1);
+                    let src0 = s & 0xFF;
+                    let a = if s & (1 << 23) != 0 { VsSrc::C(lane.src(src0 as u16, None)) } else { VsSrc::V(src0 as u8) };
+                    let src1 = (w0 >> 9) & 0xFF;
+                    let b = if inst.fmt == Fmt::Vop1 {
+                        VsSrc::C(0)
+                    } else if s & (1 << 31) != 0 {
+                        VsSrc::C(lane.src(src1 as u16, None))
+                    } else {
+                        VsSrc::V(src1 as u8)
+                    };
+                    let op = match n {
+                        "v_add_f32" => 0,
+                        "v_sub_f32" => 1,
+                        "v_subrev_f32" => 2,
+                        "v_mul_f32" => 3,
+                        "v_max_f32" => 4,
+                        "v_min_f32" => 5,
+                        "v_mov_b32" => 6,
+                        _ => return None,
+                    };
+                    ops.push(VsFastOp::SdwaF32 { op, dst, a, b, s });
+                    continue;
+                }
+                let (a, b, c, dst, vop3) = match inst.fmt {
+                    Fmt::Vop1 => (resolve((w0 & 0x1FF) as u16, lit, &lane), VsSrc::C(0), VsSrc::C(0), ((w0 >> 17) & 0xFF) as u8, false),
+                    Fmt::Vop2 => {
+                        let v1 = VsSrc::V(((w0 >> 9) & 0xFF) as u8);
+                        let d = ((w0 >> 17) & 0xFF) as u8;
+                        let s0 = resolve((w0 & 0x1FF) as u16, lit, &lane);
+                        match n {
+                            "v_madmk_f32" | "v_fmamk_f32" => (s0, VsSrc::C(lit.unwrap_or(0)), v1, d, false),
+                            "v_madak_f32" | "v_fmaak_f32" => (s0, v1, VsSrc::C(lit.unwrap_or(0)), d, false),
+                            _ => (s0, v1, VsSrc::V(d), d, false),
+                        }
+                    }
+                    _ => (
+                        resolve((w1 & 0x1FF) as u16, lit, &lane),
+                        resolve(((w1 >> 9) & 0x1FF) as u16, lit, &lane),
+                        resolve(((w1 >> 18) & 0x1FF) as u16, lit, &lane),
+                        (w0 & 0xFF) as u8,
+                        true,
+                    ),
+                };
+                max_vgpr = max_vgpr.max(dst as usize + 1);
+                let (abs, neg, omod, clamp) = if vop3 {
+                    (((w0 >> 8) & 7) as u8, ((w1 >> 29) & 7) as u8, ((w1 >> 27) & 3) as u8, w0 & (1 << 15) != 0)
+                } else {
+                    (0, 0, 0, false)
+                };
+                let has_mod = abs != 0 || neg != 0 || omod != 0 || clamp;
+                let op = match n {
+                    "v_cndmask_b32" => {
+                        let mask_bit = if vop3 {
+                            let s2 = ((w1 >> 18) & 0x1FF) as usize;
+                            if s2 < 128 { lane.s[s2] & 1 != 0 } else { return None }
+                        } else {
+                            lane.s[VCC] & 1 != 0
+                        };
+                        let chosen = if mask_bit { b } else { a };
+                        if has_mod {
+                            let m_idx = if mask_bit { 1 } else { 0 };
+                            VsFastOp::VopF32Mod { op: 6, dst, a: chosen, b: VsSrc::C(0), abs: (abs >> m_idx) & 1, neg: (neg >> m_idx) & 1, omod, clamp }
+                        } else {
+                            VsFastOp::Mov { dst, a: chosen }
+                        }
+                    }
+                    "v_mov_b32" if !has_mod => VsFastOp::Mov { dst, a },
+                    "v_add_f32" if !has_mod => VsFastOp::AddF32 { dst, a, b },
+                    "v_sub_f32" if !has_mod => VsFastOp::SubF32 { dst, a, b },
+                    "v_subrev_f32" if !has_mod => VsFastOp::SubRevF32 { dst, a, b },
+                    "v_mul_f32" | "v_mul_legacy_f32" if !has_mod => VsFastOp::MulF32 { dst, a, b },
+                    "v_mac_f32" | "v_fmac_f32" if !has_mod => VsFastOp::MacF32 { dst, a, b },
+                    "v_mad_f32" | "v_madmk_f32" | "v_madak_f32" if !has_mod => VsFastOp::MadF32 { dst, a, b, c },
+                    "v_fma_f32" | "v_fmamk_f32" | "v_fmaak_f32" if !has_mod => VsFastOp::FmaF32 { dst, a, b, c },
+                    "v_mad_f32" | "v_fma_f32" => VsFastOp::MadF32Mod { dst, a, b, c, abs, neg, omod, clamp },
+                    "v_add_f32" => VsFastOp::VopF32Mod { op: 0, dst, a, b, abs, neg, omod, clamp },
+                    "v_sub_f32" => VsFastOp::VopF32Mod { op: 1, dst, a, b, abs, neg, omod, clamp },
+                    "v_subrev_f32" => VsFastOp::VopF32Mod { op: 2, dst, a, b, abs, neg, omod, clamp },
+                    "v_mul_f32" | "v_mul_legacy_f32" => VsFastOp::VopF32Mod { op: 3, dst, a, b, abs, neg, omod, clamp },
+                    "v_max_f32" if !has_mod => VsFastOp::MaxF32 { dst, a, b },
+                    "v_min_f32" if !has_mod => VsFastOp::MinF32 { dst, a, b },
+                    "v_max_f32" => VsFastOp::VopF32Mod { op: 4, dst, a, b, abs, neg, omod, clamp },
+                    "v_min_f32" => VsFastOp::VopF32Mod { op: 5, dst, a, b, abs, neg, omod, clamp },
+                    "v_rcp_f32" if !has_mod => VsFastOp::RcpF32 { dst, a },
+                    "v_rsq_f32" if !has_mod => VsFastOp::RsqF32 { dst, a },
+                    "v_sqrt_f32" if !has_mod => VsFastOp::SqrtF32 { dst, a },
+                    "v_floor_f32" if !has_mod => VsFastOp::FloorF32 { dst, a },
+                    "v_fract_f32" if !has_mod => VsFastOp::FractF32 { dst, a },
+                    "v_cvt_f32_u32" if !has_mod => VsFastOp::CvtF32U32 { dst, a },
+                    "v_cvt_f32_i32" if !has_mod => VsFastOp::CvtF32I32 { dst, a },
+                    "v_cvt_u32_f32" if !has_mod => VsFastOp::CvtU32F32 { dst, a },
+                    "v_cvt_i32_f32" if !has_mod => VsFastOp::CvtI32F32 { dst, a },
+                    "v_and_b32" if !has_mod => VsFastOp::AndB32 { dst, a, b },
+                    "v_or_b32" if !has_mod => VsFastOp::OrB32 { dst, a, b },
+                    "v_xor_b32" if !has_mod => VsFastOp::XorB32 { dst, a, b },
+                    "v_lshlrev_b32" if !has_mod => VsFastOp::LshlRevB32 { dst, a, b },
+                    "v_lshrrev_b32" if !has_mod => VsFastOp::LshrRevB32 { dst, a, b },
+                    "v_add_nc_u32" | "v_add_u32" if !has_mod => VsFastOp::AddU32 { dst, a, b },
+                    "v_sub_nc_u32" | "v_sub_u32" if !has_mod => VsFastOp::SubU32 { dst, a, b },
+                    "v_mul_lo_u32" if !has_mod => VsFastOp::MulLoU32 { dst, a, b },
+                    "v_bfe_u32" if !has_mod => VsFastOp::BfeU32 { dst, a, b, c },
+                    _ => return None,
+                };
+                ops.push(op);
+            }
+            _ => return None,
+        }
+    }
+    Some(VsDrawPlan { ops, max_vgpr: max_vgpr.min(256) })
+}
+
+/// Evaluates one vertex using a scalar-hoisted `VsDrawPlan` (zero SMEM, zero VirtualQuery,
+/// zero string matching).
+pub fn eval_vs_hoisted(plan: &VsDrawPlan, ix: u32, cntl: &[u32; 8]) -> Option<([f32; 4], [[f32; 4]; 8])> {
+    let mut v = [0u32; 256];
+    v[5] = ix;
+    let mut pos = None;
+    let mut attr = [[0f32; 4]; 8];
+    for &op in &plan.ops {
+        match op {
+            VsFastOp::Mov { dst, a } => v[dst as usize] = a.get(&v),
+            VsFastOp::AddF32 { dst, a, b } => v[dst as usize] = (a.get_f(&v) + b.get_f(&v)).to_bits(),
+            VsFastOp::SubF32 { dst, a, b } => v[dst as usize] = (a.get_f(&v) - b.get_f(&v)).to_bits(),
+            VsFastOp::SubRevF32 { dst, a, b } => v[dst as usize] = (b.get_f(&v) - a.get_f(&v)).to_bits(),
+            VsFastOp::MulF32 { dst, a, b } => v[dst as usize] = (a.get_f(&v) * b.get_f(&v)).to_bits(),
+            VsFastOp::MacF32 { dst, a, b } => {
+                let d = f32::from_bits(v[dst as usize]);
+                v[dst as usize] = (a.get_f(&v) * b.get_f(&v) + d).to_bits();
+            }
+            VsFastOp::MadF32 { dst, a, b, c } => v[dst as usize] = (a.get_f(&v) * b.get_f(&v) + c.get_f(&v)).to_bits(),
+            VsFastOp::FmaF32 { dst, a, b, c } => v[dst as usize] = a.get_f(&v).mul_add(b.get_f(&v), c.get_f(&v)).to_bits(),
+            VsFastOp::MadF32Mod { dst, a, b, c, abs, neg, omod, clamp } => {
+                let fa = apply_fmod(a.get_f(&v), abs & 1 != 0, neg & 1 != 0);
+                let fb = apply_fmod(b.get_f(&v), abs & 2 != 0, neg & 2 != 0);
+                let fc = apply_fmod(c.get_f(&v), abs & 4 != 0, neg & 4 != 0);
+                v[dst as usize] = apply_omod_clamp(fa * fb + fc, omod, clamp).to_bits();
+            }
+            VsFastOp::VopF32Mod { op, dst, a, b, abs, neg, omod, clamp } => {
+                let fa = apply_fmod(a.get_f(&v), abs & 1 != 0, neg & 1 != 0);
+                let fb = apply_fmod(b.get_f(&v), abs & 2 != 0, neg & 2 != 0);
+                let r = match op {
+                    0 => fa + fb,
+                    1 => fa - fb,
+                    2 => fb - fa,
+                    3 => fa * fb,
+                    4 => fa.max(fb),
+                    5 => fa.min(fb),
+                    _ => fa,
+                };
+                v[dst as usize] = apply_omod_clamp(r, omod, clamp).to_bits();
+            }
+            VsFastOp::MaxF32 { dst, a, b } => v[dst as usize] = a.get_f(&v).max(b.get_f(&v)).to_bits(),
+            VsFastOp::MinF32 { dst, a, b } => v[dst as usize] = a.get_f(&v).min(b.get_f(&v)).to_bits(),
+            VsFastOp::RcpF32 { dst, a } => v[dst as usize] = (1.0f32 / a.get_f(&v)).to_bits(),
+            VsFastOp::RsqF32 { dst, a } => v[dst as usize] = (1.0f32 / a.get_f(&v).sqrt()).to_bits(),
+            VsFastOp::SqrtF32 { dst, a } => v[dst as usize] = a.get_f(&v).sqrt().to_bits(),
+            VsFastOp::FloorF32 { dst, a } => v[dst as usize] = a.get_f(&v).floor().to_bits(),
+            VsFastOp::FractF32 { dst, a } => {
+                let x = a.get_f(&v);
+                v[dst as usize] = (x - x.floor()).to_bits();
+            }
+            VsFastOp::CvtF32U32 { dst, a } => v[dst as usize] = (a.get(&v) as f32).to_bits(),
+            VsFastOp::CvtF32I32 { dst, a } => v[dst as usize] = (a.get(&v) as i32 as f32).to_bits(),
+            VsFastOp::CvtU32F32 { dst, a } => v[dst as usize] = a.get_f(&v).clamp(0.0, u32::MAX as f32) as u32,
+            VsFastOp::CvtI32F32 { dst, a } => v[dst as usize] = a.get_f(&v).clamp(i32::MIN as f32, i32::MAX as f32) as i32 as u32,
+            VsFastOp::AndB32 { dst, a, b } => v[dst as usize] = a.get(&v) & b.get(&v),
+            VsFastOp::OrB32 { dst, a, b } => v[dst as usize] = a.get(&v) | b.get(&v),
+            VsFastOp::XorB32 { dst, a, b } => v[dst as usize] = a.get(&v) ^ b.get(&v),
+            VsFastOp::LshlRevB32 { dst, a, b } => v[dst as usize] = b.get(&v) << (a.get(&v) & 31),
+            VsFastOp::LshrRevB32 { dst, a, b } => v[dst as usize] = b.get(&v) >> (a.get(&v) & 31),
+            VsFastOp::AddU32 { dst, a, b } => v[dst as usize] = a.get(&v).wrapping_add(b.get(&v)),
+            VsFastOp::SubU32 { dst, a, b } => v[dst as usize] = a.get(&v).wrapping_sub(b.get(&v)),
+            VsFastOp::MulLoU32 { dst, a, b } => v[dst as usize] = a.get(&v).wrapping_mul(b.get(&v)),
+            VsFastOp::BfeU32 { dst, a, b, c } => v[dst as usize] = bfe(a.get(&v) as u64, b.get(&v) & 31, c.get(&v) & 31) as u32,
+            VsFastOp::SdwaF32 { op, dst, a, b, s } => {
+                let mut ra = sdwa_sel(a.get(&v), (s >> 16) & 7, s & (1 << 19) != 0);
+                if s & (1 << 21) != 0 { ra &= 0x7FFF_FFFF; }
+                if s & (1 << 20) != 0 { ra ^= 0x8000_0000; }
+                let mut rb = sdwa_sel(b.get(&v), (s >> 24) & 7, s & (1 << 27) != 0);
+                if s & (1 << 29) != 0 { rb &= 0x7FFF_FFFF; }
+                if s & (1 << 28) != 0 { rb ^= 0x8000_0000; }
+                let (fa, fb) = (f32::from_bits(ra), f32::from_bits(rb));
+                let r = match op {
+                    0 => fa + fb,
+                    1 => fa - fb,
+                    2 => fb - fa,
+                    3 => fa * fb,
+                    4 => fa.max(fb),
+                    5 => fa.min(fb),
+                    _ => fa,
+                };
+                let mut bits = apply_omod_clamp(r, ((s >> 14) & 3) as u8, s & (1 << 13) != 0).to_bits();
+                let dsel = (s >> 8) & 7;
+                let unused = (s >> 11) & 3;
+                let old = v[dst as usize];
+                bits = match dsel {
+                    0..=3 => {
+                        let sh = dsel * 8;
+                        let keep = if unused == 2 { old & !(0xFF << sh) } else { 0 };
+                        keep | ((bits & 0xFF) << sh)
+                    }
+                    4 | 5 => {
+                        let sh = (dsel - 4) * 16;
+                        let keep = if unused == 2 { old & !(0xFFFF << sh) } else { 0 };
+                        keep | ((bits & 0xFFFF) << sh)
+                    }
+                    _ => bits,
+                };
+                v[dst as usize] = bits;
+            }
+            VsFastOp::BufLoadFmt { base, stride, fmt, vaddr, vdata, comps } => {
+                let addr = base.wrapping_add((v[vaddr as usize] as u64).wrapping_mul(stride));
+                let c = load_format(addr, fmt, always_ok).ok()?;
+                for k in 0..comps as usize {
+                    v[vdata as usize + k] = c[k];
+                }
+            }
+            VsFastOp::BufLoadDw { base, stride, vaddr, vdata, cnt } => {
+                let addr = base.wrapping_add((v[vaddr as usize] as u64).wrapping_mul(stride));
+                for k in 0..cnt as usize {
+                    v[vdata as usize + k] = unsafe { ((addr + k as u64 * 4) as *const u32).read_unaligned() };
+                }
+            }
+            VsFastOp::Exp { target, compr, regs } => {
+                let value = if compr {
+                    let lo = v[regs[0] as usize];
+                    let hi = v[if regs[1] == regs[0] { regs[2] } else { regs[1] } as usize];
+                    let h = |x: u32| half::f16::from_bits(x as u16).to_f32();
+                    [h(lo), h(lo >> 16), h(hi), h(hi >> 16)]
+                } else {
+                    [
+                        f32::from_bits(v[regs[0] as usize]),
+                        f32::from_bits(v[regs[1] as usize]),
+                        f32::from_bits(v[regs[2] as usize]),
+                        f32::from_bits(v[regs[3] as usize]),
+                    ]
+                };
+                if target == 12 {
+                    pos = Some(value);
+                } else if (32..96).contains(&target) {
+                    let p = (target - 32) as u32;
+                    for n in 0..8 {
+                        if cntl[n] == p {
+                            attr[n] = value;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some((pos?, attr))
 }
