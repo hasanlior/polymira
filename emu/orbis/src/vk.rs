@@ -2575,9 +2575,9 @@ impl VkRenderer {
                 Ok(()) => {
                     let wait_ms = t_fence.elapsed().as_secs_f64() * 1000.0;
                     if !self.last_frame_gpu_vs.is_empty() {
-                        if wait_ms > 200.0 {
+                        if wait_ms > 350.0 {
                             self.quarantine_active_gpu_vs(&format!("GPU stall {wait_ms:.0}ms"));
-                        } else if wait_ms < 120.0 {
+                        } else if wait_ms < 150.0 {
                             for &a in &self.last_frame_gpu_vs {
                                 self.healthy_gpu_vs.insert(a);
                             }
