@@ -51,6 +51,8 @@ pub struct GenDraw {
     pub vertex_count: u32,
     pub slots: [u32; 64],
     pub tex: Option<(usize, u32, u32, u32)>,
+    /// Additional textures (bindings 1..3) for multi-texture pixel shaders (e.g. terrain + lightmap).
+    pub extra_texs: [Option<(usize, u32, u32, u32)>; 3],
     /// Array layers of the texture (6 for a cube map, 1 otherwise).
     pub layers: u32,
     /// Colour target: guest address, width, height.
@@ -59,6 +61,8 @@ pub struct GenDraw {
     pub scissor: [i32; 4],
     /// The sampler descriptor (S#) the shader uses with the texture.
     pub samp: [u32; 4],
+    /// Samplers for bindings 1..3.
+    pub extra_samps: [[u32; 4]; 3],
     /// DB_DEPTH_CONTROL (bit 1 test, bit 2 write, bits 4..6 compare function).
     pub depth: u32,
     /// DB_DEPTH_CLEAR: value a cleared depth buffer starts with.
@@ -134,6 +138,8 @@ pub struct VkRenderer {
     pub frame_seq: u64,
     pub rt_quad_pipe: vk::Pipeline,
     pub view_dsets: HashMap<(u64, u64), vk::DescriptorSet>,
+    pub gen_dset_layout: vk::DescriptorSetLayout,
+    pub gen_dsets: HashMap<[(u64, u64); 4], vk::DescriptorSet>,
     pub gen_layout: vk::PipelineLayout,
     pub gen_vs: vk::ShaderModule,
     pub gen_pipes: HashMap<(usize, u32, u32), vk::Pipeline>,
@@ -366,6 +372,8 @@ impl VkRenderer {
             frame_seq: 0,
             rt_quad_pipe: vk::Pipeline::null(),
             view_dsets: HashMap::new(),
+            gen_dset_layout: vk::DescriptorSetLayout::null(),
+            gen_dsets: HashMap::new(),
             gen_layout: vk::PipelineLayout::null(),
             gen_vs: vk::ShaderModule::null(),
             gen_pipes: HashMap::new(),
@@ -470,12 +478,12 @@ impl VkRenderer {
             .map_err(|e| format!("sampler: {e}"))?;
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 16384,
+            descriptor_count: 65536,
         }];
         let desc_pool = self
             .device
             .create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default().max_sets(16384).pool_sizes(&pool_sizes),
+                &vk::DescriptorPoolCreateInfo::default().max_sets(32768).pool_sizes(&pool_sizes),
                 None,
             )
             .map_err(|e| format!("desc_pool: {e}"))?;
@@ -1575,6 +1583,7 @@ impl VkRenderer {
             use ash::vk::Handle;
             let old_raw = old.view.as_raw();
             self.view_dsets.retain(|&(v, _), _| v != old_raw);
+            self.gen_dsets.retain(|k, _| !k.iter().any(|&(v, _)| v == old_raw));
             self.device.destroy_image_view(old.view, None);
             self.device.destroy_image(old.image, None);
             self.device.free_memory(old.memory, None);
@@ -1695,6 +1704,7 @@ impl VkRenderer {
             use ash::vk::Handle;
             let old_raw = old.view.as_raw();
             self.view_dsets.retain(|&(v, _), _| v != old_raw);
+            self.gen_dsets.retain(|k, _| !k.iter().any(|&(v, _)| v == old_raw));
             self.device.destroy_image_view(old.view, None);
             self.device.destroy_image(old.image, None);
             self.device.free_memory(old.memory, None);
@@ -1797,6 +1807,31 @@ impl VkRenderer {
         let write = [vk::WriteDescriptorSet::default().dst_set(ds).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&info)];
         self.device.update_descriptor_sets(&write, &[]);
         self.view_dsets.insert(key, ds);
+        Some(ds)
+    }
+
+    /// Descriptor set with 4 combined image samplers (bindings 0..3) for generic pixel shaders.
+    unsafe fn gen_dset_for(&mut self, slots: [(vk::ImageView, vk::Sampler); 4]) -> Option<vk::DescriptorSet> {
+        use ash::vk::Handle;
+        if self.gen_dset_layout == vk::DescriptorSetLayout::null() {
+            return None;
+        }
+        let key = slots.map(|(v, s)| (v.as_raw(), s.as_raw()));
+        if let Some(&d) = self.gen_dsets.get(&key) {
+            return Some(d);
+        }
+        let dsls = [self.gen_dset_layout];
+        let ds = self.device.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.desc_pool).set_layouts(&dsls)).ok()?[0];
+        let infos = slots.map(|(v, s)| [vk::DescriptorImageInfo::default().sampler(s).image_view(v).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]);
+        let writes: [vk::WriteDescriptorSet; 4] = std::array::from_fn(|k| {
+            vk::WriteDescriptorSet::default()
+                .dst_set(ds)
+                .dst_binding(k as u32)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&infos[k])
+        });
+        self.device.update_descriptor_sets(&writes, &[]);
+        self.gen_dsets.insert(key, ds);
         Some(ds)
     }
 
@@ -1919,9 +1954,10 @@ impl VkRenderer {
                 pipe: vk::Pipeline,
                 gen: usize,
                 scissor: vk::Rect2D,
-                sampled_rt: usize,
+                sampled_rts: [usize; 4],
             }
             let full = |w: u32, h: u32| vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: w, height: h } };
+            let fallback_view = self.upload_tex.as_ref().map(|t| t.view).unwrap_or(vk::ImageView::null());
             let mut items: Vec<Item> = Vec::with_capacity(batches.len());
             for b in batches {
                 if let Some(g) = b.gen {
@@ -1934,35 +1970,41 @@ impl VkRenderer {
                     if pipe == vk::Pipeline::null() {
                         continue;
                     }
-                    let mut sampled_rt = 0;
-                    let ds = match gd.tex {
-                        Some((a, _, _, _)) if self.targets.contains_key(&a) && a != rt.0 => {
-                            sampled_rt = a;
-                            self.rt_last_used.insert(a, seq);
-                            self.rt_dset(a).unwrap_or(self.desc_set)
+                    let mut sampled_rts = [0usize; 4];
+                    let tex_list = [gd.tex, gd.extra_texs[0], gd.extra_texs[1], gd.extra_texs[2]];
+                    let samp_list = [gd.samp, gd.extra_samps[0], gd.extra_samps[1], gd.extra_samps[2]];
+                    let mut slot_vs = [(fallback_view, self.sampler); 4];
+                    for k in 0..4 {
+                        let layers = if k == 0 { gd.layers } else { 1 };
+                        let (v, ok) = match tex_list[k] {
+                            Some((a, _, _, _)) if self.targets.contains_key(&a) && a != rt.0 => {
+                                sampled_rts[k] = a;
+                                self.rt_last_used.insert(a, seq);
+                                (self.targets.get(&a).map(|t| t.view), true)
+                            }
+                            Some((a, _, _, _)) if a == rt.0 => (None, false),
+                            Some((a, w, h, sw)) if layers > 1 => {
+                                let d = self.ensure_array_texture(a, w, h, sw, layers);
+                                (if d != self.desc_set { self.array_cache.get(&a).map(|t| t.0.view) } else { None }, d != self.desc_set)
+                            }
+                            Some((a, w, h, sw)) => {
+                                let d = self.ensure_sampled_texture(a, w, h, sw);
+                                (if d != self.desc_set { self.tex_cache.get(&a).map(|t| t.0.view) } else { None }, d != self.desc_set)
+                            }
+                            None => (None, false),
+                        };
+                        if let (Some(view), true) = (v, ok) {
+                            let sampler = if samp_list[k] == [0; 4] { self.sampler } else { self.sampler_for(samp_list[k]) };
+                            slot_vs[k] = (view, sampler);
                         }
-                        Some((a, _, _, _)) if a == rt.0 => self.desc_set,
-                        Some((a, w, h, sw)) if gd.layers > 1 => self.ensure_array_texture(a, w, h, sw, gd.layers),
-                        Some((a, w, h, sw)) => self.ensure_sampled_texture(a, w, h, sw),
-                        None => self.desc_set,
-                    };
-                    // Rebind with the game's sampler (point filtering, wrap modes) when it differs.
-                    let view = match gd.tex {
-                        Some((a, _, _, _)) if sampled_rt == a => self.targets.get(&a).map(|t| t.view),
-                        Some((a, _, _, _)) if gd.layers > 1 => self.array_cache.get(&a).map(|t| t.0.view),
-                        Some((a, _, _, _)) => self.tex_cache.get(&a).map(|t| t.0.view),
-                        None => None,
-                    };
-                    let ds = match view {
-                        Some(v) if ds != self.desc_set && self.sampler_for(gd.samp) != self.sampler => self.dset_for(v, gd.samp).unwrap_or(ds),
-                        _ => ds,
-                    };
+                    }
+                    let ds = self.gen_dset_for(slot_vs).unwrap_or(self.desc_set);
                     let [x, y, w, h] = gd.scissor;
                     let scissor = vk::Rect2D { offset: vk::Offset2D { x, y }, extent: vk::Extent2D { width: w.max(0) as u32, height: h.max(0) as u32 } };
-                    items.push(Item { rt, first: gd.first_vertex, count: gd.vertex_count, ds, pipe, gen: g as usize, scissor, sampled_rt });
+                    items.push(Item { rt, first: gd.first_vertex, count: gd.vertex_count, ds, pipe, gen: g as usize, scissor, sampled_rts });
                 } else if b.index_count > 0 && b.first_index.saturating_add(b.index_count) <= max_idx {
                     let ds = self.ensure_sampled_texture(b.tex_addr, b.tex_w, b.tex_h, b.tex_swiz);
-                    items.push(Item { rt: display, first: b.first_index, count: b.index_count, ds, pipe: vk::Pipeline::null(), gen: 0, scissor: full(display.1, display.2), sampled_rt: 0 });
+                    items.push(Item { rt: display, first: b.first_index, count: b.index_count, ds, pipe: vk::Pipeline::null(), gen: 0, scissor: full(display.1, display.2), sampled_rts: [0; 4] });
                 }
             }
             if items.is_empty() {
@@ -2004,15 +2046,17 @@ impl VkRenderer {
             let mut cur_vb = vk::Buffer::null();
             let mut last_ds = vk::DescriptorSet::null();
             for it in &items {
-                if it.sampled_rt != 0 {
-                    sampled_this_frame.push(it.sampled_rt);
-                }
-                if it.sampled_rt != 0 && *self.rt_layouts.get(&it.sampled_rt).unwrap_or(&vk::ImageLayout::UNDEFINED) != vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL {
-                    if in_pass {
-                        self.device.cmd_end_render_pass(self.cmd_buf);
-                        in_pass = false;
+                for &sr in &it.sampled_rts {
+                    if sr != 0 {
+                        sampled_this_frame.push(sr);
+                        if *self.rt_layouts.get(&sr).unwrap_or(&vk::ImageLayout::UNDEFINED) != vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL {
+                            if in_pass {
+                                self.device.cmd_end_render_pass(self.cmd_buf);
+                                in_pass = false;
+                            }
+                            self.rt_barrier(sr, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                        }
                     }
-                    self.rt_barrier(it.sampled_rt, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
                 }
                 if !in_pass || cur_rt != it.rt.0 {
                     if in_pass {
@@ -2219,8 +2263,21 @@ impl VkRenderer {
     }
 
     unsafe fn create_gen_pipeline(&mut self, gd: &GenDraw) -> Result<vk::Pipeline, String> {
+        if self.gen_dset_layout == vk::DescriptorSetLayout::null() {
+            let bindings: [vk::DescriptorSetLayoutBinding; 4] = std::array::from_fn(|k| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(k as u32)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            });
+            self.gen_dset_layout = self
+                .device
+                .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)
+                .map_err(|e| format!("gen_dset_layout: {e}"))?;
+        }
         if self.gen_layout == vk::PipelineLayout::null() {
-            let dsls = [self.blit_dset_layout];
+            let dsls = [self.gen_dset_layout];
             let pcr = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::FRAGMENT, offset: 0, size: 256 }];
             self.gen_layout = self
                 .device

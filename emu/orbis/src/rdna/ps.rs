@@ -118,8 +118,9 @@ struct T {
     attrs: Vec<Word>,
     frag_coord: Word,
     out_color: Word,
-    texture: Word,
+    textures: [Word; 4],
     t_sampled: Word,
+    t_sampled_2d: Word,
     vcc: Word,
     masks: HashMap<u16, Word>,
     p_priv_bool: Word,
@@ -294,12 +295,24 @@ fn translate_insts(insts: Vec<Inst>, ps_input_addr: u32, path: bool) -> Result<T
     // coordinates itself (v_cubeid / v_cubesc / v_cubetc).
     let cube = insts.iter().any(|i| i.fmt == Fmt::Mimg && ((i.w0() >> 3) & 7) == 3);
     let t_v3f = b.type_vector(t_f32, 3);
-    let t_img = b.type_image(t_f32, spirv::Dim::Dim2D, 0, if cube { 1 } else { 0 }, 0, 1, spirv::ImageFormat::Unknown, None);
-    let t_sampled = b.type_sampled_image(t_img);
-    let p_tex = b.type_pointer(None, spirv::StorageClass::UniformConstant, t_sampled);
-    let texture = b.variable(p_tex, None, spirv::StorageClass::UniformConstant, None);
-    b.decorate(texture, spirv::Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
-    b.decorate(texture, spirv::Decoration::Binding, [Operand::LiteralBit32(0)]);
+    let t_img_2d = b.type_image(t_f32, spirv::Dim::Dim2D, 0, 0, 0, 1, spirv::ImageFormat::Unknown, None);
+    let t_sampled_2d = b.type_sampled_image(t_img_2d);
+    let t_sampled = if cube {
+        let t_img_arr = b.type_image(t_f32, spirv::Dim::Dim2D, 0, 1, 0, 1, spirv::ImageFormat::Unknown, None);
+        b.type_sampled_image(t_img_arr)
+    } else {
+        t_sampled_2d
+    };
+    let p_tex0 = b.type_pointer(None, spirv::StorageClass::UniformConstant, t_sampled);
+    let p_tex2d = b.type_pointer(None, spirv::StorageClass::UniformConstant, t_sampled_2d);
+    let mut textures = [0u32; 4];
+    for k in 0..4u32 {
+        let pt = if k == 0 { p_tex0 } else { p_tex2d };
+        let v = b.variable(pt, None, spirv::StorageClass::UniformConstant, None);
+        b.decorate(v, spirv::Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
+        b.decorate(v, spirv::Decoration::Binding, [Operand::LiteralBit32(k)]);
+        textures[k as usize] = v;
+    }
     let vcc = b.variable(p_priv_bool, None, spirv::StorageClass::Private, None);
 
     let t_fn = b.type_function(t_void, []);
@@ -318,8 +331,9 @@ fn translate_insts(insts: Vec<Inst>, ps_input_addr: u32, path: bool) -> Result<T
         attrs: attrs.clone(),
         frag_coord,
         out_color,
-        texture,
+        textures,
         t_sampled,
+        t_sampled_2d,
         vcc,
         masks: HashMap::new(),
         p_priv_bool,
@@ -436,10 +450,9 @@ fn translate_insts(insts: Vec<Inst>, ps_input_addr: u32, path: bool) -> Result<T
                 if !(n == "image_sample" || n == "image_sample_lz" || n == "image_sample_l" || n == "image_sample_b") {
                     return Err(format!("{n}"));
                 }
-                if images > 0 {
-                    // One texture per draw for now: reuse binding 0.
-                }
+                let slot = images.min(3);
                 images += 1;
+                let is_cube_inst = ((w0 >> 3) & 7) == 3;
                 let x = t.get_v(vaddr);
                 let x = t.f(x);
                 let lod_first = n == "image_sample_l" || n == "image_sample_b";
@@ -449,7 +462,7 @@ fn translate_insts(insts: Vec<Inst>, ps_input_addr: u32, path: bool) -> Result<T
                 let xx = t.f(xx);
                 let yy = t.get_v(cy);
                 let yy = t.f(yy);
-                let coord = if cube {
+                let coord = if is_cube_inst {
                     let one = t.cf(1.0);
                     let u = t.b.f_sub(t_f32, None, xx, one).unwrap();
                     let v = t.b.f_sub(t_f32, None, yy, one).unwrap();
@@ -459,9 +472,10 @@ fn translate_insts(insts: Vec<Inst>, ps_input_addr: u32, path: bool) -> Result<T
                 } else {
                     t.b.composite_construct(t_v2f, None, [xx, yy]).unwrap()
                 };
-                let si = t.b.load(t.t_sampled, None, t.texture, None, []).unwrap();
+                let (si_ty, si_var) = if slot == 0 { (t.t_sampled, t.textures[0]) } else { (t.t_sampled_2d, t.textures[slot]) };
+                let si = t.b.load(si_ty, None, si_var, None, []).unwrap();
                 let texel = if n == "image_sample_l" {
-                    let lod = t.get_v(cy + if cube { 2 } else { 1 });
+                    let lod = t.get_v(cy + if is_cube_inst { 2 } else { 1 });
                     let lod = t.f(lod);
                     t.b.image_sample_explicit_lod(t_v4f, None, si, coord, spirv::ImageOperands::LOD, [Operand::IdRef(lod)]).unwrap()
                 } else if n == "image_sample_lz" {

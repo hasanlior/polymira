@@ -989,7 +989,7 @@ static VS_POOL: LazyLock<std::sync::Arc<VsPoolState>> = LazyLock::new(|| {
 
 fn vs_parallel_for<F: Fn(usize, usize) + Sync>(total: usize, f: F) {
     let pool = &*VS_POOL;
-    if pool.n_workers == 0 || total < 128 {
+    if pool.n_workers == 0 || total < 512 {
         f(0, total);
         return;
     }
@@ -997,7 +997,7 @@ fn vs_parallel_for<F: Fn(usize, usize) + Sync>(total: usize, f: F) {
         let f = unsafe { &*(ctx as *const F) };
         f(start, end);
     }
-    let chunk = (total / ((pool.n_workers + 1) * 4)).clamp(32, 256);
+    let chunk = (total / ((pool.n_workers + 1) * 4)).clamp(64, 512);
     pool.next.store(0, Ordering::Relaxed);
     pool.remaining.store(pool.n_workers, Ordering::Release);
     {
@@ -1018,8 +1018,14 @@ fn vs_parallel_for<F: Fn(usize, usize) + Sync>(total: usize, f: F) {
         }
         f(start, (start + chunk).min(total));
     }
+    let mut spins = 0u32;
     while pool.remaining.load(Ordering::Acquire) != 0 {
-        std::hint::spin_loop();
+        spins += 1;
+        if spins < 64 {
+            std::hint::spin_loop();
+        } else {
+            std::thread::yield_now();
+        }
     }
 }
 
@@ -1098,6 +1104,8 @@ static PERF_VS_NS: AtomicU64 = AtomicU64::new(0);
 static PERF_CS_NS: AtomicU64 = AtomicU64::new(0);
 static PERF_CS_CNT: AtomicU64 = AtomicU64::new(0);
 static PERF_CS_THR: AtomicU64 = AtomicU64::new(0);
+// Per-frame VS profiler: vs_addr -> (draws, unique_verts, inst_count, total_ns)
+static PERF_VS_MAP: LazyLock<Mutex<HashMap<usize, (u64, u64, usize, u64)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn shader_hash(code: &[u32]) -> u64 {
     code.iter().take(64).fold(0xcbf2_9ce4_8422_2325u64, |h, &w| (h ^ w as u64).wrapping_mul(0x100_0000_01b3))
@@ -1120,6 +1128,12 @@ pub fn gen_stats() -> [u64; 4] {
 /// CPU per vertex, the pixel shader is translated to SPIR-V. Returns false to let the older
 /// layout-guessing path try the draw.
 fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool {
+    // CB_TARGET_MASK (MRT0 bits): nothing written → stencil/depth-only pass, skip before VS!
+    let wmask = gpu.cx.get(&0x8E).copied().unwrap_or(0xF) & 0xF;
+    if wmask == 0 {
+        GEN_STATS[3].fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
     let (vs_addr, ps_addr) = bound_shader_pair(gpu);
     let (Some(vs_code), Some(ps_code)) = (shader_words(vs_addr), shader_words(ps_addr)) else {
         return false;
@@ -1256,42 +1270,53 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         if failed.load(Ordering::Relaxed) {
             return;
         }
-        let mut lane = crate::rdna::interp::Lane::new();
-        let out_slice = unsafe { std::slice::from_raw_parts_mut((verts_ptr as *mut crate::vk::GVertex).add(start), end - start) };
-        for (&ix, dst) in unique[start..end].iter().zip(out_slice.iter_mut()) {
-            lane.s = base_s;
-            lane.scc = base_scc;
-            lane.v.fill(0);
-            lane.exports.clear();
-            lane.v[5] = ix;
-            lane.v[8] = 0;
-            if crate::rdna::interp::run_compiled_from(&vs_sh, start_pc, &mut lane, mem_ok).is_err() {
-                failed.store(true, Ordering::Relaxed);
-                return;
-            }
-            let mut pos = None;
-            let mut attr = [[0f32; 4]; 8];
-            for e in &lane.exports {
-                if e.target == 12 {
-                    pos = Some(e.value);
-                } else if (32..96).contains(&e.target) {
-                    let p = e.target - 32;
-                    for n in 0..8 {
-                        if cntl[n] == p {
-                            attr[n] = e.value;
+        thread_local! {
+            static TL_LANE: std::cell::RefCell<crate::rdna::interp::Lane> = std::cell::RefCell::new(crate::rdna::interp::Lane::new());
+        }
+        TL_LANE.with(|cell| {
+            let mut lane = cell.borrow_mut();
+            let out_slice = unsafe { std::slice::from_raw_parts_mut((verts_ptr as *mut crate::vk::GVertex).add(start), end - start) };
+            for (&ix, dst) in unique[start..end].iter().zip(out_slice.iter_mut()) {
+                lane.s = base_s;
+                lane.scc = base_scc;
+                lane.v.fill(0);
+                lane.exports.clear();
+                lane.v[5] = ix;
+                lane.v[8] = 0;
+                if crate::rdna::interp::run_compiled_from(&vs_sh, start_pc, &mut lane, mem_ok).is_err() {
+                    failed.store(true, Ordering::Relaxed);
+                    return;
+                }
+                let mut pos = None;
+                let mut attr = [[0f32; 4]; 8];
+                for e in &lane.exports {
+                    if e.target == 12 {
+                        pos = Some(e.value);
+                    } else if (32..96).contains(&e.target) {
+                        let p = e.target - 32;
+                        for n in 0..8 {
+                            if cntl[n] == p {
+                                attr[n] = e.value;
+                            }
                         }
                     }
                 }
+                let Some(p) = pos else {
+                    failed.store(true, Ordering::Relaxed);
+                    return;
+                };
+                *dst = crate::vk::GVertex { pos: to_target(p), attr };
             }
-            let Some(p) = pos else {
-                failed.store(true, Ordering::Relaxed);
-                return;
-            };
-            *dst = crate::vk::GVertex { pos: to_target(p), attr };
-        }
+        });
     });
     if let Some(t) = t_vs {
-        PERF_VS_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let dt = t.elapsed().as_nanos() as u64;
+        PERF_VS_NS.fetch_add(dt, Ordering::Relaxed);
+        let mut m = PERF_VS_MAP.lock().unwrap_or_else(|e| e.into_inner());
+        let e = m.entry(vs_addr).or_insert((0, 0, vs_sh.insts.len(), 0));
+        e.0 += 1;
+        e.1 += unique.len() as u64;
+        e.3 += dt;
     }
     if failed.load(Ordering::Relaxed) {
         GEN_STATS[1].fetch_add(1, Ordering::Relaxed);
@@ -1326,13 +1351,16 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         }
     };
     let hash = hash ^ (std::sync::Arc::as_ptr(&tr) as u64);
-    let tex = info.images.first().map(|(t, _)| {
+    let decode_img = |(t, _): &([u32; 8], [u32; 4])| {
         let addr = (((t[0] as u64) | (((t[1] & 0xFF) as u64) << 32)) << 8) as usize;
         let w = ((t[1] >> 30) | ((t[2] & 0xFFF) << 2)) + 1;
         let h = ((t[2] >> 14) & 0x3FFF) + 1;
         let swiz = ((t[3] >> 20) & 0x1F) | (((t[1] >> 20) & 0x1FF) << 8) | ((t[3] & 0xFFF) << 20);
         (addr, w, h, swiz)
-    });
+    };
+    let tex = info.images.first().map(decode_img);
+    let extra_texs: [Option<(usize, u32, u32, u32)>; 3] = std::array::from_fn(|k| info.images.get(k + 1).map(decode_img));
+    let extra_samps: [[u32; 4]; 3] = std::array::from_fn(|k| info.images.get(k + 1).map(|(_, s)| *s).unwrap_or([0; 4]));
     if cube && std::env::var_os("ORBIS_TEX_LOG").is_some() {
         if let Some((t, _)) = info.images.first() {
             eprintln!("[orbis] CUBE {tex:x?} type={:#x} last_level={} base_level={} depth={} T#={t:08x?}", t[3] >> 28, (t[3] >> 16) & 0xF, (t[3] >> 12) & 0xF, t[4] & 0x1FFF);
@@ -1406,13 +1434,6 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
 [orbis] UC {}", cx.join(" "), uc.join(" "));
         }
     }
-    // CB_TARGET_MASK (MRT0 bits): nothing written → stencil/depth-only pass, skip it.
-    let wmask = gpu.cx.get(&0x8E).copied().unwrap_or(0xF) & 0xF;
-    if wmask == 0 {
-        gpu.frame_gverts.truncate(first_vertex as usize);
-        GEN_STATS[3].fetch_add(1, Ordering::Relaxed);
-        return true;
-    }
     let blend = gpu.cx.get(&0x1E0).copied().unwrap_or(0);
     let dctl = gpu.cx.get(&0x200).copied().unwrap_or(0);
     let dkey = dctl & 0x77;
@@ -1426,10 +1447,12 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         vertex_count,
         slots,
         tex,
+        extra_texs,
         layers: if cube { 6 } else { 1 },
         rt,
         scissor,
         samp: info.images.first().map(|(_, s)| *s).unwrap_or([0; 4]),
+        extra_samps,
         depth: dctl,
         // Depth is cleared through HTILE metadata we do not see: start from the far plane of
         // the compare direction (1.0 for LESS-style tests, 0.0 for GREATER-style ones).
@@ -2352,6 +2375,7 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
         PERF_CS_NS.store(0, Ordering::Relaxed);
         PERF_CS_CNT.store(0, Ordering::Relaxed);
         PERF_CS_THR.store(0, Ordering::Relaxed);
+        PERF_VS_MAP.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
     let (n, flip) = {
         flush_committed_cache();
@@ -2395,6 +2419,16 @@ pub extern "sysv64" fn submit_dcb(pkt: *const SubmitPacket) -> i32 {
             eprintln!(
                 "[orbis] PERF submit #{n}: total={total_ms:.1}ms vs={vs_ms:.1}ms cs={cs_ms:.1}ms({cs_cnt}x/{cs_thr}thr) flip={flip_ms:.1}ms"
             );
+            if total_ms >= 50.0 {
+                let mut v: Vec<_> = PERF_VS_MAP.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(&a, &s)| (a, s)).collect();
+                v.sort_by(|a, b| b.1 .3.cmp(&a.1 .3));
+                let top: Vec<String> = v.iter().take(4).map(|(a, (d, uv, insts, ns))| {
+                    format!("{a:#x}({d}d/{uv}v/{insts}i={:.1}ms)", *ns as f64 / 1e6)
+                }).collect();
+                if !top.is_empty() {
+                    eprintln!("[orbis] PERF top VS #{n}: {}", top.join(" | "));
+                }
+            }
         }
     }
     0
