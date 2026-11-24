@@ -1299,19 +1299,48 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         ];
         if let Some(gpu_data) = crate::rdna::vs::extract_gpu_vs_draw(&vs_sh, &vs_ud, max_ix, vp, mem_ok) {
             let vs_spv = {
-                let mut cache = VS_SPV_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-                cache
-                    .entry((vs_addr, vs_hash, cntl, gpu_data.mubuf_key))
-                    .or_insert_with(|| match crate::rdna::vs::translate(&vs_sh, &cntl, &gpu_data.mubuf_key) {
-                        Ok((spv, slots)) => Some((std::sync::Arc::new(spv), slots)),
-                        Err(e) => {
-                            if *FRAME_STATS_ON {
-                                eprintln!("[orbis] GPU-VS {vs_addr:#x}: fallback ({e})");
-                            }
-                            None
+                thread_local! {
+                    static TL_VS: std::cell::RefCell<[(usize, u64, [u32; 8], [u16; 8], Option<(std::sync::Arc<Vec<u32>>, u32)>); 4]> =
+                        const { std::cell::RefCell::new([(0, 0, [0; 8], [0; 8], None), (0, 0, [0; 8], [0; 8], None), (0, 0, [0; 8], [0; 8], None), (0, 0, [0; 8], [0; 8], None)]) };
+                    static TL_VS_NEXT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+                }
+                let hit = TL_VS.with(|c| {
+                    for (a, h, cn, mk, v) in c.borrow().iter() {
+                        if *a == vs_addr && *h == vs_hash && *cn == cntl && *mk == gpu_data.mubuf_key {
+                            return Some(v.clone());
                         }
-                    })
-                    .clone()
+                    }
+                    None
+                });
+                match hit {
+                    Some(v) => v,
+                    None => {
+                        let v = {
+                            let mut cache = VS_SPV_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                            cache
+                                .entry((vs_addr, vs_hash, cntl, gpu_data.mubuf_key))
+                                .or_insert_with(|| match crate::rdna::vs::translate(&vs_sh, &cntl, &gpu_data.mubuf_key) {
+                                    Ok((spv, slots)) => Some((std::sync::Arc::new(spv), slots)),
+                                    Err(e) => {
+                                        if *FRAME_STATS_ON {
+                                            eprintln!("[orbis] GPU-VS {vs_addr:#x}: fallback ({e})");
+                                        }
+                                        None
+                                    }
+                                })
+                                .clone()
+                        };
+                        TL_VS.with(|c| {
+                            let i = TL_VS_NEXT.with(|n| {
+                                let x = n.get();
+                                n.set((x + 1) & 3);
+                                x
+                            });
+                            c.borrow_mut()[i] = (vs_addr, vs_hash, cntl, gpu_data.mubuf_key, v.clone());
+                        });
+                        v
+                    }
+                }
             };
             if let Some((vs_spv, expected_slots)) = vs_spv {
                 if gpu_data.params.len() != expected_slots as usize {
