@@ -751,6 +751,12 @@ struct GpuState {
     frame_gverts: Vec<crate::vk::GVertex>,
     frame_gens: Vec<crate::vk::GenDraw>,
     pending_flip: Option<(i32, i32, i32, i64)>,
+    // Reusable scratch buffers for try_generic_draw (eliminates ~200 MB/frame of heap alloc/zeroing).
+    scratch_seen: Vec<(u32, u32)>,
+    scratch_gen: u32,
+    scratch_unique: Vec<u32>,
+    scratch_remap: Vec<u32>,
+    scratch_verts: Vec<crate::vk::GVertex>,
 }
 
 static GPU: Mutex<GpuState> = Mutex::new(GpuState {
@@ -769,6 +775,11 @@ static GPU: Mutex<GpuState> = Mutex::new(GpuState {
     frame_gverts: Vec::new(),
     frame_gens: Vec::new(),
     pending_flip: None,
+    scratch_seen: Vec::new(),
+    scratch_gen: 0,
+    scratch_unique: Vec::new(),
+    scratch_remap: Vec::new(),
+    scratch_verts: Vec::new(),
 });
 
 static READY_DRAWS: Mutex<(Vec<crate::vk::Vertex>, Vec<u32>, Vec<crate::vk::DrawBatch>)> =
@@ -989,7 +1000,7 @@ static VS_POOL: LazyLock<std::sync::Arc<VsPoolState>> = LazyLock::new(|| {
 
 fn vs_parallel_for<F: Fn(usize, usize) + Sync>(total: usize, f: F) {
     let pool = &*VS_POOL;
-    if pool.n_workers == 0 || total < 512 {
+    if pool.n_workers == 0 || total < 256 {
         f(0, total);
         return;
     }
@@ -1219,49 +1230,64 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             [p[0], -p[1], p[2], p[3]]
         }
     };
-    // Deduplicate indices into dense `unique` + `remap` (flat table when span < 131k, HashMap fallback).
+    // Deduplicate indices into reusable scratch buffers (zero heap alloc/zeroing per draw).
     let cntl: [u32; 8] = std::array::from_fn(|n| gpu.cx.get(&(0x191 + n as u32)).map(|v| v & 0x3F).unwrap_or(n as u32));
     let vs_ud: [u32; 24] = std::array::from_fn(|k| *gpu.sh.get(&(0x8C + k as u32)).unwrap_or(&0));
     let (min_ix, max_ix) = idxs.iter().fold((u32::MAX, 0u32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
     let span = max_ix.saturating_sub(min_ix) as usize;
-    let mut unique: Vec<u32> = Vec::with_capacity(idxs.len().min(span + 1).min(65536));
-    let mut remap: Vec<u32> = Vec::with_capacity(idxs.len());
+    gpu.scratch_unique.clear();
+    gpu.scratch_remap.clear();
+    gpu.scratch_remap.reserve(idxs.len());
     if span < 131_072 {
-        let mut seen = vec![u32::MAX; span + 1];
+        if gpu.scratch_seen.len() <= span {
+            gpu.scratch_seen.resize(span + 1, (0, 0));
+        }
+        gpu.scratch_gen = gpu.scratch_gen.wrapping_add(1);
+        if gpu.scratch_gen == 0 {
+            gpu.scratch_seen.fill((0, 0));
+            gpu.scratch_gen = 1;
+        }
+        let gen_tag = gpu.scratch_gen;
         for &ix in &idxs {
             let slot = (ix - min_ix) as usize;
-            let mut u = seen[slot];
-            if u == u32::MAX {
-                u = unique.len() as u32;
-                seen[slot] = u;
-                unique.push(ix);
-            }
-            remap.push(u);
+            let entry = &mut gpu.scratch_seen[slot];
+            let u = if entry.0 == gen_tag {
+                entry.1
+            } else {
+                let id = gpu.scratch_unique.len() as u32;
+                *entry = (gen_tag, id);
+                gpu.scratch_unique.push(ix);
+                id
+            };
+            gpu.scratch_remap.push(u);
         }
     } else {
         let mut seen: HashMap<u32, u32> = HashMap::with_capacity(idxs.len().min(4096));
         for &ix in &idxs {
             let u = *seen.entry(ix).or_insert_with(|| {
-                let id = unique.len() as u32;
-                unique.push(ix);
+                let id = gpu.scratch_unique.len() as u32;
+                gpu.scratch_unique.push(ix);
                 id
             });
-            remap.push(u);
+            gpu.scratch_remap.push(u);
         }
     }
-    let mut verts = vec![crate::vk::GVertex::default(); unique.len()];
-    let verts_ptr = verts.as_mut_ptr() as usize;
+    let unique_len = gpu.scratch_unique.len();
+    gpu.scratch_verts.resize(unique_len, crate::vk::GVertex::default());
+    let unique = gpu.scratch_unique.as_slice();
+    let verts_ptr = gpu.scratch_verts.as_mut_ptr() as usize;
     let failed = std::sync::atomic::AtomicBool::new(false);
     let t_vs = (*FRAME_STATS_ON).then(std::time::Instant::now);
     let hoisted = crate::rdna::interp::hoist_vs_draw(&vs_sh, &vs_ud, max_ix, mem_ok);
     if let Some(plan) = hoisted.as_ref() {
-        vs_parallel_for(unique.len(), |start, end| {
+        vs_parallel_for(unique_len, |start, end| {
             if failed.load(Ordering::Relaxed) {
                 return;
             }
+            let mut vreg = [0u32; 256];
             let out_slice = unsafe { std::slice::from_raw_parts_mut((verts_ptr as *mut crate::vk::GVertex).add(start), end - start) };
             for (&ix, dst) in unique[start..end].iter().zip(out_slice.iter_mut()) {
-                let Some((p, attr)) = crate::rdna::interp::eval_vs_hoisted(plan, ix, &cntl) else {
+                let Some((p, attr)) = crate::rdna::interp::eval_vs_hoisted(plan, &mut vreg, ix, &cntl) else {
                     failed.store(true, Ordering::Relaxed);
                     return;
                 };
@@ -1282,7 +1308,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         let base_s = prefix_lane.s;
         let base_scc = prefix_lane.scc;
         let start_pc = vs_sh.scalar_prefix_len;
-        vs_parallel_for(unique.len(), |start, end| {
+        vs_parallel_for(unique_len, |start, end| {
             if failed.load(Ordering::Relaxed) {
                 return;
             }
@@ -1348,7 +1374,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     let (tr, cube, info) = match (tr, pre) {
         (Some((tr, cube)), Some(info)) => (tr, cube, info),
         _ => {
-            let attrs = verts[remap[0] as usize].attr;
+            let attrs = gpu.scratch_verts[gpu.scratch_remap[0] as usize].attr;
             let Ok((pcs, info)) = crate::rdna::interp::trace_ps_compiled(&ps_sh, &mut ps_lane, &attrs, mem_ok) else {
                 GEN_STATS[2].fetch_add(1, Ordering::Relaxed);
                 return false;
@@ -1418,8 +1444,12 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     let prim = gpu.uc.get(&0x242).copied().map(|v| if v > 0xFF { v >> 8 } else { v }).unwrap_or(4);
     let first_vertex = gpu.frame_gverts.len() as u32;
     if prim == 0x11 {
-        for tri in remap.chunks_exact(3) {
-            let (a, b, c) = (verts[tri[0] as usize], verts[tri[1] as usize], verts[tri[2] as usize]);
+        for tri in gpu.scratch_remap.chunks_exact(3) {
+            let (a, b, c) = (
+                gpu.scratch_verts[tri[0] as usize],
+                gpu.scratch_verts[tri[1] as usize],
+                gpu.scratch_verts[tri[2] as usize],
+            );
             let mut d = a;
             d.pos = std::array::from_fn(|k| b.pos[k] + c.pos[k] - a.pos[k]);
             for n in 0..8 {
@@ -1428,9 +1458,10 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             gpu.frame_gverts.extend_from_slice(&[a, b, c, c, b, d]);
         }
     } else {
-        gpu.frame_gverts.reserve(remap.len() / 3 * 3);
-        for &r in &remap[..remap.len() / 3 * 3] {
-            gpu.frame_gverts.push(verts[r as usize]);
+        let n_out = gpu.scratch_remap.len() / 3 * 3;
+        gpu.frame_gverts.reserve(n_out);
+        for &r in &gpu.scratch_remap[..n_out] {
+            gpu.frame_gverts.push(gpu.scratch_verts[r as usize]);
         }
     }
     let vertex_count = gpu.frame_gverts.len() as u32 - first_vertex;
@@ -2363,8 +2394,10 @@ fn execute_stream(
                             rd.1 = std::mem::take(&mut gpu.frame_idxs);
                             rd.2 = std::mem::take(&mut gpu.frame_batches);
                             if let Ok(mut rg) = READY_GEN.lock() {
-                                rg.0 = std::mem::take(&mut gpu.frame_gverts);
-                                rg.1 = std::mem::take(&mut gpu.frame_gens);
+                                std::mem::swap(&mut rg.0, &mut gpu.frame_gverts);
+                                gpu.frame_gverts.clear();
+                                std::mem::swap(&mut rg.1, &mut gpu.frame_gens);
+                                gpu.frame_gens.clear();
                             }
                         }
                     } else {

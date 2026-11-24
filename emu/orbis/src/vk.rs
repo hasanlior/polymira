@@ -135,6 +135,7 @@ pub struct VkRenderer {
     pub rt_depth: HashMap<usize, (vk::Image, vk::DeviceMemory, vk::ImageView)>,
     pub rt_last_used: HashMap<usize, u64>,
     pub persistent_rts: std::collections::HashSet<usize>,
+    pub rt_guest_sums: HashMap<usize, u64>,
     pub frame_seq: u64,
     pub rt_quad_pipe: vk::Pipeline,
     pub view_dsets: HashMap<(u64, u64), vk::DescriptorSet>,
@@ -369,6 +370,7 @@ impl VkRenderer {
             rt_depth: HashMap::new(),
             rt_last_used: HashMap::new(),
             persistent_rts: std::collections::HashSet::new(),
+            rt_guest_sums: HashMap::new(),
             frame_seq: 0,
             rt_quad_pipe: vk::Pipeline::null(),
             view_dsets: HashMap::new(),
@@ -1296,11 +1298,11 @@ impl VkRenderer {
         let to_dst = [vk::ImageMemoryBarrier::default()
             .image(img)
             .subresource_range(sub)
-            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .src_access_mask(vk::AccessFlags::SHADER_READ)
+            .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
-        self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &to_dst);
+        self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &to_dst);
         let region = [vk::BufferImageCopy::default()
             .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
             .image_extent(vk::Extent3D { width, height, depth: 1 })];
@@ -1592,6 +1594,7 @@ impl VkRenderer {
         self.rt_layouts.remove(&addr);
         self.rt_last_used.remove(&addr);
         self.persistent_rts.remove(&addr);
+        self.rt_guest_sums.remove(&addr);
     }
 
     /// Offscreen colour target for a guest render-target address (created on first use).
@@ -1708,6 +1711,36 @@ impl VkRenderer {
             self.device.destroy_image_view(old.view, None);
             self.device.destroy_image(old.image, None);
             self.device.free_memory(old.memory, None);
+        } else if fresh && w < 3840 && h < 2160 && w > 0 && h > 0 && w <= 4096 && h <= 4096 {
+            // If guest memory already contains a CPU-uploaded texture atlas at `addr`
+            // (e.g. Minecraft's 2048x1024 terrain atlas drawn into by Flipbook before
+            // being sampled for the first time), upload it into the new RT and mark persistent.
+            let want_src = (((w as usize) + 127) / 128) * (((h as usize) + 127) / 128) * 65536;
+            let avail = Self::readable_bytes(addr, want_src);
+            if avail >= 65536 {
+                let words = avail / 8;
+                let step = (words / 512).max(1);
+                let p = addr as *const u64;
+                let mut hsum = 0xcbf2_9ce4_8422_2325u64;
+                let mut any_nz = false;
+                let mut k = 0;
+                while k < words {
+                    let v = p.add(k).read_unaligned();
+                    if v != 0 {
+                        any_nz = true;
+                    }
+                    hsum = (hsum ^ v).wrapping_mul(0x100_0000_01b3);
+                    k += step;
+                }
+                if any_nz {
+                    let src = std::slice::from_raw_parts(addr as *const u8, avail);
+                    let pixels = crate::tiling::untile_32bpp(src, w, h, 27 | (56 << 8) | (0xFAC << 20));
+                    self.reupload_texture(image, w, h, &pixels);
+                    self.rt_layouts.insert(addr, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                    self.persistent_rts.insert(addr);
+                    self.rt_guest_sums.insert(addr, hsum);
+                }
+            }
         }
         if !self.rt_fbs.contains_key(&addr) {
             if !self.rt_depth.contains_key(&addr) {
@@ -1977,7 +2010,49 @@ impl VkRenderer {
                     for k in 0..4 {
                         let layers = if k == 0 { gd.layers } else { 1 };
                         let (v, ok) = match tex_list[k] {
-                            Some((a, _, _, _)) if self.targets.contains_key(&a) && a != rt.0 => {
+                            Some((a, w, h, sw)) if self.targets.contains_key(&a) && a != rt.0 => {
+                                // If guest memory was populated after RT creation (e.g. terrain atlas
+                                // uploaded via CPU/compute), sync non-zero guest pixels into the RT once.
+                                if w < 3840 && h < 2160 && self.tex_checked.get(&a) != Some(&self.frame_no) {
+                                    self.tex_checked.insert(a, self.frame_no);
+                                    let sw_mode = sw & 0x1F;
+                                    let want_src = if sw_mode == 0 {
+                                        (w as usize) * (h as usize) * 4
+                                    } else {
+                                        (((w as usize) + 127) / 128) * (((h as usize) + 127) / 128) * 65536
+                                    };
+                                    let avail = Self::readable_bytes(a, want_src);
+                                    if avail >= 64 {
+                                        let words = avail / 8;
+                                        let step = (words / 512).max(1);
+                                        let p = a as *const u64;
+                                        let mut hsum = 0xcbf2_9ce4_8422_2325u64;
+                                        let mut any_nz = false;
+                                        let mut j = 0;
+                                        while j < words {
+                                            let val = p.add(j).read_unaligned();
+                                            if val != 0 {
+                                                any_nz = true;
+                                            }
+                                            hsum = (hsum ^ val).wrapping_mul(0x100_0000_01b3);
+                                            j += step;
+                                        }
+                                        if any_nz && self.rt_guest_sums.get(&a) != Some(&hsum) {
+                                            if let Some(t) = self.targets.get(&a) {
+                                                let img = t.image;
+                                                let (tw, th) = (t.width, t.height);
+                                                if tw == w && th == h {
+                                                    let src = std::slice::from_raw_parts(a as *const u8, avail);
+                                                    let pixels = crate::tiling::untile_32bpp(src, w, h, sw);
+                                                    self.reupload_texture(img, w, h, &pixels);
+                                                    self.rt_layouts.insert(a, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                                                    self.persistent_rts.insert(a);
+                                                    self.rt_guest_sums.insert(a, hsum);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 sampled_rts[k] = a;
                                 self.rt_last_used.insert(a, seq);
                                 (self.targets.get(&a).map(|t| t.view), true)
@@ -2008,9 +2083,9 @@ impl VkRenderer {
                                     let fmt = (sw >> 8) & 0x1FF;
                                     let swm = sw & 0x1F;
                                     let dsel = (sw >> 20) & 0xFFF;
-                                    let sample_u32 = if !is_rt && Self::readable_bytes(a, 64) >= 64 {
+                                    let sample_u32 = if Self::readable_bytes(a, 65536) >= 64 {
                                         let p = a as *const u32;
-                                        (0..16).map(|i| p.add(i).read_unaligned()).find(|&x| x != 0).unwrap_or(0)
+                                        (0..1024).map(|i| p.add(i * 16).read_unaligned()).find(|&x| x != 0).unwrap_or(0)
                                     } else {
                                         0
                                     };

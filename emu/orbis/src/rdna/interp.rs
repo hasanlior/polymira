@@ -1482,34 +1482,34 @@ pub fn hoist_vs_draw(sh: &CompiledShader, vs_ud: &[u32; 24], max_ix: u32, ok: Me
 }
 
 /// Evaluates one vertex using a scalar-hoisted `VsDrawPlan` (zero SMEM, zero VirtualQuery,
-/// zero string matching).
-pub fn eval_vs_hoisted(plan: &VsDrawPlan, ix: u32, cntl: &[u32; 8]) -> Option<([f32; 4], [[f32; 4]; 8])> {
-    let mut v = [0u32; 256];
+/// zero string matching). Reuses caller-provided `v` and clears only `0..plan.max_vgpr`.
+pub fn eval_vs_hoisted(plan: &VsDrawPlan, v: &mut [u32; 256], ix: u32, cntl: &[u32; 8]) -> Option<([f32; 4], [[f32; 4]; 8])> {
+    v[..plan.max_vgpr].fill(0);
     v[5] = ix;
     let mut pos = None;
     let mut attr = [[0f32; 4]; 8];
     for &op in &plan.ops {
         match op {
-            VsFastOp::Mov { dst, a } => v[dst as usize] = a.get(&v),
-            VsFastOp::AddF32 { dst, a, b } => v[dst as usize] = (a.get_f(&v) + b.get_f(&v)).to_bits(),
-            VsFastOp::SubF32 { dst, a, b } => v[dst as usize] = (a.get_f(&v) - b.get_f(&v)).to_bits(),
-            VsFastOp::SubRevF32 { dst, a, b } => v[dst as usize] = (b.get_f(&v) - a.get_f(&v)).to_bits(),
-            VsFastOp::MulF32 { dst, a, b } => v[dst as usize] = (a.get_f(&v) * b.get_f(&v)).to_bits(),
+            VsFastOp::Mov { dst, a } => v[dst as usize] = a.get(v),
+            VsFastOp::AddF32 { dst, a, b } => v[dst as usize] = (a.get_f(v) + b.get_f(v)).to_bits(),
+            VsFastOp::SubF32 { dst, a, b } => v[dst as usize] = (a.get_f(v) - b.get_f(v)).to_bits(),
+            VsFastOp::SubRevF32 { dst, a, b } => v[dst as usize] = (b.get_f(v) - a.get_f(v)).to_bits(),
+            VsFastOp::MulF32 { dst, a, b } => v[dst as usize] = (a.get_f(v) * b.get_f(v)).to_bits(),
             VsFastOp::MacF32 { dst, a, b } => {
                 let d = f32::from_bits(v[dst as usize]);
-                v[dst as usize] = (a.get_f(&v) * b.get_f(&v) + d).to_bits();
+                v[dst as usize] = (a.get_f(v) * b.get_f(v) + d).to_bits();
             }
-            VsFastOp::MadF32 { dst, a, b, c } => v[dst as usize] = (a.get_f(&v) * b.get_f(&v) + c.get_f(&v)).to_bits(),
-            VsFastOp::FmaF32 { dst, a, b, c } => v[dst as usize] = a.get_f(&v).mul_add(b.get_f(&v), c.get_f(&v)).to_bits(),
+            VsFastOp::MadF32 { dst, a, b, c } => v[dst as usize] = (a.get_f(v) * b.get_f(v) + c.get_f(v)).to_bits(),
+            VsFastOp::FmaF32 { dst, a, b, c } => v[dst as usize] = a.get_f(v).mul_add(b.get_f(v), c.get_f(v)).to_bits(),
             VsFastOp::MadF32Mod { dst, a, b, c, abs, neg, omod, clamp } => {
-                let fa = apply_fmod(a.get_f(&v), abs & 1 != 0, neg & 1 != 0);
-                let fb = apply_fmod(b.get_f(&v), abs & 2 != 0, neg & 2 != 0);
-                let fc = apply_fmod(c.get_f(&v), abs & 4 != 0, neg & 4 != 0);
+                let fa = apply_fmod(a.get_f(v), abs & 1 != 0, neg & 1 != 0);
+                let fb = apply_fmod(b.get_f(v), abs & 2 != 0, neg & 2 != 0);
+                let fc = apply_fmod(c.get_f(v), abs & 4 != 0, neg & 4 != 0);
                 v[dst as usize] = apply_omod_clamp(fa * fb + fc, omod, clamp).to_bits();
             }
             VsFastOp::VopF32Mod { op, dst, a, b, abs, neg, omod, clamp } => {
-                let fa = apply_fmod(a.get_f(&v), abs & 1 != 0, neg & 1 != 0);
-                let fb = apply_fmod(b.get_f(&v), abs & 2 != 0, neg & 2 != 0);
+                let fa = apply_fmod(a.get_f(v), abs & 1 != 0, neg & 1 != 0);
+                let fb = apply_fmod(b.get_f(v), abs & 2 != 0, neg & 2 != 0);
                 let r = match op {
                     0 => fa + fb,
                     1 => fa - fb,
@@ -1521,34 +1521,34 @@ pub fn eval_vs_hoisted(plan: &VsDrawPlan, ix: u32, cntl: &[u32; 8]) -> Option<([
                 };
                 v[dst as usize] = apply_omod_clamp(r, omod, clamp).to_bits();
             }
-            VsFastOp::MaxF32 { dst, a, b } => v[dst as usize] = a.get_f(&v).max(b.get_f(&v)).to_bits(),
-            VsFastOp::MinF32 { dst, a, b } => v[dst as usize] = a.get_f(&v).min(b.get_f(&v)).to_bits(),
-            VsFastOp::RcpF32 { dst, a } => v[dst as usize] = (1.0f32 / a.get_f(&v)).to_bits(),
-            VsFastOp::RsqF32 { dst, a } => v[dst as usize] = (1.0f32 / a.get_f(&v).sqrt()).to_bits(),
-            VsFastOp::SqrtF32 { dst, a } => v[dst as usize] = a.get_f(&v).sqrt().to_bits(),
-            VsFastOp::FloorF32 { dst, a } => v[dst as usize] = a.get_f(&v).floor().to_bits(),
+            VsFastOp::MaxF32 { dst, a, b } => v[dst as usize] = a.get_f(v).max(b.get_f(v)).to_bits(),
+            VsFastOp::MinF32 { dst, a, b } => v[dst as usize] = a.get_f(v).min(b.get_f(v)).to_bits(),
+            VsFastOp::RcpF32 { dst, a } => v[dst as usize] = (1.0f32 / a.get_f(v)).to_bits(),
+            VsFastOp::RsqF32 { dst, a } => v[dst as usize] = (1.0f32 / a.get_f(v).sqrt()).to_bits(),
+            VsFastOp::SqrtF32 { dst, a } => v[dst as usize] = a.get_f(v).sqrt().to_bits(),
+            VsFastOp::FloorF32 { dst, a } => v[dst as usize] = a.get_f(v).floor().to_bits(),
             VsFastOp::FractF32 { dst, a } => {
-                let x = a.get_f(&v);
+                let x = a.get_f(v);
                 v[dst as usize] = (x - x.floor()).to_bits();
             }
-            VsFastOp::CvtF32U32 { dst, a } => v[dst as usize] = (a.get(&v) as f32).to_bits(),
-            VsFastOp::CvtF32I32 { dst, a } => v[dst as usize] = (a.get(&v) as i32 as f32).to_bits(),
-            VsFastOp::CvtU32F32 { dst, a } => v[dst as usize] = a.get_f(&v).clamp(0.0, u32::MAX as f32) as u32,
-            VsFastOp::CvtI32F32 { dst, a } => v[dst as usize] = a.get_f(&v).clamp(i32::MIN as f32, i32::MAX as f32) as i32 as u32,
-            VsFastOp::AndB32 { dst, a, b } => v[dst as usize] = a.get(&v) & b.get(&v),
-            VsFastOp::OrB32 { dst, a, b } => v[dst as usize] = a.get(&v) | b.get(&v),
-            VsFastOp::XorB32 { dst, a, b } => v[dst as usize] = a.get(&v) ^ b.get(&v),
-            VsFastOp::LshlRevB32 { dst, a, b } => v[dst as usize] = b.get(&v) << (a.get(&v) & 31),
-            VsFastOp::LshrRevB32 { dst, a, b } => v[dst as usize] = b.get(&v) >> (a.get(&v) & 31),
-            VsFastOp::AddU32 { dst, a, b } => v[dst as usize] = a.get(&v).wrapping_add(b.get(&v)),
-            VsFastOp::SubU32 { dst, a, b } => v[dst as usize] = a.get(&v).wrapping_sub(b.get(&v)),
-            VsFastOp::MulLoU32 { dst, a, b } => v[dst as usize] = a.get(&v).wrapping_mul(b.get(&v)),
-            VsFastOp::BfeU32 { dst, a, b, c } => v[dst as usize] = bfe(a.get(&v) as u64, b.get(&v) & 31, c.get(&v) & 31) as u32,
+            VsFastOp::CvtF32U32 { dst, a } => v[dst as usize] = (a.get(v) as f32).to_bits(),
+            VsFastOp::CvtF32I32 { dst, a } => v[dst as usize] = (a.get(v) as i32 as f32).to_bits(),
+            VsFastOp::CvtU32F32 { dst, a } => v[dst as usize] = a.get_f(v).clamp(0.0, u32::MAX as f32) as u32,
+            VsFastOp::CvtI32F32 { dst, a } => v[dst as usize] = a.get_f(v).clamp(i32::MIN as f32, i32::MAX as f32) as i32 as u32,
+            VsFastOp::AndB32 { dst, a, b } => v[dst as usize] = a.get(v) & b.get(v),
+            VsFastOp::OrB32 { dst, a, b } => v[dst as usize] = a.get(v) | b.get(v),
+            VsFastOp::XorB32 { dst, a, b } => v[dst as usize] = a.get(v) ^ b.get(v),
+            VsFastOp::LshlRevB32 { dst, a, b } => v[dst as usize] = b.get(v) << (a.get(v) & 31),
+            VsFastOp::LshrRevB32 { dst, a, b } => v[dst as usize] = b.get(v) >> (a.get(v) & 31),
+            VsFastOp::AddU32 { dst, a, b } => v[dst as usize] = a.get(v).wrapping_add(b.get(v)),
+            VsFastOp::SubU32 { dst, a, b } => v[dst as usize] = a.get(v).wrapping_sub(b.get(v)),
+            VsFastOp::MulLoU32 { dst, a, b } => v[dst as usize] = a.get(v).wrapping_mul(b.get(v)),
+            VsFastOp::BfeU32 { dst, a, b, c } => v[dst as usize] = bfe(a.get(v) as u64, b.get(v) & 31, c.get(v) & 31) as u32,
             VsFastOp::SdwaF32 { op, dst, a, b, s } => {
-                let mut ra = sdwa_sel(a.get(&v), (s >> 16) & 7, s & (1 << 19) != 0);
+                let mut ra = sdwa_sel(a.get(v), (s >> 16) & 7, s & (1 << 19) != 0);
                 if s & (1 << 21) != 0 { ra &= 0x7FFF_FFFF; }
                 if s & (1 << 20) != 0 { ra ^= 0x8000_0000; }
-                let mut rb = sdwa_sel(b.get(&v), (s >> 24) & 7, s & (1 << 27) != 0);
+                let mut rb = sdwa_sel(b.get(v), (s >> 24) & 7, s & (1 << 27) != 0);
                 if s & (1 << 29) != 0 { rb &= 0x7FFF_FFFF; }
                 if s & (1 << 28) != 0 { rb ^= 0x8000_0000; }
                 let (fa, fb) = (f32::from_bits(ra), f32::from_bits(rb));
