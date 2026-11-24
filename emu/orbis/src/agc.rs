@@ -1113,7 +1113,7 @@ static PATH_SHADERS: LazyLock<Mutex<std::collections::HashSet<usize>>> = LazyLoc
 static PATH_CACHE: LazyLock<Mutex<PsCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static PS_CACHE: LazyLock<Mutex<PsCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static DECODED_CACHE: LazyLock<Mutex<DecodedCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-type VsSpvCache = HashMap<(usize, u64, [u32; 8], [u16; 8]), Option<std::sync::Arc<Vec<u32>>>>;
+type VsSpvCache = HashMap<(usize, u64, [u32; 8], [u16; 8]), Option<(std::sync::Arc<Vec<u32>>, u32)>>;
 static VS_SPV_CACHE: LazyLock<Mutex<VsSpvCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static GEN_STATS: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 static FRAME_STATS_ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("ORBIS_FRAME_STATS").is_some());
@@ -1275,7 +1275,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 cache
                     .entry((vs_addr, vs_hash, cntl, gpu_data.mubuf_key))
                     .or_insert_with(|| match crate::rdna::vs::translate(&vs_sh, &cntl, &gpu_data.mubuf_key) {
-                        Ok(spv) => Some(std::sync::Arc::new(spv)),
+                        Ok((spv, slots)) => Some((std::sync::Arc::new(spv), slots)),
                         Err(e) => {
                             if *FRAME_STATS_ON {
                                 eprintln!("[orbis] GPU-VS {vs_addr:#x}: fallback ({e})");
@@ -1285,7 +1285,10 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                     })
                     .clone()
             };
-            if let Some(vs_spv) = vs_spv {
+            if let Some((vs_spv, expected_slots)) = vs_spv {
+                if gpu_data.params.len() != expected_slots as usize {
+                    eprintln!("[orbis] GPU-VS SLOT MISMATCH vs={vs_addr:#x}: params={} expected={expected_slots}", gpu_data.params.len());
+                } else {
                 let (tr_spv, cube) = tr.unwrap();
                 let info = pre.unwrap();
                 let ps_hash = hash ^ (std::sync::Arc::as_ptr(&tr_spv) as u64);
@@ -1384,6 +1387,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 }
                 GEN_STATS[0].fetch_add(1, Ordering::Relaxed);
                 return true;
+                }
             }
         }
     }

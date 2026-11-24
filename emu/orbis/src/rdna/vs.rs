@@ -35,9 +35,9 @@ mod glsl {
     pub const FMAX: u32 = 40;
     pub const FCLAMP: u32 = 43;
     pub const FMA: u32 = 50;
-    pub const UNPACK_HALF2X16: u32 = 60;
-    pub const UNPACK_SNORM2X16: u32 = 61;
-    pub const UNPACK_UNORM2X16: u32 = 62;
+    pub const UNPACK_SNORM2X16: u32 = 60;
+    pub const UNPACK_UNORM2X16: u32 = 61;
+    pub const UNPACK_HALF2X16: u32 = 62;
     pub const UNPACK_SNORM4X8: u32 = 63;
     pub const UNPACK_UNORM4X8: u32 = 64;
 }
@@ -313,7 +313,9 @@ impl VsBuilder {
         let widx1 = self.b.i_add(self.t_u32, None, widx, one).unwrap();
         let hi = self.load_vb_u32(vb_slot, widx1);
         let sh_lo = self.b.shift_left_logical(self.t_u32, None, rem, three).unwrap();
-        let sh_hi = self.b.i_sub(self.t_u32, None, c32, sh_lo).unwrap();
+        let sh_hi_raw = self.b.i_sub(self.t_u32, None, c32, sh_lo).unwrap();
+        let c31 = self.cu(31);
+        let sh_hi = self.b.bitwise_and(self.t_u32, None, sh_hi_raw, c31).unwrap();
         let p0 = self.b.shift_right_logical(self.t_u32, None, lo, sh_lo).unwrap();
         let p1 = self.b.shift_left_logical(self.t_u32, None, hi, sh_hi).unwrap();
         let unaligned = self.b.bitwise_or(self.t_u32, None, p0, p1).unwrap();
@@ -405,7 +407,8 @@ impl VsBuilder {
 }
 
 /// Translates an eligible RDNA2 vertex shader into a native Vulkan SPIR-V 1.3 vertex shader.
-pub fn translate(sh: &CompiledShader, cntl: &[u32; 8], mubuf_key: &[u16; MAX_MUBUFS]) -> Result<Vec<u32>, String> {
+/// Returns `(spirv_words, expected_param_u32_count)`.
+pub fn translate(sh: &CompiledShader, cntl: &[u32; 8], mubuf_key: &[u16; MAX_MUBUFS]) -> Result<(Vec<u32>, u32), String> {
     if !is_gpu_vs_eligible(sh) {
         return Err("not eligible".into());
     }
@@ -423,13 +426,14 @@ pub fn translate(sh: &CompiledShader, cntl: &[u32; 8], mubuf_key: &[u16; MAX_MUB
     let t_v2f = b.type_vector(t_f32, 2);
     let t_v4f = b.type_vector(t_f32, 4);
 
-    // Private VGPR file: uint[256]
+    // Private VGPR file: uint[256] zero-initialized to match CPU Lane::new()
     let c256 = b.constant_bit32(t_u32, 256);
     let t_vregs = b.type_array(t_u32, c256);
+    let null_vregs = b.constant_null(t_vregs);
     let p_priv_vregs = b.type_pointer(None, spirv::StorageClass::Private, t_vregs);
     let p_priv_u32 = b.type_pointer(None, spirv::StorageClass::Private, t_u32);
     let p_priv_bool = b.type_pointer(None, spirv::StorageClass::Private, t_bool);
-    let vregs = b.variable(p_priv_vregs, None, spirv::StorageClass::Private, None);
+    let vregs = b.variable(p_priv_vregs, None, spirv::StorageClass::Private, Some(null_vregs));
     let exec_var = b.variable(p_priv_bool, None, spirv::StorageClass::Private, None);
 
     // StorageBuffer runtime array struct: { uint data[]; }
@@ -867,7 +871,8 @@ pub fn translate(sh: &CompiledShader, cntl: &[u32; 8], mubuf_key: &[u16; MAX_MUB
     let mut iface = vec![v_idx_in, pos_out];
     iface.extend(attr_outs.iter().copied());
     t.b.entry_point(spirv::ExecutionModel::Vertex, main, "main", iface);
-    Ok(t.b.module().assemble())
+    let expected_slots = t.slot_idx;
+    Ok((t.b.module().assemble(), expected_slots))
 }
 
 fn emit_load_format(t: &mut VsBuilder, vb_slot: usize, byte_addr: Word, fmt: u32) -> Result<[Word; 4], String> {
@@ -1006,8 +1011,9 @@ mod tests {
         let code = [0xf800_08cf, 0x0302_0100, 0xbf81_0000];
         let sh = CompiledShader::new(&code);
         assert!(is_gpu_vs_eligible(&sh));
-        let spv = translate(&sh, &[0, 1, 2, 3, 4, 5, 6, 7], &[0; MAX_MUBUFS]).expect("spirv");
+        let (spv, slots) = translate(&sh, &[0, 1, 2, 3, 4, 5, 6, 7], &[0; MAX_MUBUFS]).expect("spirv");
         assert_eq!(spv[0], 0x0723_0203); // SPIR-V magic
+        assert_eq!(slots, SLOT_BASE);
         assert!(spv.len() > 20);
     }
 }
