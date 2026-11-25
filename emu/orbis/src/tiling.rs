@@ -174,8 +174,8 @@ fn untile_32bpp_raw(src: &[u8], width: u32, height: u32, swizzle_mode: u32, dst_
 
     // GFX10.3 / RDNA2 SW_64KB_R_X (mode 27, 32-bpp, 128x128 = 64 KiB, PS5 Oberon 16-pipe):
     //   256B micro-tile (8x8):  bits [0..5]  = (x0, x1, y0, y1, y2, x2)
-    //   16-pipe _X XOR:         bits [6..9]  = (x3^y3, x4^y4, x5^y5, x6^y6)
-    //   64KB macro-tile upper:  bits [10..13]= (y3, x4, y5, x6)
+    //   16-pipe _X XOR:         bits [6..9]  = (x3^y3, x4^y4, y5^x6, x5^y6)
+    //   64KB macro-tile upper:  bits [10..13]= (y3, x4, y6, x6)
     if swizzle_mode == 27 || swizzle_mode == 25 || swizzle_mode == 26 {
         let tiles_x = (w + 127) / 128;
         let is_rx = swizzle_mode == 27;
@@ -188,7 +188,7 @@ fn untile_32bpp_raw(src: &[u8], width: u32, height: u32, swizzle_mode: u32, dst_
             let y5 = (ly >> 5) & 1;
             let y6 = (ly >> 6) & 1;
             let y_lo = ((ly & 3) << 2) | (y2 << 4);
-            let y_hi = (y3 << 10) | (y5 << 12);
+            let y_hi = (y3 << 10) | (y6 << 12);
             let row_base = ty * tiles_x;
             for x in 0..w {
                 let tx = x >> 7;
@@ -204,8 +204,8 @@ fn untile_32bpp_raw(src: &[u8], width: u32, height: u32, swizzle_mode: u32, dst_
                         | (x2 << 5)
                         | ((x3 ^ y3) << 6)
                         | ((x4 ^ y4) << 7)
-                        | ((x5 ^ y5) << 8)
-                        | ((x6 ^ y6) << 9)
+                        | ((y5 ^ x6) << 8)
+                        | ((x5 ^ y6) << 9)
                         | y_hi
                         | (x4 << 11)
                         | (x6 << 13)
