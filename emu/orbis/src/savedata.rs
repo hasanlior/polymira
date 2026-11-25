@@ -56,6 +56,48 @@ pub extern "sysv64" fn ok() -> i32 {
     0
 }
 
+/// Removes Minecraft Bedrock's `"guard"` crash-sentinel key from `telemetry_info.json`
+/// while preserving all other fields (`file_version`, `lastsession_Build`, `lastsession_id`).
+fn strip_telemetry_guard(json_text: &str) -> Option<String> {
+    let mut val: serde_json::Value = serde_json::from_str(json_text).ok()?;
+    let obj = val.as_object_mut()?;
+    if obj.remove("guard").is_some() {
+        serde_json::to_string_pretty(&val).ok()
+    } else {
+        None
+    }
+}
+
+/// Cleans up stale unclean-shutdown sentinels left behind when the emulator window is closed
+/// via `WM_DESTROY` (`std::process::exit(0)`):
+/// 1. Strips `"guard"` from `BedrockUserSettingsStorage/telemetry_info.json` so Minecraft does
+///    not trigger "Global resources reset" or its crash-recovery relaunch path.
+/// 2. Removes stale crash markers under `<data_root>/download0/crash`.
+fn cleanup_crash_sentinels() {
+    let tel_path = root().join("BedrockUserSettingsStorage").join("telemetry_info.json");
+    if let Ok(text) = std::fs::read_to_string(&tel_path) {
+        if let Some(cleaned) = strip_telemetry_guard(&text) {
+            let _ = std::fs::write(&tel_path, cleaned);
+        }
+    }
+    let crash_dir = PathBuf::from(format!("{}/download0/crash", crate::kernel::data_root()));
+    if let Ok(rd) = std::fs::read_dir(&crash_dir) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_file() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+}
+
+/// sceSaveDataInitialize3(initParam): cleans stale crash sentinels once on startup.
+pub extern "sysv64" fn init3() -> i32 {
+    static CLEANED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    CLEANED.get_or_init(cleanup_crash_sentinels);
+    0
+}
+
 /// sceSaveDataMount3(mount, result): mount = { user, dirName*, blocks, systemBlocks, mode, …, resource }
 /// result = { char mountPoint[16]; …; u32 mountStatus at 0x1C }
 pub extern "sysv64" fn mount3(mount: *const u8, result: *mut u8) -> i32 {
@@ -205,7 +247,7 @@ pub extern "sysv64" fn delete(del: *const u8) -> i32 {
 
 pub fn functions() -> Vec<(&'static str, usize)> {
     vec![
-        ("sceSaveDataInitialize3", ok as *const () as usize),
+        ("sceSaveDataInitialize3", init3 as *const () as usize),
         ("sceSaveDataMount", mount3 as *const () as usize),
         ("sceSaveDataMount2", mount3 as *const () as usize),
         ("#ZP4e7rlzOUk", mount3 as *const () as usize), // sceSaveDataMount3
@@ -224,4 +266,26 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("#85zul--eGXs", ok as *const () as usize), // sceSaveDataSetParam
         ("sceSaveDataSaveIcon", ok as *const () as usize),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_telemetry_guard_removes_guard_only() {
+        let input = r#"{
+            "file_version": 1,
+            "guard": "30f67073-3f89-33d3-bf03-219bc379f52a",
+            "lastsession_Build": "1.21.43",
+            "lastsession_id": "bf28c945-68d1-4e20-a0c4-1e1791fc0c09"
+        }"#;
+        let out = strip_telemetry_guard(input).expect("should strip guard");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(parsed.get("guard").is_none());
+        assert_eq!(parsed["file_version"], 1);
+        assert_eq!(parsed["lastsession_Build"], "1.21.43");
+        // Calling again on already-clean JSON returns None (no redundant write).
+        assert!(strip_telemetry_guard(&out).is_none());
+    }
 }

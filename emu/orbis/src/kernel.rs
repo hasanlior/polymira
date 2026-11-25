@@ -870,6 +870,17 @@ fn with_file<R>(fd: i32, f: impl FnOnce(&mut std::fs::File) -> R) -> Option<R> {
     }
 }
 
+/// Flushes all currently open guest file descriptors to disk (used before clean process exit).
+pub fn flush_all_files() {
+    if let Ok(mut files) = FILES.try_lock() {
+        for entry in files.iter_mut().flatten() {
+            if let FdEntry::File(f) = entry {
+                let _ = f.sync_all();
+            }
+        }
+    }
+}
+
 pub extern "sysv64" fn sce_close(fd: i32) -> i32 {
     if fd < 3 {
         return 0;
