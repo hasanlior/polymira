@@ -173,47 +173,55 @@ fn untile_32bpp_raw(src: &[u8], width: u32, height: u32, swizzle_mode: u32, dst_
     }
 
     // GFX10.3 / RDNA2 SW_64KB_R_X (mode 27, 32-bpp, 128x128 = 64 KiB, PS5 Oberon 16-pipe):
-    //   256B micro-tile (8x8):  bits [0..5]  = (x0, x1, y0, y1, x2, y2)
-    //   64KB macro-tile:        bits [6..13] = (y3, x3, y4, x4, y5, x5, y6, x6)
-    //   16-pipe _X XOR:         bits [6..9]  ^= (x6, y6, x5, y5)
+    //   256B micro-tile (8x8):  bits [0..5]  = (x0, x1, y0, y1, y2, x2)
+    //   16-pipe _X XOR:         bits [6..9]  = (x3^y3, x4^y4, x5^y5, x6^y6)
+    //   64KB macro-tile upper:  bits [10..13]= (y3, x4, y5, x6)
     if swizzle_mode == 27 || swizzle_mode == 25 || swizzle_mode == 26 {
         let tiles_x = (w + 127) / 128;
         let is_rx = swizzle_mode == 27;
         for y in 0..h {
             let ty = y >> 7;
             let ly = y & 127;
-            let y5 = (ly >> 5) & 1;
-            let y6 = (ly >> 6) & 1;
+            let y2 = (ly >> 2) & 1;
             let y3 = (ly >> 3) & 1;
             let y4 = (ly >> 4) & 1;
-            let y_lo = ((ly & 3) << 2) | (((ly >> 2) & 1) << 5);
+            let y5 = (ly >> 5) & 1;
+            let y6 = (ly >> 6) & 1;
+            let y_lo = ((ly & 3) << 2) | (y2 << 4);
+            let y_hi = (y3 << 10) | (y5 << 12);
             let row_base = ty * tiles_x;
             for x in 0..w {
                 let tx = x >> 7;
                 let lx = x & 127;
+                let x2 = (lx >> 2) & 1;
+                let x3 = (lx >> 3) & 1;
+                let x4 = (lx >> 4) & 1;
                 let x5 = (lx >> 5) & 1;
                 let x6 = (lx >> 6) & 1;
-                let mut b6 = y3;
-                let mut b7 = (lx >> 3) & 1;
-                let mut b8 = y4;
-                let mut b9 = (lx >> 4) & 1;
-                if is_rx {
-                    b6 ^= x6;
-                    b7 ^= y6;
-                    b8 ^= x5;
-                    b9 ^= y5;
-                }
-                let in_tile = (lx & 3)
-                    | y_lo
-                    | (((lx >> 2) & 1) << 4)
-                    | (b6 << 6)
-                    | (b7 << 7)
-                    | (b8 << 8)
-                    | (b9 << 9)
-                    | (y5 << 10)
-                    | (x5 << 11)
-                    | (y6 << 12)
-                    | (x6 << 13);
+                let in_tile = if is_rx {
+                    (lx & 3)
+                        | y_lo
+                        | (x2 << 5)
+                        | ((x3 ^ y3) << 6)
+                        | ((x4 ^ y4) << 7)
+                        | ((x5 ^ y5) << 8)
+                        | ((x6 ^ y6) << 9)
+                        | y_hi
+                        | (x4 << 11)
+                        | (x6 << 13)
+                } else {
+                    (lx & 3)
+                        | y_lo
+                        | (x2 << 5)
+                        | (y3 << 6)
+                        | (x3 << 7)
+                        | (y4 << 8)
+                        | (x4 << 9)
+                        | (y5 << 10)
+                        | (x5 << 11)
+                        | (y6 << 12)
+                        | (x6 << 13)
+                };
                 let byte_off = ((row_base + tx) * 65536) + (in_tile * 4);
                 if byte_off + 4 <= src.len() {
                     dst[y * w + x] = map_px([

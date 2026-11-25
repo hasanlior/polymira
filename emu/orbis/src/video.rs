@@ -433,6 +433,7 @@ unsafe extern "system" fn wndproc(hwnd: windows_sys::Win32::Foundation::HWND, ms
             0
         }
         WM_DESTROY => {
+            crate::kernel::flush_all_files();
             std::process::exit(0);
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),

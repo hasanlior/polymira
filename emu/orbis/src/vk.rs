@@ -1098,9 +1098,13 @@ impl VkRenderer {
         }
         // The game may fill or reuse a texture after we first uploaded it: compare a sampled
         // checksum and upload again into the same image when it changed.
+        // For small dynamic textures (e.g. 16x16 terrain lightmap), hash every word of the
+        // actual pixel footprint so lighting updates are never missed!
         let sum = {
-            let words = avail / 8;
-            let step = if bpp == 1 { 1 } else { (words / 512).max(1) };
+            let pix_bytes = (width as usize).saturating_mul(height as usize).saturating_mul(bpp);
+            let hash_bytes = if width <= 64 && height <= 64 { avail.min(pix_bytes.max(64)) } else { avail };
+            let words = hash_bytes / 8;
+            let step = if bpp == 1 || (width <= 64 && height <= 64) { 1 } else { (words / 512).max(1) };
             let p = addr as *const u64;
             let mut h = 0xcbf2_9ce4_8422_2325u64 ^ (width as u64) << 32 ^ height as u64 ^ ((swiz as u64) << 48);
             let mut k = 0;
@@ -2355,8 +2359,9 @@ impl VkRenderer {
             }
             used.sort();
             used.dedup();
-            // Evict least-recently-used offscreen RTs if cache grows beyond 24 targets (prevents VRAM OOM).
-            if self.targets.len() > 24 {
+            // Evict least-recently-used offscreen RTs if cache grows beyond 48 targets (prevents VRAM OOM
+            // while keeping multi-layer Cohtml/OreUI screens like Create New World intact).
+            if self.targets.len() > 48 {
                 let mut candidates: Vec<(u64, usize)> = self
                     .targets
                     .keys()
@@ -2365,7 +2370,7 @@ impl VkRenderer {
                     .map(|a| (self.rt_last_used.get(&a).copied().unwrap_or(0), a))
                     .collect();
                 candidates.sort_by_key(|&(t, _)| t);
-                let to_evict = self.targets.len().saturating_sub(24);
+                let to_evict = self.targets.len().saturating_sub(48);
                 if to_evict > 0 && !candidates.is_empty() {
                     let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
                     for &(_, addr) in candidates.iter().take(to_evict) {
