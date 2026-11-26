@@ -290,8 +290,8 @@ pub extern "sysv64" fn batch_map2(entries: *mut BatchMapEntry, nentries: i32, ne
     batch_map(entries, nentries, nentries_out)
 }
 
-/// Direct memory: coalescing, alignment-aware free-list over a 64 GiB offset pool (virtual offsets only).
-const DIRECT_SIZE: u64 = 64 << 30;
+/// Direct memory: coalescing, alignment-aware free-list over PS5's 12 GiB game-accessible budget.
+const DIRECT_SIZE: u64 = 12 << 30;
 static DIRECT_MAPS: Mutex<Vec<(usize, usize, u64)>> = Mutex::new(Vec::new());
 static PEAK_DIRECT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -455,13 +455,13 @@ pub extern "sysv64" fn map_named_direct(addr: *mut usize, len: usize, prot: i32,
 }
 
 pub extern "sysv64" fn direct_memory_size() -> u64 {
-    12 << 30 // Real PS5 Prospero direct-memory budget (12 GiB); internal DirectPool has 64 GiB headroom
+    DIRECT_SIZE // Real PS5 Prospero direct-memory budget (12 GiB), matching DirectPool 1-to-1
 }
 
 /// sceKernelAvailableFlexibleMemorySize(size_t* out)
 pub extern "sysv64" fn available_flexible(out: *mut u64) -> i32 {
     if !out.is_null() {
-        unsafe { *out = 8 << 30 }; // 8 GiB PS5-class flexible RAM for 3D world chunks & structures
+        unsafe { *out = 4 << 30 }; // 4 GiB flexible RAM
     }
     0
 }
@@ -470,14 +470,14 @@ pub extern "sysv64" fn available_flexible(out: *mut u64) -> i32 {
 pub extern "sysv64" fn available_direct(s: i64, e: i64, a: u64, out_start: *mut u64, out_size: *mut u64) -> i32 {
     let pool = direct_pool().lock().unwrap_or_else(|e| e.into_inner());
     let start = s.max(0) as u64;
-    let end = if e <= 0 { DIRECT_SIZE } else { e as u64 };
+    let end = if e <= 0 { DIRECT_SIZE } else { (e as u64).min(DIRECT_SIZE) };
     let (best_start, best_size) = pool.largest_free(start, end, a);
     unsafe {
         if !out_start.is_null() {
             *out_start = best_start;
         }
         if !out_size.is_null() {
-            *out_size = best_size;
+            *out_size = best_size.min(DIRECT_SIZE);
         }
     }
     0
