@@ -61,8 +61,110 @@ pub fn is_gpu_vs_eligible(sh: &CompiledShader) -> bool {
     sh.gpu_vs_eligible
 }
 
-/// Runs the scalar/SMEM instructions of `sh` once on the CPU and appends all per-draw
-/// uniforms + vertex-buffer bindings directly into `out_params` (zero per-draw heap alloc!).
+#[derive(Clone, Copy)]
+enum ExtractOp {
+    Scalar(u16),
+    Mubuf { inst_off: u16, srsrc: u8, soff: u16, fmt: u8, use_inst_fmt: bool },
+    PushSgpr(u8),
+    PushConst(u32),
+    PushSgprBit(u8),
+}
+
+fn build_extract_plan(sh: &CompiledShader) -> Option<Vec<ExtractOp>> {
+    let dummy_lane = Lane::new();
+    let push_src = |ops: &mut Vec<ExtractOp>, code: u16, lit: Option<u32>| {
+        if code < 128 {
+            ops.push(ExtractOp::PushSgpr(code as u8));
+        } else if code < 256 {
+            ops.push(ExtractOp::PushConst(dummy_lane.src_pub(code, lit)));
+        }
+    };
+    let mut ops = Vec::with_capacity(sh.insts.len() / 2);
+    for (idx, inst) in sh.insts.iter().enumerate() {
+        let w0 = inst.w0();
+        let w1 = inst.w1();
+        let lit = inst.literal;
+        match inst.fmt {
+            Fmt::Sop1 | Fmt::Sop2 | Fmt::Sopc | Fmt::Sopk | Fmt::Smem => {
+                ops.push(ExtractOp::Scalar(idx as u16));
+            }
+            Fmt::Sopp => {
+                if inst.name == "s_endpgm" {
+                    break;
+                }
+            }
+            Fmt::Mubuf | Fmt::Mtbuf => {
+                let offen = w0 & (1 << 12) != 0;
+                let idxen = w0 & (1 << 13) != 0;
+                if !idxen || offen {
+                    return None;
+                }
+                let use_inst_fmt = inst.fmt == Fmt::Mtbuf;
+                ops.push(ExtractOp::Mubuf {
+                    inst_off: (w0 & 0xFFF) as u16,
+                    srsrc: (((w1 >> 16) & 0x1F) * 4) as u8,
+                    soff: ((w1 >> 24) & 0xFF) as u16,
+                    fmt: if use_inst_fmt { ((w0 >> 19) & 0x7F) as u8 } else { 0 },
+                    use_inst_fmt,
+                });
+            }
+            Fmt::Vopc => {
+                push_src(&mut ops, (w0 & 0x1FF) as u16, lit);
+            }
+            Fmt::Vop1 => {
+                if inst.ext == Ext::Sdwa {
+                    let s = inst.words[1];
+                    if s & (1 << 23) != 0 {
+                        push_src(&mut ops, (s & 0xFF) as u16, None);
+                    }
+                } else {
+                    push_src(&mut ops, (w0 & 0x1FF) as u16, lit);
+                }
+            }
+            Fmt::Vop2 => {
+                if inst.ext == Ext::Sdwa {
+                    let s = inst.words[1];
+                    if s & (1 << 23) != 0 {
+                        push_src(&mut ops, (s & 0xFF) as u16, None);
+                    }
+                    if s & (1 << 31) != 0 {
+                        push_src(&mut ops, ((w0 >> 9) & 0xFF) as u16, None);
+                    }
+                } else {
+                    push_src(&mut ops, (w0 & 0x1FF) as u16, lit);
+                    let n = inst.name;
+                    if n.starts_with("v_madmk") || n.starts_with("v_fmamk") || n.starts_with("v_madak") || n.starts_with("v_fmaak") {
+                        ops.push(ExtractOp::PushConst(lit.unwrap_or(0)));
+                    } else if n.starts_with("v_cndmask") {
+                        ops.push(ExtractOp::PushSgprBit(106));
+                    }
+                }
+            }
+            Fmt::Vop3 => {
+                let s0 = (w1 & 0x1FF) as u16;
+                let s1 = ((w1 >> 9) & 0x1FF) as u16;
+                let s2 = ((w1 >> 18) & 0x1FF) as u16;
+                push_src(&mut ops, s0, lit);
+                push_src(&mut ops, s1, lit);
+                if inst.name.starts_with("v_cndmask") {
+                    if s2 < 128 {
+                        ops.push(ExtractOp::PushSgprBit(s2 as u8));
+                    } else {
+                        return None;
+                    }
+                } else {
+                    push_src(&mut ops, s2, lit);
+                }
+            }
+            Fmt::Exp => {}
+            _ => return None,
+        }
+    }
+    Some(ops)
+}
+
+/// Runs the pre-compiled scalar/SMEM extract plan of `sh` once on the CPU and appends all
+/// per-draw uniforms + vertex-buffer bindings directly into `out_params` (zero per-draw alloc!).
 pub fn extract_gpu_vs_draw(
     sh: &CompiledShader,
     vs_ud: &[u32; 24],
@@ -74,9 +176,30 @@ pub fn extract_gpu_vs_draw(
     if !is_gpu_vs_eligible(sh) {
         return None;
     }
+    let sh_key = sh as *const CompiledShader as usize;
     thread_local! {
         static TL_VS_LANE: std::cell::RefCell<Lane> = std::cell::RefCell::new(Lane::new());
+        static TL_PLAN: std::cell::RefCell<[(usize, Option<std::sync::Arc<Vec<ExtractOp>>>); 8]> =
+            const { std::cell::RefCell::new([(0, None), (0, None), (0, None), (0, None), (0, None), (0, None), (0, None), (0, None)]) };
+        static TL_PLAN_NEXT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
+    let plan = TL_PLAN.with(|c| {
+        let mut arr = c.borrow_mut();
+        for (k, p) in arr.iter() {
+            if *k == sh_key {
+                return p.clone();
+            }
+        }
+        let built = build_extract_plan(sh).map(std::sync::Arc::new);
+        let idx = TL_PLAN_NEXT.with(|n| {
+            let i = n.get();
+            n.set((i + 1) & 7);
+            i
+        });
+        arr[idx] = (sh_key, built.clone());
+        built
+    })?;
+
     let param_start = out_params.len();
     let res = TL_VS_LANE.with(|cell| {
         let mut lane = cell.borrow_mut();
@@ -94,39 +217,24 @@ pub fn extract_gpu_vs_draw(
         out_params.resize(param_start + SLOT_BASE as usize, 0);
         out_params[param_start..param_start + 8].copy_from_slice(&vp);
 
-        for inst in &sh.insts {
-            let w0 = inst.w0();
-            let w1 = inst.w1();
-            let lit = inst.literal;
-            match inst.fmt {
-                Fmt::Sop1 | Fmt::Sop2 | Fmt::Sopc | Fmt::Sopk | Fmt::Smem => {
-                    super::interp::step_scalar_for_gpu(inst, &mut lane, ok)?;
+        for &op in plan.iter() {
+            match op {
+                ExtractOp::Scalar(idx) => {
+                    super::interp::step_scalar_for_gpu(&sh.insts[idx as usize], &mut lane, ok)?;
                 }
-                Fmt::Sopp => {
-                    if inst.name == "s_endpgm" {
-                        break;
-                    }
-                }
-                Fmt::Mubuf | Fmt::Mtbuf => {
+                ExtractOp::Mubuf { inst_off, srsrc, soff, fmt, use_inst_fmt } => {
                     if n_mubuf >= MAX_MUBUFS {
                         return None;
                     }
-                    let inst_off = (w0 & 0xFFF) as u64;
-                    let offen = w0 & (1 << 12) != 0;
-                    let idxen = w0 & (1 << 13) != 0;
-                    if !idxen || offen {
-                        return None;
-                    }
-                    let srsrc = (((w1 >> 16) & 0x1F) * 4) as usize;
-                    let soff = lane.src_pub(((w1 >> 24) & 0xFF) as u16, None) as u64;
-                    let bw0 = lane.s[srsrc] as u64;
-                    let bw1 = lane.s[srsrc + 1];
-                    let bw2 = lane.s[srsrc + 2];
+                    let sr = srsrc as usize;
+                    let soff_val = if soff < 128 { lane.s[soff as usize] as u64 } else { lane.src_pub(soff, None) as u64 };
+                    let bw0 = lane.s[sr] as u64;
+                    let bw1 = lane.s[sr + 1];
+                    let bw2 = lane.s[sr + 2];
                     let base = bw0 | (((bw1 & 0xFFFF) as u64) << 32);
                     let stride = ((bw1 >> 16) & 0x3FFF) as u64;
-                    let vfmt = (lane.s[srsrc + 3] >> 12) & 0x7F;
-                    let fmt = if inst.fmt == Fmt::Mtbuf { (w0 >> 19) & 0x7F } else { vfmt };
-                    let base_addr = base.wrapping_add(soff).wrapping_add(inst_off) as usize;
+                    let fmt_v = if use_inst_fmt { fmt as u32 } else { (lane.s[sr + 3] >> 12) & 0x7F };
+                    let base_addr = base.wrapping_add(soff_val).wrapping_add(inst_off as u64) as usize;
                     let raw_need = if bw2 > 0 && bw2 < 0x1000_0000 {
                         if stride > 0 {
                             let recs = if index_32bit { bw2 as usize } else { (bw2 as usize).min(65536) };
@@ -169,71 +277,14 @@ pub fn extract_gpu_vs_draw(
                             s
                         }
                     };
-                    mubuf_key[n_mubuf] = ((slot as u16) << 8) | (fmt as u16 & 0xFF);
+                    mubuf_key[n_mubuf] = ((slot as u16) << 8) | (fmt_v as u16 & 0xFF);
                     out_params[param_start + 8 + n_mubuf * 2] = rel_off as u32;
                     out_params[param_start + 8 + n_mubuf * 2 + 1] = stride as u32;
                     n_mubuf += 1;
                 }
-                Fmt::Vopc => {
-                    let s0 = (w0 & 0x1FF) as u16;
-                    if s0 < 256 {
-                        out_params.push(lane.src_pub(s0, lit));
-                    }
-                }
-                Fmt::Vop1 => {
-                    if inst.ext == Ext::Sdwa {
-                        let s = inst.words[1];
-                        if s & (1 << 23) != 0 {
-                            out_params.push(lane.src_pub((s & 0xFF) as u16, None));
-                        }
-                    } else {
-                        let s0 = (w0 & 0x1FF) as u16;
-                        if s0 < 256 {
-                            out_params.push(lane.src_pub(s0, lit));
-                        }
-                    }
-                }
-                Fmt::Vop2 => {
-                    if inst.ext == Ext::Sdwa {
-                        let s = inst.words[1];
-                        if s & (1 << 23) != 0 {
-                            out_params.push(lane.src_pub((s & 0xFF) as u16, None));
-                        }
-                        if s & (1 << 31) != 0 {
-                            out_params.push(lane.src_pub(((w0 >> 9) & 0xFF) as u16, None));
-                        }
-                    } else {
-                        let s0 = (w0 & 0x1FF) as u16;
-                        if s0 < 256 {
-                            out_params.push(lane.src_pub(s0, lit));
-                        }
-                        let n = inst.name;
-                        if n.starts_with("v_madmk") || n.starts_with("v_fmamk") || n.starts_with("v_madak") || n.starts_with("v_fmaak") {
-                            out_params.push(lit.unwrap_or(0));
-                        } else if n.starts_with("v_cndmask") {
-                            out_params.push(lane.s[106] & 1);
-                        }
-                    }
-                }
-                Fmt::Vop3 => {
-                    let s0 = (w1 & 0x1FF) as u16;
-                    let s1 = ((w1 >> 9) & 0x1FF) as u16;
-                    let s2 = ((w1 >> 18) & 0x1FF) as u16;
-                    if s0 < 256 {
-                        out_params.push(lane.src_pub(s0, lit));
-                    }
-                    if s1 < 256 {
-                        out_params.push(lane.src_pub(s1, lit));
-                    }
-                    if inst.name.starts_with("v_cndmask") {
-                        let bit = if (s2 as usize) < 128 { lane.s[s2 as usize] & 1 } else { return None };
-                        out_params.push(bit);
-                    } else if s2 < 256 {
-                        out_params.push(lane.src_pub(s2, lit));
-                    }
-                }
-                Fmt::Exp => {}
-                _ => return None,
+                ExtractOp::PushSgpr(r) => out_params.push(lane.s[r as usize]),
+                ExtractOp::PushConst(v) => out_params.push(v),
+                ExtractOp::PushSgprBit(r) => out_params.push(lane.s[r as usize] & 1),
             }
         }
         Some(GpuVsDrawData {

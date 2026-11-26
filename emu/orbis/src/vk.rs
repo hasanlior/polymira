@@ -3246,8 +3246,8 @@ impl VkRenderer {
                     eprintln!("[orbis] OREUI-DIAG frame={n} draws={} display={:#x}({}x{})", gens.len(), display.0, display.1, display.2);
                     for (i, gd) in gens.iter().take(80).enumerate() {
                         eprintln!(
-                            "[orbis]   #{i:02}: rt={:#x}({}x{}) ps={:#x} blend={:#x} dctl={:#x} wm={:#x} prim={} sc={:?} v={} i={} tex={:x?}",
-                            gd.rt.0, gd.rt.1, gd.rt.2, gd.key.0, gd.blend, gd.depth, gd.wmask, gd.prim, gd.scissor, gd.vertex_count, gd.index_count, gd.tex
+                            "[orbis]   #{i:02}: rt={:#x}({}x{}) ps={:#x} blend={:#x} dctl={:#x} sctl={:#x} sref={:#x} wm={:#x} prim={} sc={:?} v={} i={} tex={:x?}",
+                            gd.rt.0, gd.rt.1, gd.rt.2, gd.key.0, gd.blend, gd.depth, gd.stencil_ctl, gd.stencil_ref, gd.wmask, gd.prim, gd.scissor, gd.vertex_count, gd.index_count, gd.tex
                         );
                     }
                 }

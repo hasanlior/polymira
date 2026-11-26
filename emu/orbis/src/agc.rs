@@ -1069,7 +1069,7 @@ static VS_POOL: LazyLock<std::sync::Arc<VsPoolState>> = LazyLock::new(|| {
 
 fn vs_parallel_for<F: Fn(usize, usize) + Sync>(total: usize, f: F) {
     let pool = &*VS_POOL;
-    if pool.n_workers == 0 || total < 256 {
+    if pool.n_workers == 0 || total < 48 {
         f(0, total);
         return;
     }
@@ -1077,7 +1077,7 @@ fn vs_parallel_for<F: Fn(usize, usize) + Sync>(total: usize, f: F) {
         let f = unsafe { &*(ctx as *const F) };
         f(start, end);
     }
-    let chunk = (total / ((pool.n_workers + 1) * 4)).clamp(64, 512);
+    let chunk = (total / ((pool.n_workers + 1) * 4)).clamp(16, 512);
     pool.next.store(0, Ordering::Relaxed);
     pool.remaining.store(pool.n_workers, Ordering::Release);
     {
