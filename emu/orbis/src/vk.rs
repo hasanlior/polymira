@@ -66,10 +66,14 @@ pub struct GenDraw {
     pub samp: [u32; 4],
     /// Samplers for bindings 1..3.
     pub extra_samps: [[u32; 4]; 3],
-    /// DB_DEPTH_CONTROL (bit 1 test, bit 2 write, bits 4..6 compare function).
+    /// DB_DEPTH_CONTROL (bit 0 stencil, bit 1 test, bit 2 write, bits 4..6 zfunc, bits 8..10 sfunc).
     pub depth: u32,
     /// DB_DEPTH_CLEAR: value a cleared depth buffer starts with.
     pub zclear: f32,
+    /// DB_STENCIL_CONTROL (cx 0x10B), DB_STENCILREFMASK (cx 0x10C), DB_STENCILREFMASK_BF (cx 0x10D).
+    pub stencil_ctl: u32,
+    pub stencil_ref: u32,
+    pub stencil_ref_bf: u32,
     /// VGT_PRIMITIVE_TYPE (1=POINT_LIST, 2=LINE_LIST, 3=LINE_STRIP, 4=TRIANGLE_LIST, 5=TRIANGLE_STRIP).
     pub prim: u8,
     /// Optional direct guest index buffer `(addr, byte_len, is_32bit)` bound via VRAM `guest_ib_cache`.
@@ -92,6 +96,7 @@ static READY_GIDXS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static READY_VS_PARAMS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static QUARANTINED_GPU_VS: std::sync::LazyLock<Mutex<std::collections::HashSet<usize>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+static HAS_QUARANTINED_GPU_VS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SAVED_WINDOW: Mutex<Option<(usize, usize, u32, u32)>> = Mutex::new(None);
 static RENDER_MODE_LABEL: OnceLock<String> = OnceLock::new();
 
@@ -199,12 +204,14 @@ pub fn quarantine_gpu_vs(addr: usize, reason: &str) {
     }
     let mut g = QUARANTINED_GPU_VS.lock().unwrap_or_else(|e| e.into_inner());
     if g.insert(addr) {
+        HAS_QUARANTINED_GPU_VS.store(true, std::sync::atomic::Ordering::Release);
         eprintln!("[orbis] AUTO-HEAL: quarantined GPU-VS {addr:#x} ({reason}) -> falling back to CPU hoisted VS");
     }
 }
 
+#[inline(always)]
 pub fn is_gpu_vs_quarantined(addr: usize) -> bool {
-    if addr == 0 {
+    if addr == 0 || !HAS_QUARANTINED_GPU_VS.load(std::sync::atomic::Ordering::Acquire) {
         return false;
     }
     QUARANTINED_GPU_VS.lock().unwrap_or_else(|e| e.into_inner()).contains(&addr)
@@ -252,6 +259,7 @@ pub struct VkRenderer {
     pub swap_fbs: Vec<vk::Framebuffer>,
     pub swap_extent: vk::Extent2D,
     pub swap_format: vk::Format,
+    pub depth_format: vk::Format,
     pub image_avail: vk::Semaphore,
     pub render_done: vk::Semaphore,
     pub mem_props: vk::PhysicalDeviceMemoryProperties,
@@ -547,7 +555,13 @@ impl VkRenderer {
             .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
             .map_err(|e| format!("create_sem: {e}"))?;
 
-        eprintln!("[orbis] Vulkan: swapchain {}x{} ({} images, {:?})", swap_extent.width, swap_extent.height, swap_images.len(), fmt.format);
+        let d32s8 = instance.get_physical_device_format_properties(physical, vk::Format::D32_SFLOAT_S8_UINT);
+        let depth_format = if d32s8.optimal_tiling_features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT) {
+            vk::Format::D32_SFLOAT_S8_UINT
+        } else {
+            vk::Format::D24_UNORM_S8_UINT
+        };
+        eprintln!("[orbis] Vulkan: swapchain {}x{} ({} images, {:?}, depth={:?})", swap_extent.width, swap_extent.height, swap_images.len(), fmt.format, depth_format);
         let mut r = Self {
             entry,
             instance,
@@ -567,6 +581,7 @@ impl VkRenderer {
             swap_fbs: Vec::new(),
             swap_extent,
             swap_format: fmt.format,
+            depth_format,
             image_avail,
             render_done,
             mem_props,
@@ -2146,10 +2161,12 @@ impl VkRenderer {
                         .initial_layout(if clear { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL })
                         .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
                     vk::AttachmentDescription::default()
-                        .format(vk::Format::D32_SFLOAT)
+                        .format(self.depth_format)
                         .samples(vk::SampleCountFlags::TYPE_1)
                         .load_op(if clear { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD })
                         .store_op(vk::AttachmentStoreOp::STORE)
+                        .stencil_load_op(if clear { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD })
+                        .stencil_store_op(vk::AttachmentStoreOp::STORE)
                         .initial_layout(if clear { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL })
                         .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
                 ];
@@ -2384,7 +2401,7 @@ impl VkRenderer {
                     .create_image(
                         &vk::ImageCreateInfo::default()
                             .image_type(vk::ImageType::TYPE_2D)
-                            .format(vk::Format::D32_SFLOAT)
+                            .format(self.depth_format)
                             .extent(vk::Extent3D { width: w, height: h, depth: 1 })
                             .mip_levels(1)
                             .array_layers(1)
@@ -2405,8 +2422,8 @@ impl VkRenderer {
                         &vk::ImageViewCreateInfo::default()
                             .image(img)
                             .view_type(vk::ImageViewType::TYPE_2D)
-                            .format(vk::Format::D32_SFLOAT)
-                            .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::DEPTH, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 }),
+                            .format(self.depth_format)
+                            .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 }),
                         None,
                     )
                     .ok()?;
@@ -3417,7 +3434,29 @@ impl VkRenderer {
                 }
                 self.device.cmd_set_scissor(self.cmd_buf, 0, &[it.scissor]);
                 if generic {
-                    let bytes = std::slice::from_raw_parts(gens[it.gen].slots.as_ptr() as *const u8, 256);
+                    let gd = &gens[it.gen];
+                    if (gd.depth & 1) != 0 {
+                        let back_en = (gd.depth & 0x80) != 0;
+                        let f_ref = gd.stencil_ref & 0xFF;
+                        let f_cmp = (gd.stencil_ref >> 8) & 0xFF;
+                        let f_wrt = (gd.stencil_ref >> 16) & 0xFF;
+                        if back_en {
+                            self.device.cmd_set_stencil_reference(self.cmd_buf, vk::StencilFaceFlags::FRONT, f_ref);
+                            self.device.cmd_set_stencil_compare_mask(self.cmd_buf, vk::StencilFaceFlags::FRONT, f_cmp);
+                            self.device.cmd_set_stencil_write_mask(self.cmd_buf, vk::StencilFaceFlags::FRONT, f_wrt);
+                            let b_ref = gd.stencil_ref_bf & 0xFF;
+                            let b_cmp = (gd.stencil_ref_bf >> 8) & 0xFF;
+                            let b_wrt = (gd.stencil_ref_bf >> 16) & 0xFF;
+                            self.device.cmd_set_stencil_reference(self.cmd_buf, vk::StencilFaceFlags::BACK, b_ref);
+                            self.device.cmd_set_stencil_compare_mask(self.cmd_buf, vk::StencilFaceFlags::BACK, b_cmp);
+                            self.device.cmd_set_stencil_write_mask(self.cmd_buf, vk::StencilFaceFlags::BACK, b_wrt);
+                        } else {
+                            self.device.cmd_set_stencil_reference(self.cmd_buf, vk::StencilFaceFlags::FRONT_AND_BACK, f_ref);
+                            self.device.cmd_set_stencil_compare_mask(self.cmd_buf, vk::StencilFaceFlags::FRONT_AND_BACK, f_cmp);
+                            self.device.cmd_set_stencil_write_mask(self.cmd_buf, vk::StencilFaceFlags::FRONT_AND_BACK, f_wrt);
+                        }
+                    }
+                    let bytes = std::slice::from_raw_parts(gd.slots.as_ptr() as *const u8, 256);
                     self.device.cmd_push_constants(self.cmd_buf, layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
                     if it.indexed {
                         self.device.cmd_draw_indexed(self.cmd_buf, it.count, 1, it.first, 0, 0);
@@ -3908,10 +3947,19 @@ impl VkRenderer {
             .alpha_blend_op(op(a_f))
             .color_write_mask(vk::ColorComponentFlags::from_raw(gd.wmask & 0xF))];
         let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&cba);
-        let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let ds = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
         let dc = gd.depth;
-        let zop = match (dc >> 4) & 7 {
+        let stencil_en = (dc & 1) != 0;
+        let dyn_states_base = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dyn_states_stencil = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+            vk::DynamicState::STENCIL_COMPARE_MASK,
+            vk::DynamicState::STENCIL_WRITE_MASK,
+            vk::DynamicState::STENCIL_REFERENCE,
+        ];
+        let ds = vk::PipelineDynamicStateCreateInfo::default()
+            .dynamic_states(if stencil_en { &dyn_states_stencil[..] } else { &dyn_states_base[..] });
+        let cmp_op = |v: u32| match v & 7 {
             0 => vk::CompareOp::NEVER,
             1 => vk::CompareOp::LESS,
             2 => vk::CompareOp::EQUAL,
@@ -3921,10 +3969,48 @@ impl VkRenderer {
             6 => vk::CompareOp::GREATER_OR_EQUAL,
             _ => vk::CompareOp::ALWAYS,
         };
+        let sop = |v: u32| match v & 0xF {
+            0 => vk::StencilOp::KEEP,
+            1 => vk::StencilOp::ZERO,
+            2..=4 => vk::StencilOp::REPLACE,
+            5 => vk::StencilOp::INCREMENT_AND_CLAMP,
+            6 => vk::StencilOp::DECREMENT_AND_CLAMP,
+            7 => vk::StencilOp::INVERT,
+            8 => vk::StencilOp::INCREMENT_AND_WRAP,
+            9 => vk::StencilOp::DECREMENT_AND_WRAP,
+            _ => vk::StencilOp::KEEP,
+        };
+        let zop = cmp_op(dc >> 4);
+        let sc = gd.stencil_ctl;
+        let front_s = vk::StencilOpState {
+            fail_op: sop(sc),
+            pass_op: sop(sc >> 4),
+            depth_fail_op: sop(sc >> 8),
+            compare_op: cmp_op(dc >> 8),
+            compare_mask: 0xFF,
+            write_mask: 0xFF,
+            reference: 0,
+        };
+        let back_s = if (dc & 0x80) != 0 {
+            vk::StencilOpState {
+                fail_op: sop(sc >> 12),
+                pass_op: sop(sc >> 16),
+                depth_fail_op: sop(sc >> 20),
+                compare_op: cmp_op(dc >> 20),
+                compare_mask: 0xFF,
+                write_mask: 0xFF,
+                reference: 0,
+            }
+        } else {
+            front_s
+        };
         let dss = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(dc & 2 != 0)
             .depth_write_enable(dc & 2 != 0 && dc & 4 != 0)
-            .depth_compare_op(zop);
+            .depth_compare_op(zop)
+            .stencil_test_enable(stencil_en)
+            .front(front_s)
+            .back(back_s);
         let gp_ci = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vi)

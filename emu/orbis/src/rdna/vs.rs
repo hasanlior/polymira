@@ -50,8 +50,8 @@ pub struct GpuVsDrawData {
     /// Guest vertex buffers `(base_addr, byte_len)` for bindings 1..=4.
     pub vbs: [(usize, usize); MAX_VBS],
     pub n_vbs: u8,
-    /// Uniform `u32` array (`u[0..]`): viewport + mubuf (rel_off, stride) + scalar slots.
-    pub params: Vec<u32>,
+    /// Number of `u32` words appended to `out_params`.
+    pub param_len: usize,
 }
 
 /// Returns true if a `CompiledShader` is eligible for GPU SPIR-V VS translation.
@@ -61,180 +61,193 @@ pub fn is_gpu_vs_eligible(sh: &CompiledShader) -> bool {
     sh.gpu_vs_eligible
 }
 
-/// Runs the scalar/SMEM instructions of `sh` once on the CPU and packs all per-draw
-/// uniforms + vertex-buffer bindings for the GPU SPIR-V vertex shader.
+/// Runs the scalar/SMEM instructions of `sh` once on the CPU and appends all per-draw
+/// uniforms + vertex-buffer bindings directly into `out_params` (zero per-draw heap alloc!).
 pub fn extract_gpu_vs_draw(
     sh: &CompiledShader,
     vs_ud: &[u32; 24],
     index_32bit: bool,
     vp: [u32; 8],
     ok: MemCheck,
+    out_params: &mut Vec<u32>,
 ) -> Option<GpuVsDrawData> {
     if !is_gpu_vs_eligible(sh) {
         return None;
     }
-    let mut lane = Lane::new();
-    lane.s[3] = 0x101;
-    lane.s[8..32].copy_from_slice(vs_ud);
-
-    let mut mubuf_key = [0u16; MAX_MUBUFS];
-    let mut n_mubuf = 0usize;
-    let mut vbs: [(usize, usize); MAX_VBS] = [(0, 0); MAX_VBS];
-    let mut n_vbs = 0usize;
-    let mut params = Vec::with_capacity(SLOT_BASE as usize + 64);
-    params.resize(SLOT_BASE as usize, 0);
-    params[0..8].copy_from_slice(&vp);
-
-    for inst in &sh.insts {
-        let w0 = inst.w0();
-        let w1 = inst.w1();
-        let lit = inst.literal;
-        match inst.fmt {
-            Fmt::Sop1 | Fmt::Sop2 | Fmt::Sopc | Fmt::Sopk | Fmt::Smem => {
-                super::interp::step_scalar_for_gpu(inst, &mut lane, ok)?;
-            }
-            Fmt::Sopp => {
-                if inst.name == "s_endpgm" {
-                    break;
-                }
-            }
-            Fmt::Mubuf | Fmt::Mtbuf => {
-                if n_mubuf >= MAX_MUBUFS {
-                    return None;
-                }
-                let inst_off = (w0 & 0xFFF) as u64;
-                let offen = w0 & (1 << 12) != 0;
-                let idxen = w0 & (1 << 13) != 0;
-                if !idxen || offen {
-                    return None;
-                }
-                let srsrc = (((w1 >> 16) & 0x1F) * 4) as usize;
-                let soff = lane.src_pub(((w1 >> 24) & 0xFF) as u16, None) as u64;
-                let bw0 = lane.s[srsrc] as u64;
-                let bw1 = lane.s[srsrc + 1];
-                let bw2 = lane.s[srsrc + 2];
-                let base = bw0 | (((bw1 & 0xFFFF) as u64) << 32);
-                let stride = ((bw1 >> 16) & 0x3FFF) as u64;
-                let vfmt = (lane.s[srsrc + 3] >> 12) & 0x7F;
-                let fmt = if inst.fmt == Fmt::Mtbuf { (w0 >> 19) & 0x7F } else { vfmt };
-                let base_addr = base.wrapping_add(soff).wrapping_add(inst_off) as usize;
-                let raw_need = if bw2 > 0 && bw2 < 0x1000_0000 {
-                    if stride > 0 {
-                        let recs = if index_32bit { bw2 as usize } else { (bw2 as usize).min(65536) };
-                        recs.saturating_mul(stride as usize)
-                    } else {
-                        bw2 as usize
-                    }
-                } else {
-                    return None;
-                };
-                let need = raw_need.min(64 << 20).saturating_add(16);
-                if base_addr < 0x1_0000_0000 || !ok(base_addr, (stride as usize).max(16)) {
-                    return None;
-                }
-                // Group nearby Mubuf bases (e.g. interleaved vertex attributes at +0/+12/+16/+20)
-                // into the same VB slot so RenderChunk uses a single GPU VkBuffer!
-                let mut chosen_slot = None;
-                let mut rel_off = 0usize;
-                for s in 0..n_vbs {
-                    let (vb_a, vb_len) = vbs[s];
-                    if base_addr >= vb_a && base_addr - vb_a < 256 {
-                        rel_off = base_addr - vb_a;
-                        let new_end = rel_off + need;
-                        if new_end > vb_len {
-                            vbs[s].1 = new_end;
-                        }
-                        chosen_slot = Some(s);
-                        break;
-                    } else if vb_a > base_addr && vb_a - base_addr < 256 {
-                        // Earlier attribute offset: shift VB base down? Keep simpler: separate slot or
-                        // align VB base to 4 bytes; RenderChunk loads +0 first so base_addr >= vb_a.
-                    }
-                }
-                let slot = match chosen_slot {
-                    Some(s) => s,
-                    None => {
-                        if n_vbs >= MAX_VBS {
-                            return None;
-                        }
-                        let s = n_vbs;
-                        let aligned = base_addr & !3;
-                        rel_off = base_addr - aligned;
-                        vbs[s] = (aligned, rel_off + need);
-                        n_vbs += 1;
-                        s
-                    }
-                };
-                mubuf_key[n_mubuf] = ((slot as u16) << 8) | (fmt as u16 & 0xFF);
-                params[8 + n_mubuf * 2] = rel_off as u32;
-                params[8 + n_mubuf * 2 + 1] = stride as u32;
-                n_mubuf += 1;
-            }
-            Fmt::Vopc => {
-                let s0 = (w0 & 0x1FF) as u16;
-                if s0 < 256 {
-                    params.push(lane.src_pub(s0, lit));
-                }
-            }
-            Fmt::Vop1 | Fmt::Vop2 | Fmt::Vop3 => {
-                let n = inst.name.trim_end_matches("_e32").trim_end_matches("_e64").trim_end_matches("_sdwa");
-                if inst.ext == Ext::Sdwa {
-                    let s = inst.words[1];
-                    let src0 = (s & 0xFF) as u16;
-                    if s & (1 << 23) != 0 {
-                        params.push(lane.src_pub(src0, None));
-                    }
-                    if inst.fmt != Fmt::Vop1 && s & (1 << 31) != 0 {
-                        let src1 = ((w0 >> 9) & 0xFF) as u16;
-                        params.push(lane.src_pub(src1, None));
-                    }
-                    continue;
-                }
-                match inst.fmt {
-                    Fmt::Vop1 => {
-                        let s0 = (w0 & 0x1FF) as u16;
-                        if s0 < 256 {
-                            params.push(lane.src_pub(s0, lit));
-                        }
-                    }
-                    Fmt::Vop2 => {
-                        let s0 = (w0 & 0x1FF) as u16;
-                        if s0 < 256 {
-                            params.push(lane.src_pub(s0, lit));
-                        }
-                        if matches!(n, "v_madmk_f32" | "v_fmamk_f32" | "v_madak_f32" | "v_fmaak_f32") {
-                            params.push(lit.unwrap_or(0));
-                        }
-                        if n == "v_cndmask_b32" {
-                            params.push(lane.s[106] & 1);
-                        }
-                    }
-                    Fmt::Vop3 => {
-                        let s0 = (w1 & 0x1FF) as u16;
-                        let s1 = ((w1 >> 9) & 0x1FF) as u16;
-                        let s2 = ((w1 >> 18) & 0x1FF) as u16;
-                        if s0 < 256 {
-                            params.push(lane.src_pub(s0, lit));
-                        }
-                        if s1 < 256 {
-                            params.push(lane.src_pub(s1, lit));
-                        }
-                        if n == "v_cndmask_b32" {
-                            let bit = if (s2 as usize) < 128 { lane.s[s2 as usize] & 1 } else { return None };
-                            params.push(bit);
-                        } else if s2 < 256 {
-                            params.push(lane.src_pub(s2, lit));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Fmt::Exp => {}
-            _ => return None,
-        }
+    thread_local! {
+        static TL_VS_LANE: std::cell::RefCell<Lane> = std::cell::RefCell::new(Lane::new());
     }
+    let param_start = out_params.len();
+    let res = TL_VS_LANE.with(|cell| {
+        let mut lane = cell.borrow_mut();
+        lane.s[..108].fill(0);
+        lane.s[126] = 1;
+        lane.s[127] = 0;
+        lane.scc = false;
+        lane.s[3] = 0x101;
+        lane.s[8..32].copy_from_slice(vs_ud);
 
-    Some(GpuVsDrawData { mubuf_key, n_mubuf: n_mubuf as u8, vbs, n_vbs: n_vbs as u8, params })
+        let mut mubuf_key = [0u16; MAX_MUBUFS];
+        let mut n_mubuf = 0usize;
+        let mut vbs: [(usize, usize); MAX_VBS] = [(0, 0); MAX_VBS];
+        let mut n_vbs = 0usize;
+        out_params.resize(param_start + SLOT_BASE as usize, 0);
+        out_params[param_start..param_start + 8].copy_from_slice(&vp);
+
+        for inst in &sh.insts {
+            let w0 = inst.w0();
+            let w1 = inst.w1();
+            let lit = inst.literal;
+            match inst.fmt {
+                Fmt::Sop1 | Fmt::Sop2 | Fmt::Sopc | Fmt::Sopk | Fmt::Smem => {
+                    super::interp::step_scalar_for_gpu(inst, &mut lane, ok)?;
+                }
+                Fmt::Sopp => {
+                    if inst.name == "s_endpgm" {
+                        break;
+                    }
+                }
+                Fmt::Mubuf | Fmt::Mtbuf => {
+                    if n_mubuf >= MAX_MUBUFS {
+                        return None;
+                    }
+                    let inst_off = (w0 & 0xFFF) as u64;
+                    let offen = w0 & (1 << 12) != 0;
+                    let idxen = w0 & (1 << 13) != 0;
+                    if !idxen || offen {
+                        return None;
+                    }
+                    let srsrc = (((w1 >> 16) & 0x1F) * 4) as usize;
+                    let soff = lane.src_pub(((w1 >> 24) & 0xFF) as u16, None) as u64;
+                    let bw0 = lane.s[srsrc] as u64;
+                    let bw1 = lane.s[srsrc + 1];
+                    let bw2 = lane.s[srsrc + 2];
+                    let base = bw0 | (((bw1 & 0xFFFF) as u64) << 32);
+                    let stride = ((bw1 >> 16) & 0x3FFF) as u64;
+                    let vfmt = (lane.s[srsrc + 3] >> 12) & 0x7F;
+                    let fmt = if inst.fmt == Fmt::Mtbuf { (w0 >> 19) & 0x7F } else { vfmt };
+                    let base_addr = base.wrapping_add(soff).wrapping_add(inst_off) as usize;
+                    let raw_need = if bw2 > 0 && bw2 < 0x1000_0000 {
+                        if stride > 0 {
+                            let recs = if index_32bit { bw2 as usize } else { (bw2 as usize).min(65536) };
+                            recs.saturating_mul(stride as usize)
+                        } else {
+                            bw2 as usize
+                        }
+                    } else {
+                        return None;
+                    };
+                    let need = raw_need.min(64 << 20).saturating_add(16);
+                    if base_addr < 0x1_0000_0000 || !ok(base_addr, (stride as usize).max(16)) {
+                        return None;
+                    }
+                    let mut chosen_slot = None;
+                    let mut rel_off = 0usize;
+                    for s in 0..n_vbs {
+                        let (vb_a, vb_len) = vbs[s];
+                        if base_addr >= vb_a && base_addr - vb_a < 256 {
+                            rel_off = base_addr - vb_a;
+                            let new_end = rel_off + need;
+                            if new_end > vb_len {
+                                vbs[s].1 = new_end;
+                            }
+                            chosen_slot = Some(s);
+                            break;
+                        }
+                    }
+                    let slot = match chosen_slot {
+                        Some(s) => s,
+                        None => {
+                            if n_vbs >= MAX_VBS {
+                                return None;
+                            }
+                            let s = n_vbs;
+                            let aligned = base_addr & !3;
+                            rel_off = base_addr - aligned;
+                            vbs[s] = (aligned, rel_off + need);
+                            n_vbs += 1;
+                            s
+                        }
+                    };
+                    mubuf_key[n_mubuf] = ((slot as u16) << 8) | (fmt as u16 & 0xFF);
+                    out_params[param_start + 8 + n_mubuf * 2] = rel_off as u32;
+                    out_params[param_start + 8 + n_mubuf * 2 + 1] = stride as u32;
+                    n_mubuf += 1;
+                }
+                Fmt::Vopc => {
+                    let s0 = (w0 & 0x1FF) as u16;
+                    if s0 < 256 {
+                        out_params.push(lane.src_pub(s0, lit));
+                    }
+                }
+                Fmt::Vop1 => {
+                    if inst.ext == Ext::Sdwa {
+                        let s = inst.words[1];
+                        if s & (1 << 23) != 0 {
+                            out_params.push(lane.src_pub((s & 0xFF) as u16, None));
+                        }
+                    } else {
+                        let s0 = (w0 & 0x1FF) as u16;
+                        if s0 < 256 {
+                            out_params.push(lane.src_pub(s0, lit));
+                        }
+                    }
+                }
+                Fmt::Vop2 => {
+                    if inst.ext == Ext::Sdwa {
+                        let s = inst.words[1];
+                        if s & (1 << 23) != 0 {
+                            out_params.push(lane.src_pub((s & 0xFF) as u16, None));
+                        }
+                        if s & (1 << 31) != 0 {
+                            out_params.push(lane.src_pub(((w0 >> 9) & 0xFF) as u16, None));
+                        }
+                    } else {
+                        let s0 = (w0 & 0x1FF) as u16;
+                        if s0 < 256 {
+                            out_params.push(lane.src_pub(s0, lit));
+                        }
+                        let n = inst.name;
+                        if n.starts_with("v_madmk") || n.starts_with("v_fmamk") || n.starts_with("v_madak") || n.starts_with("v_fmaak") {
+                            out_params.push(lit.unwrap_or(0));
+                        } else if n.starts_with("v_cndmask") {
+                            out_params.push(lane.s[106] & 1);
+                        }
+                    }
+                }
+                Fmt::Vop3 => {
+                    let s0 = (w1 & 0x1FF) as u16;
+                    let s1 = ((w1 >> 9) & 0x1FF) as u16;
+                    let s2 = ((w1 >> 18) & 0x1FF) as u16;
+                    if s0 < 256 {
+                        out_params.push(lane.src_pub(s0, lit));
+                    }
+                    if s1 < 256 {
+                        out_params.push(lane.src_pub(s1, lit));
+                    }
+                    if inst.name.starts_with("v_cndmask") {
+                        let bit = if (s2 as usize) < 128 { lane.s[s2 as usize] & 1 } else { return None };
+                        out_params.push(bit);
+                    } else if s2 < 256 {
+                        out_params.push(lane.src_pub(s2, lit));
+                    }
+                }
+                Fmt::Exp => {}
+                _ => return None,
+            }
+        }
+        Some(GpuVsDrawData {
+            mubuf_key,
+            n_mubuf: n_mubuf as u8,
+            vbs,
+            n_vbs: n_vbs as u8,
+            param_len: out_params.len() - param_start,
+        })
+    });
+    if res.is_none() {
+        out_params.truncate(param_start);
+    }
+    res
 }
 
 struct VsBuilder {

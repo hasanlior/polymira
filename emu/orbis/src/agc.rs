@@ -1244,9 +1244,13 @@ pub fn gen_stats() -> [u64; 4] {
 /// layout-guessing path try the draw.
 fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool {
     let t_prep = (*FRAME_STATS_ON).then(std::time::Instant::now);
-    // CB_TARGET_MASK (MRT0 bits): nothing written → stencil/depth-only pass, skip before VS!
+    // CB_TARGET_MASK (MRT0 bits): skip color-disabled draws UNLESS stencil writing is enabled
+    // (Cohtml/OreUI writes its clip masks to stencil with wmask == 0!).
     let wmask = gpu.cx.get(&0x8E).copied().unwrap_or(0xF) & 0xF;
-    if wmask == 0 {
+    let dctl_pre = gpu.cx.get(&0x200).copied().unwrap_or(0);
+    let sref_pre = gpu.cx.get(&0x10C).copied().unwrap_or(0);
+    let stencil_writes = (dctl_pre & 1) != 0 && ((sref_pre >> 16) & 0xFF) != 0;
+    if wmask == 0 && !stencil_writes {
         GEN_STATS[3].fetch_add(1, Ordering::Relaxed);
         return true;
     }
@@ -1352,7 +1356,14 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             have_vp as u32,
             0,
         ];
-        if let Some(gpu_data) = crate::rdna::vs::extract_gpu_vs_draw(&vs_sh, &vs_ud, gpu.index_32bit, vp, mem_ok) {
+        let saved_vsp_len = gpu.frame_vs_params.len();
+        let pad = (64 - (saved_vsp_len & 63)) & 63;
+        if pad > 0 {
+            gpu.frame_vs_params.resize(saved_vsp_len + pad, 0);
+        }
+        let param_start = gpu.frame_vs_params.len();
+        let vs_param_off = (param_start * 4) as u32;
+        if let Some(gpu_data) = crate::rdna::vs::extract_gpu_vs_draw(&vs_sh, &vs_ud, gpu.index_32bit, vp, mem_ok, &mut gpu.frame_vs_params) {
             let vs_spv = {
                 thread_local! {
                     static TL_VS: std::cell::RefCell<[(usize, u64, [u32; 8], [u16; 8], Option<(std::sync::Arc<Vec<u32>>, u32)>); 4]> =
@@ -1398,8 +1409,9 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 }
             };
             if let Some((vs_spv, expected_slots)) = vs_spv {
-                if gpu_data.params.len() != expected_slots as usize {
-                    eprintln!("[orbis] GPU-VS SLOT MISMATCH vs={vs_addr:#x}: params={} expected={expected_slots}", gpu_data.params.len());
+                if gpu_data.param_len != expected_slots as usize {
+                    gpu.frame_vs_params.truncate(saved_vsp_len);
+                    eprintln!("[orbis] GPU-VS SLOT MISMATCH vs={vs_addr:#x}: params={} expected={expected_slots}", gpu_data.param_len);
                 } else {
                 let (tr_spv, cube) = tr.unwrap();
                 let info = pre.unwrap();
@@ -1425,13 +1437,6 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                     let (x1, y1) = (((br & 0x7FFF) as i32).min(rt.1 as i32), (((br >> 16) & 0x7FFF) as i32).min(rt.2 as i32));
                     if x1 > x0 && y1 > y0 { [x0, y0, x1 - x0, y1 - y0] } else { [0, 0, rt.1 as i32, rt.2 as i32] }
                 };
-                // Align VS param offset to 256 bytes (64 u32s) for Vulkan minStorageBufferOffsetAlignment.
-                let pad = (64 - (gpu.frame_vs_params.len() & 63)) & 63;
-                if pad > 0 {
-                    gpu.frame_vs_params.resize(gpu.frame_vs_params.len() + pad, 0);
-                }
-                let vs_param_off = (gpu.frame_vs_params.len() * 4) as u32;
-                gpu.frame_vs_params.extend_from_slice(&gpu_data.params);
                 // Bind guest IB directly via VRAM `guest_ib_cache` (zero CPU index scan / zero u16->u32 copy!).
                 let prim_u8 = prim as u8;
                 let n_out = match prim_u8 {
@@ -1442,11 +1447,19 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 let ib_bytes = n_out * if gpu.index_32bit { 4 } else { 2 };
                 let blend = gpu.cx.get(&0x1E0).copied().unwrap_or(0);
                 let dctl = gpu.cx.get(&0x200).copied().unwrap_or(0);
+                let stencil_ctl = gpu.cx.get(&0x10B).copied().unwrap_or(0);
+                let stencil_ref = gpu.cx.get(&0x10C).copied().unwrap_or(0);
+                let stencil_ref_bf = gpu.cx.get(&0x10D).copied().unwrap_or(0);
                 let dkey = dctl & 0x77;
+                let skey = if (dctl & 1) != 0 {
+                    ((stencil_ctl as usize).wrapping_mul(0x9E37_79B9)) ^ (((dctl & 0x700781) as usize) << 11)
+                } else {
+                    0
+                };
                 let g = gpu.frame_gens.len() as u32;
                 let vs_ptr_key = std::sync::Arc::as_ptr(&vs_spv) as usize;
                 gpu.frame_gens.push(crate::vk::GenDraw {
-                    key: (ps_addr ^ (ps_hash as usize) ^ vs_ptr_key.rotate_left(17), blend, wmask | (dkey << 8) | ((prim_u8 as u32) << 16) | (1 << 24)),
+                    key: (ps_addr ^ (ps_hash as usize) ^ vs_ptr_key.rotate_left(17) ^ skey, blend, wmask | (dkey << 8) | ((prim_u8 as u32) << 16) | (1 << 24)),
                     wmask,
                     spirv: tr_spv,
                     blend,
@@ -1464,6 +1477,9 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                     extra_samps,
                     depth: dctl,
                     zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
+                    stencil_ctl,
+                    stencil_ref,
+                    stencil_ref_bf,
                     prim: prim_u8,
                     guest_ib: Some((ib, ib_bytes, gpu.index_32bit)),
                     vs_spirv: Some(vs_spv),
@@ -1494,14 +1510,18 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                             &gpu_data.mubuf_key[..gpu_data.n_mubuf as usize],
                             &gpu_data.vbs[..gpu_data.n_vbs as usize],
                             (xs, xo, ys, yo, tw, th, have_vp),
-                            &gpu_data.params[8..8 + (gpu_data.n_mubuf as usize) * 2]
+                            &gpu.frame_vs_params[param_start + 8..param_start + 8 + (gpu_data.n_mubuf as usize) * 2]
                         );
                     }
                 }
                 GEN_STATS[0].fetch_add(1, Ordering::Relaxed);
                 return true;
                 }
+            } else {
+                gpu.frame_vs_params.truncate(saved_vsp_len);
             }
+        } else {
+            gpu.frame_vs_params.truncate(saved_vsp_len);
         }
     }
 
@@ -1830,10 +1850,18 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     }
     let blend = gpu.cx.get(&0x1E0).copied().unwrap_or(0);
     let dctl = gpu.cx.get(&0x200).copied().unwrap_or(0);
+    let stencil_ctl = gpu.cx.get(&0x10B).copied().unwrap_or(0);
+    let stencil_ref = gpu.cx.get(&0x10C).copied().unwrap_or(0);
+    let stencil_ref_bf = gpu.cx.get(&0x10D).copied().unwrap_or(0);
     let dkey = dctl & 0x77;
+    let skey = if (dctl & 1) != 0 {
+        ((stencil_ctl as usize).wrapping_mul(0x9E37_79B9)) ^ (((dctl & 0x700781) as usize) << 11)
+    } else {
+        0
+    };
     let g = gpu.frame_gens.len() as u32;
     gpu.frame_gens.push(crate::vk::GenDraw {
-        key: (ps_addr ^ hash as usize, blend, wmask | (dkey << 8) | ((prim_u8 as u32) << 16)),
+        key: (ps_addr ^ hash as usize ^ skey, blend, wmask | (dkey << 8) | ((prim_u8 as u32) << 16)),
         wmask,
         spirv: tr.clone(),
         blend,
@@ -1853,6 +1881,9 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         // Depth is cleared through HTILE metadata we do not see: start from the far plane of
         // the compare direction (1.0 for LESS-style tests, 0.0 for GREATER-style ones).
         zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
+        stencil_ctl,
+        stencil_ref,
+        stencil_ref_bf,
         prim: prim_u8,
         guest_ib: None,
         vs_spirv: None,
