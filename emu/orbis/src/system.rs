@@ -643,6 +643,135 @@ pub extern "sysv64" fn audio3d_port_open(_user: i32, _param: *const u8, out_id: 
     0
 }
 
+// ── libSceRtc (real-time clock for UE4 / Stray / PS5 titles) ─────────
+
+/// SceRtcDateTime (16 bytes): { u16 year, month, day, hour, minute, second; u32 microsecond }
+pub extern "sysv64" fn rtc_get_current_clock(dt: *mut u8, _tz_minutes: i32) -> i32 {
+    if !dt.is_null() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = now.as_secs();
+        let days = (secs / 86400) as i64;
+        let rem = secs % 86400;
+        let hour = (rem / 3600) as u16;
+        let min = ((rem % 3600) / 60) as u16;
+        let sec = (rem % 60) as u16;
+        let usec = now.subsec_micros();
+        // Howard Hinnant civil-from-days algorithm (exact Gregorian calendar)
+        let z = days + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z.rem_euclid(146097) as u64;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = (yoe as i64) + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = (doy - (153 * mp + 2) / 5 + 1) as u16;
+        let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u16;
+        let year = (y + if month <= 2 { 1 } else { 0 }) as u16;
+        unsafe {
+            *(dt as *mut u16) = year;
+            *(dt.add(2) as *mut u16) = month;
+            *(dt.add(4) as *mut u16) = day;
+            *(dt.add(6) as *mut u16) = hour;
+            *(dt.add(8) as *mut u16) = min;
+            *(dt.add(10) as *mut u16) = sec;
+            *(dt.add(12) as *mut u32) = usec;
+        }
+    }
+    0
+}
+
+pub extern "sysv64" fn rtc_get_current_clock_local(dt: *mut u8) -> i32 {
+    rtc_get_current_clock(dt, 0)
+}
+
+pub extern "sysv64" fn rtc_get_current_tick(tick: *mut u64) -> i32 {
+    if !tick.is_null() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        // PS4/PS5 RTC ticks are microseconds since 0001-01-01 (epoch offset = 62135596800s).
+        let us = (now.as_secs() + 62_135_596_800) * 1_000_000 + (now.subsec_micros() as u64);
+        unsafe { *tick = us };
+    }
+    0
+}
+
+pub extern "sysv64" fn rtc_get_tick_resolution() -> u32 {
+    1_000_000
+}
+
+/// sceRtcGetTick(const SceRtcDateTime* dt, SceRtcTick* tick)
+/// Converts Gregorian date/time to microseconds since 0001-01-01 00:00:00.
+pub extern "sysv64" fn rtc_get_tick(dt: *const u8, tick: *mut u64) -> i32 {
+    if dt.is_null() || tick.is_null() {
+        return 0x80B5_0001u32 as i32; // SCE_RTC_ERROR_INVALID_POINTER
+    }
+    unsafe {
+        let year = u16::from_le_bytes([*dt, *dt.add(1)]) as i64;
+        let month = u16::from_le_bytes([*dt.add(2), *dt.add(3)]) as i64;
+        let day = u16::from_le_bytes([*dt.add(4), *dt.add(5)]) as i64;
+        let hour = u16::from_le_bytes([*dt.add(6), *dt.add(7)]) as i64;
+        let min = u16::from_le_bytes([*dt.add(8), *dt.add(9)]) as i64;
+        let sec = u16::from_le_bytes([*dt.add(10), *dt.add(11)]) as i64;
+        let usec = u32::from_le_bytes([*dt.add(12), *dt.add(13), *dt.add(14), *dt.add(15)]) as i64;
+        // Days since 1970-01-01 (Howard Hinnant's days_from_civil), then shift to 0001-01-01 (+719162).
+        let y = year - if month <= 2 { 1 } else { 0 };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days_unix = era * 146_097 + doe - 719_468;
+        let days_0001 = (days_unix + 719_162).max(0);
+        let secs = days_0001 * 86_400 + hour * 3600 + min * 60 + sec;
+        *tick = (secs as u64).saturating_mul(1_000_000).saturating_add(usec.max(0) as u64);
+    }
+    0
+}
+
+// ── libScePlayGo (all chunks treated as 100% locally installed) ───────
+
+pub extern "sysv64" fn playgo_open(out_handle: *mut i32, _param: *const u8) -> i32 {
+    if !out_handle.is_null() {
+        unsafe { *out_handle = 1 };
+    }
+    0
+}
+
+pub extern "sysv64" fn playgo_get_locus(_handle: i32, _chunk_ids: *const u16, count: u32, out_loci: *mut u8) -> i32 {
+    if !out_loci.is_null() && count > 0 {
+        // SCE_PLAYGO_LOCUS_LOCAL_FAST = 3
+        unsafe { std::ptr::write_bytes(out_loci, 3, count as usize) };
+    }
+    0
+}
+
+pub extern "sysv64" fn playgo_get_progress(_handle: i32, _chunk_ids: *const u16, _count: u32, out_progress: *mut u64) -> i32 {
+    if !out_progress.is_null() {
+        // ScePlayGoProgress { u64 progressSize, u64 totalSize } -> 100% installed
+        unsafe {
+            *out_progress = 1;
+            *out_progress.add(1) = 1;
+        }
+    }
+    0
+}
+
+pub extern "sysv64" fn playgo_get_empty_list(_handle: i32, _out_list: *mut u8, _max: u32, out_count: *mut u32) -> i32 {
+    if !out_count.is_null() {
+        unsafe { *out_count = 0 };
+    }
+    0
+}
+
+pub extern "sysv64" fn playgo_get_install_speed(_handle: i32, out_speed: *mut i32) -> i32 {
+    if !out_speed.is_null() {
+        unsafe { *out_speed = 2 }; // SCE_PLAYGO_INSTALL_SPEED_TRICKLE/FAST
+    }
+    0
+}
+
 pub extern "sysv64" fn netctl_get_state(state: *mut i32) -> i32 {
     if !state.is_null() {
         unsafe { *state = 0 }; // SCE_NET_CTL_STATE_DISCONNECTED
@@ -894,6 +1023,25 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceAudio3dObjectReserve", ok as *const () as usize),
         ("sceAudio3dObjectUnreserve", ok as *const () as usize),
         ("sceAudio3dObjectSetAttributes", ok as *const () as usize),
+        // libSceRtc & libSceCoredump & libScePlayGo
+        ("sceRtcGetCurrentClock", rtc_get_current_clock as *const () as usize),
+        ("sceRtcGetCurrentClockLocalTime", rtc_get_current_clock_local as *const () as usize),
+        ("sceRtcGetCurrentTick", rtc_get_current_tick as *const () as usize),
+        ("sceRtcGetTick", rtc_get_tick as *const () as usize),
+        ("sceRtcGetTickResolution", rtc_get_tick_resolution as *const () as usize),
+        ("sceCoredumpRegisterCoredumpHandler", ok as *const () as usize),
+        ("sceCoredumpUnregisterCoredumpHandler", ok as *const () as usize),
+        ("scePlayGoInitialize", ok as *const () as usize),
+        ("scePlayGoTerminate", ok as *const () as usize),
+        ("scePlayGoOpen", playgo_open as *const () as usize),
+        ("scePlayGoClose", ok as *const () as usize),
+        ("scePlayGoGetLocus", playgo_get_locus as *const () as usize),
+        ("scePlayGoGetProgress", playgo_get_progress as *const () as usize),
+        ("scePlayGoGetToDoList", playgo_get_empty_list as *const () as usize),
+        ("scePlayGoSetToDoList", ok as *const () as usize),
+        ("scePlayGoGetChunkIdList", playgo_get_empty_list as *const () as usize),
+        ("scePlayGoGetInstallSpeed", playgo_get_install_speed as *const () as usize),
+        ("scePlayGoSetInstallSpeed", ok as *const () as usize),
         ("sceHttp2CreateRequestWithURL", http2_offline as *const () as usize),
         ("sceHttp2SendRequestAsync", http2_offline as *const () as usize),
         ("socket", net_socket as *const () as usize),
@@ -1041,5 +1189,23 @@ mod tests {
         let mut port_id = 0u32;
         assert_eq!(audio3d_port_open(1, std::ptr::null(), &mut port_id), 0);
         assert_eq!(port_id, 1);
+
+        let mut dt = [0u8; 16];
+        assert_eq!(rtc_get_current_clock_local(dt.as_mut_ptr()), 0);
+        let year = u16::from_le_bytes([dt[0], dt[1]]);
+        let month = u16::from_le_bytes([dt[2], dt[3]]);
+        let day = u16::from_le_bytes([dt[4], dt[5]]);
+        assert!(year >= 2024 && (1..=12).contains(&month) && (1..=31).contains(&day));
+        assert_eq!(rtc_get_tick_resolution(), 1_000_000);
+        let mut tick = 0u64;
+        assert_eq!(rtc_get_tick(dt.as_ptr(), &mut tick), 0);
+        assert!(tick > 63_000_000_000_000_000);
+
+        let mut pg_h = 0i32;
+        assert_eq!(playgo_open(&mut pg_h, std::ptr::null()), 0);
+        assert_eq!(pg_h, 1);
+        let mut loci = [0u8; 4];
+        assert_eq!(playgo_get_locus(pg_h, std::ptr::null(), 4, loci.as_mut_ptr()), 0);
+        assert_eq!(loci, [3, 3, 3, 3]);
     }
 }

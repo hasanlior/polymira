@@ -245,6 +245,51 @@ pub extern "sysv64" fn mprotect(addr: usize, len: usize, prot: i32) -> i32 {
     0
 }
 
+#[repr(C)]
+pub struct BatchMapEntry {
+    pub start: usize,
+    pub offset: i64,
+    pub length: usize,
+    pub protection: u8,
+    pub mem_type: u8,
+    pub _pad: u16,
+    pub operation: i32,
+}
+
+/// sceKernelBatchMap(entries, nentries, nentries_out) / sceKernelBatchMap2(..., flags)
+pub extern "sysv64" fn batch_map(entries: *mut BatchMapEntry, nentries: i32, nentries_out: *mut i32) -> i32 {
+    if entries.is_null() || nentries < 0 {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    let mut done = 0i32;
+    for i in 0..nentries as usize {
+        let e = unsafe { &mut *entries.add(i) };
+        let flags = if e.start != 0 { 0x10 } else { 0 }; // MAP_FIXED when start != 0
+        let rc = match e.operation {
+            0 => map_direct(&mut e.start, e.length, e.protection as i32, flags, e.offset, 0), // MAP_DIRECT
+            1 => munmap(e.start, e.length),                                                    // UNMAP
+            2 | 4 => mprotect(e.start, e.length, e.protection as i32),                         // PROTECT / TYPE_PROTECT
+            3 => map_flexible(&mut e.start, e.length, e.protection as i32, flags),             // MAP_FLEXIBLE
+            _ => 0,
+        };
+        if rc != 0 {
+            if !nentries_out.is_null() {
+                unsafe { *nentries_out = done };
+            }
+            return rc;
+        }
+        done += 1;
+    }
+    if !nentries_out.is_null() {
+        unsafe { *nentries_out = done };
+    }
+    0
+}
+
+pub extern "sysv64" fn batch_map2(entries: *mut BatchMapEntry, nentries: i32, nentries_out: *mut i32, _flags: i32) -> i32 {
+    batch_map(entries, nentries, nentries_out)
+}
+
 /// Direct memory: coalescing, alignment-aware free-list over a 64 GiB offset pool (virtual offsets only).
 const DIRECT_SIZE: u64 = 64 << 30;
 static DIRECT_MAPS: Mutex<Vec<(usize, usize, u64)>> = Mutex::new(Vec::new());
@@ -410,7 +455,7 @@ pub extern "sysv64" fn map_named_direct(addr: *mut usize, len: usize, prot: i32,
 }
 
 pub extern "sysv64" fn direct_memory_size() -> u64 {
-    DIRECT_SIZE
+    12 << 30 // Real PS5 Prospero direct-memory budget (12 GiB); internal DirectPool has 64 GiB headroom
 }
 
 /// sceKernelAvailableFlexibleMemorySize(size_t* out)
@@ -1492,6 +1537,9 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceKernelCheckedReleaseDirectMemory", release_direct as *const () as usize),
         ("sceKernelMapDirectMemory", map_direct as *const () as usize),
         ("sceKernelMapNamedDirectMemory", map_named_direct as *const () as usize),
+        ("sceKernelBatchMap", batch_map as *const () as usize),
+        ("sceKernelBatchMap2", batch_map2 as *const () as usize),
+        ("sceKernelMtypeprotect", mprotect as *const () as usize),
         ("sceKernelGetDirectMemorySize", direct_memory_size as *const () as usize),
         ("sceKernelAvailableFlexibleMemorySize", available_flexible as *const () as usize),
         ("sceKernelAvailableDirectMemorySize", available_direct as *const () as usize),
@@ -1630,8 +1678,11 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn world_save_fs_syscalls_work_end_to_end() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("orbis_fs_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -1738,6 +1789,7 @@ mod tests {
 
     #[test]
     fn compat_profile_writes_valid_json() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("orbis_prof_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -1752,5 +1804,28 @@ mod tests {
         assert!(val["unresolved_nids"].is_array());
         std::env::remove_var("ORBIS_TITLE_ID");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn batch_map_maps_and_unmaps_entries() {
+        assert_eq!(std::mem::size_of::<BatchMapEntry>(), 0x20);
+        let mut entry = BatchMapEntry {
+            start: 0,
+            offset: 0,
+            length: 0x10000,
+            protection: 3,
+            mem_type: 0,
+            _pad: 0,
+            operation: 3, // MAP_FLEXIBLE
+        };
+        let mut out = 0i32;
+        assert_eq!(batch_map(&mut entry, 1, &mut out), 0);
+        assert_eq!(out, 1);
+        assert_ne!(entry.start, 0);
+        unsafe { *(entry.start as *mut u64) = 0xCAFE_BABE };
+        assert_eq!(unsafe { *(entry.start as *const u64) }, 0xCAFE_BABE);
+        entry.operation = 1; // UNMAP
+        assert_eq!(batch_map(&mut entry, 1, &mut out), 0);
+        assert_eq!(out, 1);
     }
 }
