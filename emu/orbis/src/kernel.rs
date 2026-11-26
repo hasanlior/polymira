@@ -416,6 +416,9 @@ pub extern "sysv64" fn allocate_direct(start: i64, end: i64, len: u64, align: u6
             let free_sum: u64 = pool.free.iter().map(|&(a, b)| b.saturating_sub(a)).sum();
             let used = DIRECT_SIZE.saturating_sub(free_sum);
             PEAK_DIRECT_BYTES.fetch_max(used, std::sync::atomic::Ordering::Relaxed);
+            if std::env::var_os("ORBIS_TRACE_MEM").is_some() {
+                eprintln!("[orbis] allocate_direct(s={s:#x}, e={e:#x}, len={len:#x}, align={align:#x}) -> {off:#x}, used {:#x}", used);
+            }
             if !out.is_null() {
                 unsafe { *out = off };
             }
@@ -491,7 +494,19 @@ pub extern "sysv64" fn reserve_virtual_range(addr: *mut usize, len: usize, _flag
     let want = unsafe { *addr };
     // Over-allocate to honour the alignment.
     let a = align.max(0x10000);
-    let p = vmap(want, len + if want == 0 { a } else { 0 }, false, false);
+    // The hinted address if it is free (and aligned); otherwise anywhere, over-allocated so the
+    // returned start honours the alignment (UE4 carves its range in 2 MiB blocks).
+    let mut p = if want != 0 && want % a == 0 { vmap(want, len, false, false) } else { 0 };
+    if p != want || p == 0 {
+        if p != 0 {
+            #[cfg(windows)]
+            unsafe {
+                windows_sys::Win32::System::Memory::VirtualFree(p as *mut c_void, 0, windows_sys::Win32::System::Memory::MEM_RELEASE);
+            }
+        }
+        let raw = vmap(0, len + a, false, false);
+        p = if raw == 0 { 0 } else { (raw + a - 1) / a * a };
+    }
     if std::env::var_os("ORBIS_TRACE_MEM").is_some() {
         eprintln!("[orbis] reserve({want:#x}, {len:#x}, align {align:#x}) -> {p:#x}");
     }
@@ -499,7 +514,7 @@ pub extern "sysv64" fn reserve_virtual_range(addr: *mut usize, len: usize, _flag
         eprintln!("[orbis] ENOMEM in reserve_virtual_range(want={want:#x}, len={len:#x}, align={align:#x})");
         return SCE_KERNEL_ERROR_ENOMEM;
     }
-    unsafe { *addr = if want == 0 { (p + a - 1) / a * a } else { p } };
+    unsafe { *addr = p };
     0
 }
 
@@ -1573,6 +1588,8 @@ pub extern "sysv64" fn apr_get_file_stat(file_id: u32, st: *mut Stat) -> i32 {
 }
 
 enum AprOp {
+    /// Fire an AMPR event on an event queue once the commands before it are done.
+    WriteEvent { eq: usize, ident: u64, data: u64 },
     ReadFile {
         file_id: u32,
         dst: usize,
@@ -1662,6 +1679,23 @@ pub extern "sysv64" fn ampr_apr_read_file(
     0
 }
 
+/// sceAmprCommandBufferWriteKernelEventQueue(cb, equeue, ident, data)
+pub extern "sysv64" fn ampr_cb_write_event(cb: usize, eq: usize, ident: u64, data: u64) -> i32 {
+    if cb == 0 {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    with_ampr_cbs(|m| {
+        let entry = m.entry(cb).or_insert_with(|| AprCmdBuf { buf: 0, buf_size: 0, ops: Vec::new() });
+        entry.ops.push(AprOp::WriteEvent { eq, ident, data });
+    });
+    0
+}
+
+/// sceAmprMeasureCommandSize*: bytes one command takes in the buffer (our encoding: 32).
+pub extern "sysv64" fn ampr_measure_command() -> u64 {
+    32
+}
+
 pub extern "sysv64" fn ampr_cb_get_current_offset(cb: usize) -> u32 {
     with_ampr_cbs(|m| m.get(&cb).map(|e| (e.ops.len() * 32) as u32).unwrap_or(0))
 }
@@ -1681,6 +1715,7 @@ fn apr_execute_cb(cb: usize) -> i32 {
     });
     for op in ops {
         match op {
+            AprOp::WriteEvent { eq, ident, data } => crate::equeue::trigger_ampr(eq, ident, data),
             AprOp::ReadFile { file_id, dst, size, offset } => {
                 if file_id == 0 || dst == 0 || size == 0 {
                     continue;
@@ -2141,9 +2176,9 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceKernelAprSubmitCommandBufferAndGetResult", apr_submit_cb_and_get_result as *const () as usize),
         ("sceKernelAprWaitCommandBuffer", zero as *const () as usize),
         ("sceKernelAprPollCommandBuffer", zero as *const () as usize),
-        ("sceKernelAddAmprEvent", zero as *const () as usize),
-        ("sceKernelAddAmprSystemEvent", zero as *const () as usize),
-        ("sceKernelDeleteAmprEvent", zero as *const () as usize),
+        ("sceKernelAddAmprEvent", crate::equeue::add_ampr_event as *const () as usize),
+        ("sceKernelAddAmprSystemEvent", crate::equeue::add_ampr_system_event as *const () as usize),
+        ("sceKernelDeleteAmprEvent", crate::equeue::delete_ampr_event as *const () as usize),
         // PS5 libSceAmpr command buffer builder
         ("sceAmprCommandBufferConstructor", ampr_cb_construct as *const () as usize),
         ("sceAmprCommandBufferDestructor", ampr_cb_destruct as *const () as usize),
@@ -2151,6 +2186,12 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceAmprAprCommandBufferDestructor", ampr_cb_destruct as *const () as usize),
         ("sceAmprCommandBufferSetBuffer", ampr_cb_set_buffer as *const () as usize),
         ("sceAmprCommandBufferReset", ampr_cb_reset as *const () as usize),
+        ("sceAmprCommandBufferClearBuffer", ampr_cb_reset as *const () as usize),
+        ("sceAmprCommandBufferWriteKernelEventQueue", ampr_cb_write_event as *const () as usize),
+        ("sceAmprCommandBufferWriteKernelEventQueue_04_00", ampr_cb_write_event as *const () as usize),
+        ("sceAmprMeasureCommandSizeReadFile", ampr_measure_command as *const () as usize),
+        ("sceAmprMeasureCommandSizeWriteKernelEventQueue", ampr_measure_command as *const () as usize),
+        ("sceAmprMeasureCommandSizeWriteKernelEventQueue_04_00", ampr_measure_command as *const () as usize),
         ("sceAmprCommandBufferGetSize", ampr_cb_get_current_offset as *const () as usize),
         ("sceAmprCommandBufferGetCurrentOffset", ampr_cb_get_current_offset as *const () as usize),
         ("sceAmprCommandBufferGetCurrentSize", ampr_cb_get_current_offset as *const () as usize),

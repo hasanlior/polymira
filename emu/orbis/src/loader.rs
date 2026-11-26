@@ -295,6 +295,14 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
     let rec = &*(*info).ExceptionRecord;
     let ctx = &mut *(*info).ContextRecord;
     let code = rec.ExceptionCode as u32;
+    // int3 leaves RIP after the instruction: step back onto it before looking it up.
+    if code == 0x8000_0003 {
+        ctx.Rip -= 1;
+        if hit_breakpoint(ctx) {
+            return -1; // EXCEPTION_CONTINUE_EXECUTION, with the original byte back in place
+        }
+        ctx.Rip += 1;
+    }
     // Demand-commit reserved (MEM_RESERVE) game arena pages on read/write AV (e.g. mimalloc/libc arenas).
     if code == 0xC000_0005 && rec.NumberParameters >= 2 && rec.ExceptionInformation[0] != 8 {
         let fault_addr = rec.ExceptionInformation[1];
@@ -368,6 +376,7 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
         let _ = writeln!(out, "[orbis]   instruction bytes: {}", bytes.join(" "));
     }
     let _ = writeln!(out, "[orbis]   registers: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} rsp={:#x} rbp={:#x}", ctx.Rax, ctx.Rbx, ctx.Rcx, ctx.Rdx, ctx.Rsi, ctx.Rdi, ctx.Rsp, ctx.Rbp);
+    let _ = writeln!(out, "[orbis]   r8={:#x} r9={:#x} r12={:#x} r13={:#x} r14={:#x} r15={:#x} orbis.exe base={:#x}", ctx.R8, ctx.R9, ctx.R12, ctx.R13, ctx.R14, ctx.R15, windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null()) as usize);
     // A jump to a bad address (null function pointer): the caller's return address is at [rsp].
     if !readable(rip) && readable(ctx.Rsp as usize) {
         let ret = *(ctx.Rsp as usize as *const usize);
@@ -755,7 +764,71 @@ pub fn run(loaded: &Loaded) -> i32 {
         .unwrap_or(-1)
 }
 
+/// One-shot breakpoints set with ORBIS_BREAK=eboot+0x1234,eboot+0x5678: address → original byte.
+static BREAKS: Mutex<Vec<(usize, u8)>> = Mutex::new(Vec::new());
+
+/// Debugging aid: when the game reaches one of these instructions, its registers and the memory
+/// they point at are printed, then it continues as if nothing happened.
+fn arm_breakpoints() {
+    let Ok(spec) = std::env::var("ORBIS_BREAK") else { return };
+    let (base, size) = *GAME.lock().unwrap();
+    for part in spec.split(',') {
+        let off = part.trim().trim_start_matches("eboot+").trim_start_matches("0x");
+        let Ok(off) = usize::from_str_radix(off, 16) else { continue };
+        if off >= size {
+            continue;
+        }
+        let addr = base + off;
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READWRITE};
+            let mut old = 0u32;
+            VirtualProtect(addr as *const std::ffi::c_void, 1, PAGE_EXECUTE_READWRITE, &mut old);
+            let orig = *(addr as *const u8);
+            *(addr as *mut u8) = 0xCC;
+            VirtualProtect(addr as *const std::ffi::c_void, 1, old, &mut old);
+            BREAKS.lock().unwrap().push((addr, orig));
+            eprintln!("[orbis] breakpoint at eboot+{off:#x}");
+        }
+    }
+}
+
+/// Handles a breakpoint from `arm_breakpoints`; returns true when it was one of ours.
+#[cfg(windows)]
+unsafe fn hit_breakpoint(ctx: &mut windows_sys::Win32::System::Diagnostics::Debug::CONTEXT) -> bool {
+    let addr = ctx.Rip as usize;
+    let orig = {
+        let Ok(mut b) = BREAKS.try_lock() else { return false };
+        let Some(i) = b.iter().position(|&(a, _)| a == addr) else { return false };
+        b.remove(i).1
+    };
+    use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READWRITE};
+    let mut old = 0u32;
+    VirtualProtect(addr as *const std::ffi::c_void, 1, PAGE_EXECUTE_READWRITE, &mut old);
+    *(addr as *mut u8) = orig;
+    VirtualProtect(addr as *const std::ffi::c_void, 1, old, &mut old);
+    let (base, _) = *GAME.lock().unwrap_or_else(|e| e.into_inner());
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let regs = [("rax", ctx.Rax), ("rbx", ctx.Rbx), ("rcx", ctx.Rcx), ("rdx", ctx.Rdx), ("rsi", ctx.Rsi), ("rdi", ctx.Rdi), ("rbp", ctx.Rbp), ("rsp", ctx.Rsp), ("r8", ctx.R8), ("r9", ctx.R9), ("r10", ctx.R10), ("r11", ctx.R11), ("r12", ctx.R12), ("r13", ctx.R13), ("r14", ctx.R14), ("r15", ctx.R15)];
+    let _ = writeln!(out, "[orbis] BREAK eboot+{:#x}", addr - base);
+    for (n, v) in regs {
+        let _ = write!(out, "[orbis]   {n:>3}={v:#018x}");
+        if readable(v as usize) && readable(v as usize + 0x78) {
+            let q: Vec<String> = (0..16).map(|k| format!("{:x}", *((v as usize + k * 8) as *const u64))).collect();
+            let _ = write!(out, "  -> [{}]", q.join(" "));
+        }
+        let _ = writeln!(out);
+    }
+    use windows_sys::Win32::Storage::FileSystem::WriteFile;
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+    let mut n = 0u32;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), out.as_ptr(), out.len() as u32, &mut n, std::ptr::null_mut());
+    true
+}
+
 fn run_here(loaded: &Loaded) -> i32 {
+    arm_breakpoints();
     for (name, init) in &loaded.inits {
         eprintln!("[orbis] initialising {name}");
         let f: extern "sysv64" fn(u64, u64, u64) -> i32 = unsafe { std::mem::transmute(*init as usize) };

@@ -76,6 +76,38 @@ pub extern "sysv64" fn trigger_user_event(eq: usize, id: i32, udata: u64) -> i32
     0
 }
 
+const EVFILT_AMPR: i16 = -25;
+const EVFILT_AMPR_SYSTEM: i16 = -30;
+
+/// sceKernelAddAmprEvent(eq, ident, udata): completion events of AMPR command buffers.
+pub extern "sysv64" fn add_ampr_event(eq: usize, id: u32, udata: u64) -> i32 {
+    add(eq, id as u64, EVFILT_AMPR, udata)
+}
+
+pub extern "sysv64" fn add_ampr_system_event(eq: usize, id: u32, udata: u64) -> i32 {
+    add(eq, id as u64, EVFILT_AMPR_SYSTEM, udata)
+}
+
+pub extern "sysv64" fn delete_ampr_event(eq: usize, id: u32) -> i32 {
+    if let Some(q) = queue(eq) {
+        q.registered.lock().unwrap().retain(|(e, _)| !(e.ident == id as u64 && e.filter == EVFILT_AMPR));
+    }
+    0
+}
+
+/// Fires an AMPR completion event (from a command buffer's "write kernel event queue" command).
+pub fn trigger_ampr(eq: usize, id: u64, data: u64) {
+    let Some(q) = queue(eq) else { return };
+    let mut r = q.registered.lock().unwrap();
+    for (e, fired) in r.iter_mut() {
+        if (e.filter == EVFILT_AMPR || e.filter == EVFILT_AMPR_SYSTEM) && e.ident == id {
+            e.data = data as i64;
+            *fired = fired.saturating_add(1);
+        }
+    }
+    q.signal.notify_all();
+}
+
 pub extern "sysv64" fn delete_user_event(eq: usize, id: i32) -> i32 {
     if let Some(q) = queue(eq) {
         q.registered.lock().unwrap().retain(|(e, _)| !(e.filter == EVFILT_USER && e.ident == id as u64));
