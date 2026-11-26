@@ -1,15 +1,16 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>POLYMIRA Orbis · POLYMIRA Docs</title>
-  <meta name="description" content="Our own experimental PS4 core." />
-  <meta name="theme-color" content="#05060f" />
+  <meta name="description" content="Built-in clean-room Rust PS5 and PS4 emulation core." />
+  <meta name="theme-color" content="#ffffff" />
+  <script>!function(){try{var t=localStorage.getItem('polymira-theme');document.documentElement.setAttribute('data-theme',t==='dark'?'dark':'light')}catch(e){document.documentElement.setAttribute('data-theme','light')}}()</script>
   <link rel="icon" href="../assets/icon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="../assets/site.css" />
 </head>
 <body>
@@ -23,8 +24,11 @@
         <a href="./" class="on">Docs</a>
         <a href="../changelog.html">Changelog</a>
       </div>
-      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
-      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+      <div class="nav-actions">
+        <button class="theme-toggle" type="button" aria-label="Switch to dark theme" title="Switch to dark theme" aria-pressed="false"><svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg><svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></button>
+        <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+        <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+      </div>
     </div>
   </nav>
   <div class="docs">
@@ -35,27 +39,33 @@
     <main class="doc">
       <div class="crumbs">Docs / Emulation</div>
       <h1 class="display">POLYMIRA Orbis</h1>
-      <p class="intro">Our own experimental PS4 core.</p>
-<div class="note warn"><p>Orbis is at an early stage and does not run commercial games yet. Use shadPS4 to play PS4 games today.</p></div>
-<p>PS4 and PC share the x86-64 instruction set, so a game's own code can run directly on the PC. What has to be emulated is the system around it: the PS4 kernel and libraries for files, threads, memory, video, audio and controllers. Orbis loads a game's executable and connects each system call to its own implementation.</p>
+      <p class="intro">Built-in clean-room Rust PS5 and PS4 emulation core.</p>
+<div class="note"><p>See the <a href="../orbis.html">ORBIS overview &amp; Compatibility Database</a> for live per-Title ID status (including Minecraft PS5 <code>PPSA17221</code> In-Game) and architecture notes.</p></div>
+<p>PS5, PS4, and PC share the x86-64 instruction set, allowing decrypted game code to run natively while POLYMIRA Orbis emulates the surrounding system: kernel services, memory management, HLE libraries, audio, input, and the Vulkan graphics pipeline.</p>
+<h2 id="architecture">Core subsystems</h2>
+<ul>
+<li><b>RDNA2 → SPIR-V GPU-VS JIT:</b> LLVM-verified <code>gfx1013</code> ISA decoder with SSA fragment translation and automatic GPU vertex shader SPIR-V offload.</li>
+<li><b>Live AUTO-HEAL Watchdog:</b> Monitors Vulkan device health and submission latency, rebuilding the renderer live on <code>VK_ERROR_DEVICE_LOST</code> or stalls.</li>
+<li><b>FSR / DLSS &amp; 2x/3x FrameGen:</b> Integrated upscaling pipeline with optional 2x and 3x frame generation for high-refresh displays.</li>
+<li><b>Universal NID Telemetry:</b> Tracks dynamic symbol resolution and missing HLE NIDs per Title ID for rapid bring-up diagnostics.</li>
+<li><b>PS5 Oberon Untiling:</b> Bit-exact <code>SW_64KB_S</code> and <code>SW_64KB_R_X</code> macro-tile untiling with XOR bank swizzling and a 64 GiB Direct Memory pool.</li>
+</ul>
 <h2 id="analysis">Orbis analysis</h2>
-<p>For a PS4 or PS5 game, open its options and choose <b>Orbis analysis</b>. Orbis reads the game's <code>eboot.bin</code> and lists the system libraries and functions it uses, with how many Orbis already implements. This shows exactly what has to be built for that game.</p>
+<p>For a PS4 or PS5 game, open its options and choose <b>Orbis analysis</b>. Orbis inspects the game's <code>eboot.bin</code> and reports the system libraries and NIDs it imports alongside current HLE coverage.</p>
 <h2 id="try">Try with Orbis</h2>
-<p><b>Try with Orbis</b> loads and starts the executable and shows what it printed, including every system function it reached that is not implemented yet.</p>
+<p><b>Try with Orbis</b> boots the executable through the built-in Rust core, displaying live telemetry and any unimplemented NIDs reached during execution.</p>
 <h2 id="selftest">Self-test</h2>
-<p><b>Settings → Emulation Settings → POLYMIRA Orbis</b> runs a small program built in the PS4 format: it prints a line through a PS4 system call, reaches one unimplemented function and exits normally.</p>
+<p><b>Settings → Emulation Settings → POLYMIRA Orbis</b> runs a minimal diagnostic binary verifying syscalls, HLE dispatch, and clean process teardown.</p>
 <h2 id="files">Your files</h2>
-<p>Orbis runs only files you provide. It contains no Sony code, keys or firmware and cannot decrypt retail games; executables must be decrypted on your own console.</p>
-<h2 id="roadmap">Roadmap</h2>
-<ol><li>Thread-local storage, memory and threads: PS4 homebrew reaches <code>main</code>.</li><li>Video out, controllers, audio: homebrew samples run.</li><li>GPU commands on Vulkan.</li><li>Commercial games, one system library at a time.</li></ol>
+<p>Orbis runs only files you provide. It contains no Sony code, keys, or firmware and cannot decrypt retail games; executables must be decrypted on your own console.</p>
       <div class="pager"><a class="prev" href="emulators.html"><small>Previous</small>Emulators</a><a class="next" href="saves.html"><small>Next</small>Save data</a></div>
       <p class="crumbs" style="margin-top:28px"><a href="https://github.com/hasanlior/polymira/blob/main/docs/gendocs.py" style="color:var(--faint)">Edit this page on GitHub</a></p>
     </main>
-    <aside class="toc"><b>On this page</b><a href="#analysis">Orbis analysis</a><a href="#try">Try with Orbis</a><a href="#selftest">Self-test</a><a href="#files">Your files</a><a href="#roadmap">Roadmap</a></aside>
+    <aside class="toc"><b>On this page</b><a href="#architecture">Core subsystems</a><a href="#analysis">Orbis analysis</a><a href="#try">Try with Orbis</a><a href="#selftest">Self-test</a><a href="#files">Your files</a></aside>
   </div>
   <footer>
     <div class="wrap">
-      <span>© 2026 POLYMIRA · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
+      <span>© 2026 POLYMIRA · <a href="../orbis.html">ORBIS</a> · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
       <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
     </div>
   </footer>

@@ -1,18 +1,19 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>POLYMIRA — Every console. One universe.</title>
-  <meta name="description" content="POLYMIRA turns a Windows PC into a game console. Steam, Epic, Xbox app and emulated games in one controller-first, PS3-style interface." />
+  <meta name="description" content="POLYMIRA turns a Windows PC into a game console. Steam, Epic, Xbox app, emulated libraries, and the built-in ORBIS PS5/PS4 core in one controller-first interface." />
   <meta property="og:title" content="POLYMIRA — Every console. One universe." />
   <meta property="og:description" content="Turn your Windows PC into a game console you control from the couch." />
   <meta property="og:image" content="https://hasanlior.github.io/polymira/assets/shots/home.jpg" />
-  <meta name="theme-color" content="#05060f" />
+  <meta name="theme-color" content="#ffffff" />
+  <script>!function(){try{var t=localStorage.getItem('polymira-theme');document.documentElement.setAttribute('data-theme',t==='dark'?'dark':'light')}catch(e){document.documentElement.setAttribute('data-theme','light')}}()</script>
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="assets/site.css" />
 </head>
 <body>
@@ -28,36 +29,65 @@
         <a href="changelog.html">Changelog</a>
         <a href="#faq">FAQ</a>
       </div>
-      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
-      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+      <div class="nav-actions">
+        <button class="theme-toggle" type="button" aria-label="Switch to dark theme" title="Switch to dark theme" aria-pressed="false">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        </button>
+        <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+        <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+      </div>
     </div>
   </nav>
 
   <header class="hero">
     <div class="wrap">
-      <a class="eyebrow" href="changelog.html"><b class="ver">v0.1</b> See what's new</a>
+      <a class="eyebrow" href="changelog.html"><b class="ver">v0.1</b> Release notes &amp; updates →</a>
       <h1 class="display">Your PC, as a game console.</h1>
-      <p class="lede">POLYMIRA puts your Steam, Epic and Xbox app games and your emulated console games in one menu you drive with a controller. Inspired by the PS3, built for Windows.</p>
+      <p class="lede">POLYMIRA unifies your Steam, Epic, and Xbox libraries alongside your emulated console games in a single controller-first interface built for Windows.</p>
       <div class="ctas">
         <a class="btn btn-primary dl" href="https://github.com/hasanlior/polymira/releases/latest">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
           Download for Windows
         </a>
+        <a class="btn btn-secondary" href="orbis.html">
+          Explore ORBIS Core
+        </a>
         <a class="btn btn-secondary" href="https://github.com/hasanlior/polymira">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg>
+          <svg class="star-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg>
           Star on GitHub <b class="count stars"></b>
         </a>
       </div>
       <p class="fine" id="meta">Free · Windows 10 &amp; 11 · English and Turkish</p>
       <div class="frame"><img src="assets/shots/home.jpg" alt="POLYMIRA home screen: the PlayStation 2 folder with Neon Vale selected and a trophy notification" /></div>
-      <p class="caption">Real screenshot. The games shown are sample titles made for these pictures.</p>
+      <p class="caption">Real screenshot from the Windows build. Sample titles are shown for illustration.</p>
     </div>
   </header>
 
   <div class="strip">
     <div class="wrap">
-      <p>Finds and launches games from</p>
-      <ul><li>Steam</li><li>Epic Games</li><li>Xbox app</li><li>GOG</li><li>EA app</li><li>Ubisoft Connect</li><li>Battle.net</li><li>Riot Games</li><li>RetroArch</li></ul>
+      <p>Discovers and launches titles from</p>
+      <ul><li>Steam</li><li>Epic Games</li><li>Xbox app</li><li>GOG</li><li>EA app</li><li>Ubisoft Connect</li><li>Battle.net</li><li>Riot Games</li><li>RetroArch</li><li>POLYMIRA Orbis</li></ul>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="orbis-banner">
+      <div>
+        <span class="orbis-banner-tag">Built-in PS5 / PS4 Core</span>
+        <h2 class="display">POLYMIRA ORBIS</h2>
+        <p>An original clean-room Rust emulation core shipped inside POLYMIRA — featuring a Vulkan 1.2/1.3 renderer, RDNA2 → SPIR-V GPU-VS JIT, live AUTO-HEAL recovery, FSR/DLSS upscaling with 2x/3x FrameGen, and Universal NID Telemetry.</p>
+        <div class="orbis-banner-specs">
+          <span>RDNA2 → SPIR-V JIT</span>
+          <span>AUTO-HEAL Watchdog</span>
+          <span>FSR / DLSS + FrameGen</span>
+          <span>PPSA17221 In-Game</span>
+        </div>
+      </div>
+      <div class="orbis-banner-cta">
+        <a class="btn btn-accent" href="orbis.html">Open ORBIS &amp; Compatibility →</a>
+        <small>Honest, hardware-verified compatibility database</small>
+      </div>
     </div>
   </div>
 
@@ -65,18 +95,18 @@
     <div class="wrap">
       <div class="head">
         <p class="kicker">Tour</p>
-        <h2 class="display">One screen for everything you play.</h2>
-        <p class="section-lede">No desktop, no launcher windows, no emulator menus. Everything below is the actual app.</p>
+        <h2 class="display">One interface for everything you play.</h2>
+        <p class="section-lede">No desktop clutter, no nested launcher windows, no manual emulator setup. Every screenshot below is captured directly from the app.</p>
       </div>
 
       <div class="row">
         <div>
-          <h3 class="display">A library that fills itself</h3>
-          <p>The first-run wizard scans every drive for store games, emulators and ROM folders. Covers, backgrounds and game details are fetched automatically.</p>
+          <h3 class="display">A library that builds itself</h3>
+          <p>The first-run wizard scans every drive for store installs, emulators, and ROM directories. Artwork, metadata, and launch profiles are assembled automatically.</p>
           <ul class="ticks">
-            <li>Steam, Epic, Xbox app, GOG, EA, Ubisoft, Battle.net and Riot</li>
-            <li>PlayStation, Nintendo, Xbox, Sega and arcade games through emulators</li>
-            <li>Play time, last launch result and an honest compatibility status per game</li>
+            <li>Steam, Epic, Xbox app, GOG, EA, Ubisoft, Battle.net, and Riot</li>
+            <li>PlayStation, Nintendo, Xbox, Sega, and arcade systems through managed emulators</li>
+            <li>Play time tracking, last launch result, and honest per-game compatibility status</li>
           </ul>
         </div>
         <div class="shot"><img src="assets/shots/detail.jpg" alt="Game detail page for Neon Vale with year, genre, developer and play time" loading="lazy" /></div>
@@ -84,12 +114,12 @@
 
       <div class="row flip">
         <div>
-          <h3 class="display">Press Guide in any game</h3>
-          <p>The controller's Guide button opens a menu over the running game. The game process is suspended while the menu is open, so nothing moves on behind it.</p>
+          <h3 class="display">Press Guide inside any game</h3>
+          <p>Your controller's Guide button opens a system overlay over the running game. The game process suspends cleanly while the menu is active.</p>
           <ul class="ticks">
-            <li>Resume, pause, screenshot, quit</li>
-            <li>Quick save and load in RetroArch games</li>
-            <li>CPU, RAM and GPU usage of the game and the system</li>
+            <li>Resume, pause, screenshot, and clean process termination</li>
+            <li>Quick save and load states for RetroArch titles</li>
+            <li>Live CPU, RAM, and GPU telemetry for both game and host system</li>
           </ul>
         </div>
         <div class="shot"><img src="assets/shots/ingame.jpg" alt="In-game menu over Neon Vale with the performance panel" loading="lazy" /></div>
@@ -97,22 +127,22 @@
 
       <div class="row">
         <div>
-          <h3 class="display">Emulators, set up for you</h3>
-          <p>Emulators download from their official sources in the background. Before a game starts, POLYMIRA writes the controller settings into the emulator, so nobody has to open its own menus.</p>
+          <h3 class="display">Emulators, configured automatically</h3>
+          <p>Supported emulators download from their official upstream releases in the background. Before launch, POLYMIRA writes controller bindings directly so you never touch external setup dialogs.</p>
           <ul class="ticks">
-            <li>RetroArch with cores, DuckStation, PCSX2, PPSSPP, RPCS3, Xenia, Cemu and more</li>
-            <li>Save backups for every emulator, with an optional cloud folder</li>
-            <li>Per-game emulator choice, video filters and arguments</li>
+            <li>RetroArch cores, DuckStation, PCSX2, PPSSPP, RPCS3, Xenia, Cemu, and built-in Orbis</li>
+            <li>Automated save backups for every emulator with optional cloud sync folder</li>
+            <li>Per-game emulator selection, video filters, and custom launch arguments</li>
           </ul>
         </div>
         <div class="shot"><img src="assets/shots/store.jpg" alt="The store's Emulators tab" loading="lazy" /></div>
       </div>
 
-      <div class="thumbs" style="margin-top:80px">
+      <div class="thumbs">
         <figure><img src="assets/shots/stats.jpg" alt="Play statistics screen" loading="lazy" /><figcaption>Play statistics</figcaption></figure>
         <figure><img src="assets/shots/gallery.jpg" alt="Cover gallery view" loading="lazy" /><figcaption>Cover gallery</figcaption></figure>
         <figure><img src="assets/shots/remap.jpg" alt="Button mapping screen" loading="lazy" /><figcaption>Button mapping</figcaption></figure>
-        <figure><img src="assets/shots/setup.jpg" alt="First-run welcome screen" loading="lazy" /><figcaption>First run</figcaption></figure>
+        <figure><img src="assets/shots/setup.jpg" alt="First-run welcome screen" loading="lazy" /><figcaption>First-run wizard</figcaption></figure>
       </div>
     </div>
   </section>
@@ -120,19 +150,19 @@
   <section id="features" style="padding-top:20px">
     <div class="wrap">
       <div class="head">
-        <p class="kicker">Features</p>
-        <h2 class="display">What's in POLYMIRA</h2>
+        <p class="kicker">Capabilities</p>
+        <h2 class="display">Engineered for couch play.</h2>
       </div>
       <div class="fgrid">
-        <div class="f"><h4>Controllers</h4><p>Xbox, DualShock 4, DualSense and Switch Pro. Button hints show your pad's symbols; every button can be remapped.</p></div>
-        <div class="f"><h4>Trophies</h4><p>Steam achievements are read from Steam's own files. RetroAchievements works for emulated games.</p></div>
-        <div class="f"><h4>Notifications</h4><p>Downloads, trophies, backups and updates appear as cards, also over a running game.</p></div>
-        <div class="f"><h4>Apps</h4><p>A browser, YouTube and Twitch run inside the console with a controller pointer and on-screen keyboard.</p></div>
-        <div class="f"><h4>Store, themes, mods</h4><p>Install apps, emulators, themes and community CSS mods from a full-screen store.</p></div>
-        <div class="f"><h4>Game mode</h4><p>Higher CPU priority and a performance power plan while you play, restored when you stop.</p></div>
-        <div class="f"><h4>Updates</h4><p>New releases download from GitHub and are checked against their SHA-256 digest before installing.</p></div>
-        <div class="f"><h4>Crash recovery</h4><p>A small watchdog brings back the desktop and restarts the app after an unexpected exit.</p></div>
-        <div class="f"><h4>Languages</h4><p>English and Turkish, switchable in settings.</p></div>
+        <div class="f"><h4>Controllers</h4><p>Xbox, DualShock 4, DualSense, and Switch Pro. On-screen prompts match your active pad; every action is remappable.</p></div>
+        <div class="f"><h4>Trophies</h4><p>Reads Steam achievements directly from local Steam client data and integrates RetroAchievements for emulated libraries.</p></div>
+        <div class="f"><h4>Notifications</h4><p>Downloads, unlocked trophies, save backups, and app updates appear as unobtrusive cards — including over running games.</p></div>
+        <div class="f"><h4>Built-in Apps</h4><p>Browser, YouTube, and Twitch run inside the console shell with a stick-driven pointer and on-screen keyboard.</p></div>
+        <div class="f"><h4>Store, Themes &amp; Mods</h4><p>Install apps, emulators, visual themes, and community CSS mods from a dedicated full-screen catalog.</p></div>
+        <div class="f"><h4>Game Mode</h4><p>Raises game process priority and switches to a high-performance power plan during play, restoring defaults on exit.</p></div>
+        <div class="f"><h4>Verified Updates</h4><p>Releases download in the background from GitHub and are checked against their SHA-256 digest before installation.</p></div>
+        <div class="f"><h4>Crash Watchdog</h4><p>A lightweight watchdog restores the Windows desktop and restarts the shell cleanly if an unexpected exit occurs.</p></div>
+        <div class="f"><h4>Bilingual UI</h4><p>Full English and Turkish localization, switchable at any time in Settings without restarting.</p></div>
       </div>
     </div>
   </section>
@@ -142,17 +172,17 @@
       <div class="head">
         <p class="kicker">Platforms</p>
         <h2 class="display">Supported systems</h2>
-        <p class="section-lede">Each platform carries a compatibility label in the app. Platforms without a working emulator are shown as unsupported.</p>
+        <p class="section-lede">Every system carries an explicit compatibility status inside the app. Platforms without a working runner are never presented as playable.</p>
       </div>
       <div class="plat">
-        <div class="pcard"><h4>PlayStation <span class="badge b-stable">Stable</span></h4><p>PS1, PS2, PSP. PS3, Vita and PS4 are experimental.</p><small>DuckStation · PCSX2 · PPSSPP · RPCS3 · Vita3K · shadPS4</small></div>
-        <div class="pcard"><h4>Nintendo <span class="badge b-stable">Stable</span></h4><p>NES, SNES, N64, Game Boy family, DS, 3DS, GameCube, Wii, Wii U, Switch</p><small>RetroArch · melonDS · Azahar · Dolphin · Cemu · Ryujinx</small></div>
-        <div class="pcard"><h4>PC <span class="badge b-stable">Stable</span></h4><p>Store games and any .exe, shortcut or game folder</p><small>Steam · Epic · Xbox app · GOG · EA · Ubisoft · Battle.net · Riot</small></div>
-        <div class="pcard"><h4>Sega <span class="badge b-stable">Stable</span></h4><p>Master System, Mega Drive, Saturn, Dreamcast, Game Gear</p><small>RetroArch · Flycast</small></div>
-        <div class="pcard"><h4>Xbox <span class="badge b-exp">Experimental</span></h4><p>Original Xbox and Xbox 360</p><small>xemu · Xenia Canary</small></div>
-        <div class="pcard"><h4>Arcade and retro <span class="badge b-stable">Stable</span></h4><p>Arcade, Neo Geo, Atari, MSX, Commodore 64</p><small>RetroArch</small></div>
+        <div class="pcard"><h4>PlayStation <span class="badge b-stable">Stable</span></h4><p>PS1, PS2, PSP stable. PS3, Vita, PS4, and native PS5/PS4 via POLYMIRA Orbis experimental.</p><small>DuckStation · PCSX2 · PPSSPP · RPCS3 · Vita3K · shadPS4 · Orbis</small></div>
+        <div class="pcard"><h4>Nintendo <span class="badge b-stable">Stable</span></h4><p>NES, SNES, N64, Game Boy family, DS, 3DS, GameCube, Wii, Wii U, Switch.</p><small>RetroArch · melonDS · Azahar · Dolphin · Cemu · Ryujinx</small></div>
+        <div class="pcard"><h4>PC <span class="badge b-stable">Stable</span></h4><p>Major PC storefronts plus any standalone .exe, shortcut, or local game folder.</p><small>Steam · Epic · Xbox app · GOG · EA · Ubisoft · Battle.net · Riot</small></div>
+        <div class="pcard"><h4>Sega <span class="badge b-stable">Stable</span></h4><p>Master System, Mega Drive, Saturn, Dreamcast, and Game Gear.</p><small>RetroArch · Flycast</small></div>
+        <div class="pcard"><h4>Xbox <span class="badge b-exp">Experimental</span></h4><p>Original Xbox and Xbox 360 titles through managed community emulators.</p><small>xemu · Xenia Canary</small></div>
+        <div class="pcard"><h4>Arcade &amp; Retro <span class="badge b-stable">Stable</span></h4><p>Arcade, Neo Geo, Atari, MSX, and Commodore 64 collections.</p><small>RetroArch</small></div>
       </div>
-      <p class="caption" style="text-align:center;margin-top:24px">POLYMIRA does not include games, BIOS, firmware or keys. Use backups of software you own.</p>
+      <p class="caption" style="text-align:center;margin-top:24px">POLYMIRA does not include games, BIOS, firmware, or encryption keys. Use backups of software you legally own.</p>
     </div>
   </section>
 
@@ -160,14 +190,14 @@
     <div class="wrap">
       <div class="head">
         <p class="kicker">FAQ</p>
-        <h2 class="display">Questions</h2>
+        <h2 class="display">Common questions</h2>
       </div>
       <div class="faq">
-        <details><summary>Is it free?</summary><p>Yes, for noncommercial use. Download it from GitHub Releases.</p></details>
-        <details><summary>Why does Windows show a SmartScreen warning?</summary><p>The installer is not code-signed yet. Choose More info → Run anyway. The source is public on GitHub.</p></details>
-        <details><summary>Do my Steam and Epic games still work normally?</summary><p>Yes. They start through their own launchers. POLYMIRA never moves or changes game files.</p></details>
-        <details><summary>Does it include BIOS files or games?</summary><p>No. You need your own games and, for some systems, a BIOS dumped from your own console.</p></details>
-        <details><summary>Where is the documentation?</summary><p>See the <a href="docs/" style="color:var(--accent)">docs</a> for setup, controllers, emulators, saves and troubleshooting.</p></details>
+        <details><summary>Is POLYMIRA free?</summary><p>Yes, for noncommercial use. Official installers and portable builds are published on GitHub Releases.</p></details>
+        <details><summary>Why does Windows show a SmartScreen warning?</summary><p>The installer is not code-signed yet. Choose More info → Run anyway. The full source code is publicly auditable on GitHub.</p></details>
+        <details><summary>Do my Steam and Epic games still work normally?</summary><p>Yes. Store games launch through their own official clients. POLYMIRA never moves, copies, or modifies your game files.</p></details>
+        <details><summary>Does it include BIOS files, firmware, or games?</summary><p>No. You must supply your own game backups and, for systems that require them, BIOS or firmware dumped from your own hardware.</p></details>
+        <details><summary>Where can I read the full documentation?</summary><p>Visit the <a href="docs/">documentation</a> for setup guides, controller mapping, emulator configuration, save backups, and the <a href="orbis.html">ORBIS core</a>.</p></details>
       </div>
     </div>
   </section>
@@ -177,10 +207,10 @@
       <div class="final">
         <img src="assets/icon.svg" alt="" />
         <h2 class="display">Every console. One universe.</h2>
-        <p>Free download for Windows 10 and 11. If you like it, a star on GitHub helps the project.</p>
+        <p>Free download for Windows 10 and 11. If POLYMIRA is useful to you, starring the repository on GitHub helps support development.</p>
         <div class="ctas">
           <a class="btn btn-primary dl" href="https://github.com/hasanlior/polymira/releases/latest">Download for Windows</a>
-          <a class="btn btn-secondary" href="https://github.com/hasanlior/polymira"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg> Star on GitHub <b class="count stars"></b></a>
+          <a class="btn btn-secondary" href="https://github.com/hasanlior/polymira"><svg class="star-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg> Star on GitHub <b class="count stars"></b></a>
         </div>
       </div>
     </div>
@@ -188,7 +218,7 @@
 
   <footer>
     <div class="wrap">
-      <span>© 2026 POLYMIRA · <a href="docs/">Docs</a> · <a href="changelog.html">Changelog</a> · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a> · by <a href="https://github.com/hasanlior">hasanlior</a></span>
+      <span>© 2026 POLYMIRA · <a href="orbis.html">ORBIS</a> · <a href="docs/">Docs</a> · <a href="changelog.html">Changelog</a> · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a> · by <a href="https://github.com/hasanlior">hasanlior</a></span>
       <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
     </div>
   </footer>

@@ -1,36 +1,90 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Changelog · POLYMIRA</title>
   <meta name="description" content="Release notes for every POLYMIRA version." />
-  <meta name="theme-color" content="#05060f" />
+  <meta name="theme-color" content="#ffffff" />
+  <script>!function(){try{var t=localStorage.getItem('polymira-theme');document.documentElement.setAttribute('data-theme',t==='dark'?'dark':'light')}catch(e){document.documentElement.setAttribute('data-theme','light')}}()</script>
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="assets/site.css" />
   <style>
-    .log { max-width: 820px; margin: 0 auto; padding: 56px 24px 80px; }
-    .log h1 { text-align: left; font-size: clamp(34px, 5vw, 48px); margin: 0 0 10px; }
-    .log > p { color: var(--dim); font-size: 17px; margin: 0 0 40px; }
-    .rel { border-top: 1px solid var(--line); padding: 34px 0; display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 28px; }
-    .rel-side h2 { font-size: 22px; margin: 0; }
-    .rel-side time { display: block; color: var(--faint); font-size: 13px; margin-top: 4px; }
-    .rel-side .latest { display: inline-block; margin-top: 10px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; padding: 3px 8px; border-radius: 6px; background: rgba(154, 140, 255, .18); color: #c9c1ff; }
-    .rel-body h3 { font-size: 15px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); margin: 0 0 8px; }
+    .log { max-width: 840px; margin: 0 auto; padding: 56px 24px 88px; }
+    .log h1 { text-align: left; font-size: clamp(32px, 4.5vw, 44px); margin: 0 0 10px; }
+    .log > p { color: var(--dim); font-size: 16.5px; margin: 0 0 40px; max-width: 640px; }
+    .rel {
+      border-top: 1px solid var(--line);
+      padding: 36px 0;
+      display: grid;
+      grid-template-columns: 168px minmax(0, 1fr);
+      gap: 28px;
+    }
+    .rel-side h2 {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 20px;
+      margin: 0;
+      letter-spacing: -0.02em;
+    }
+    .rel-side time {
+      display: block;
+      color: var(--faint);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    .rel-side .latest {
+      display: inline-block;
+      margin-top: 10px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid var(--accent-line);
+    }
+    .rel-body h3 {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 12.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      margin: 0 0 8px;
+    }
     .rel-body h3:not(:first-child) { margin-top: 22px; }
     .rel-body ul { margin: 0; padding-left: 20px; }
-    .rel-body li { color: #c9cbdd; margin: 6px 0; }
-    .rel-body p { color: #c9cbdd; margin: 8px 0; }
-    .rel-body code { font: 13.5px ui-monospace, Consolas, monospace; background: rgba(255,255,255,.07); padding: 1px 6px; border-radius: 6px; }
-    .rel-body a { color: var(--accent); }
+    .rel-body li { color: var(--fg-body); margin: 6px 0; font-size: 15px; }
+    .rel-body p { color: var(--fg-body); margin: 8px 0; font-size: 15px; }
+    .rel-body code {
+      font-size: 13px;
+      background: var(--code-bg);
+      color: var(--code-fg);
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .rel-body a { color: var(--accent); font-weight: 500; }
+    .rel-body a:hover { text-decoration: underline; }
     .rel-dl { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
-    .rel-dl a { font-size: 13px; padding: 6px 12px; border: 1px solid var(--line2); border-radius: 999px; color: var(--fg); }
-    .rel-dl a:hover { border-color: rgba(255,255,255,.35); }
+    .rel-dl a {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 12.5px;
+      font-weight: 500;
+      padding: 6px 12px;
+      border: 1px solid var(--line2);
+      border-radius: 999px;
+      color: var(--fg);
+      background: var(--surface);
+      transition: border-color 0.15s ease, background-color 0.15s ease;
+    }
+    .rel-dl a:hover { border-color: var(--fg); text-decoration: none; }
     .empty { color: var(--dim); }
-    @media (max-width: 700px) { .rel { grid-template-columns: 1fr; gap: 12px; } }
+    @media (max-width: 700px) { .rel { grid-template-columns: 1fr; gap: 14px; } }
   </style>
 </head>
 <body>
@@ -44,27 +98,33 @@
         <a href="docs/">Docs</a>
         <a href="changelog.html" class="on">Changelog</a>
       </div>
-      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
-      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+      <div class="nav-actions">
+        <button class="theme-toggle" type="button" aria-label="Switch to dark theme" title="Switch to dark theme" aria-pressed="false">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        </button>
+        <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+        <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+      </div>
     </div>
   </nav>
 
   <main class="log">
+    <p class="kicker">Releases</p>
     <h1 class="display">Changelog</h1>
-    <p>What changed in each version. The installed app updates itself and shows these notes under Settings → About → What's new.</p>
+    <p>What changed in each version. The installed app updates itself and displays these notes under Settings → About → What's new.</p>
     <div id="releases"><p class="empty">Loading releases…</p></div>
   </main>
 
   <footer>
     <div class="wrap">
-      <span>© 2026 POLYMIRA · <a href="docs/">Docs</a> · <a href="https://github.com/hasanlior/polymira/blob/main/CHANGELOG.md">CHANGELOG.md</a></span>
+      <span>© 2026 POLYMIRA · <a href="orbis.html">ORBIS</a> · <a href="docs/">Docs</a> · <a href="https://github.com/hasanlior/polymira/blob/main/CHANGELOG.md">CHANGELOG.md</a></span>
       <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
     </div>
   </footer>
 
   <script src="assets/site.js"></script>
   <script>
-    // Release notes come straight from GitHub Releases, so every new release shows up here.
     const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
     const inline = (s) =>
       esc(s)
@@ -101,7 +161,7 @@
           const files = r.assets.filter((a) => /\.exe$/i.test(a.name))
             .map((a) => `<a href="${a.browser_download_url}">${esc(a.name)} · ${Math.round(a.size / 1048576)} MB</a>`).join('')
           return `<article class="rel" id="${esc(r.tag_name)}">
-            <div class="rel-side"><h2 class="display">${esc(r.tag_name.replace(/^v/, ''))}</h2><time>${date}</time>${i === 0 ? '<span class="latest">Latest</span>' : ''}</div>
+            <div class="rel-side"><h2>${esc(r.tag_name.replace(/^v/, ''))}</h2><time>${date}</time>${i === 0 ? '<span class="latest">Latest</span>' : ''}</div>
             <div class="rel-body">${md(r.body || '')}<div class="rel-dl">${files}</div></div>
           </article>`
         }).join('')

@@ -1,6 +1,32 @@
-// Live GitHub star count, newest installer link, docs sidebar toggle.
+// Theme toggle (light default, persisted in localStorage), GitHub stars, latest release link, docs sidebar toggle.
 ;(() => {
   const REPO = 'hasanlior/polymira'
+  const STORAGE_KEY = 'polymira-theme'
+  const root = document.documentElement
+
+  function applyTheme(theme) {
+    const t = theme === 'dark' ? 'dark' : 'light'
+    root.setAttribute('data-theme', t)
+    const metaTheme = document.querySelector('meta[name="theme-color"]')
+    if (metaTheme) metaTheme.setAttribute('content', t === 'dark' ? '#090b10' : '#ffffff')
+    document.querySelectorAll('.theme-toggle').forEach((btn) => {
+      const next = t === 'dark' ? 'light' : 'dark'
+      btn.setAttribute('aria-label', `Switch to ${next} theme`)
+      btn.setAttribute('title', `Switch to ${next} theme`)
+      btn.setAttribute('aria-pressed', String(t === 'dark'))
+    })
+  }
+
+  const initial = root.getAttribute('data-theme') === 'dark' ? 'dark' : 'light'
+  applyTheme(initial)
+
+  document.querySelectorAll('.theme-toggle').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'
+      try { localStorage.setItem(STORAGE_KEY, next) } catch (_) {}
+      applyTheme(next)
+    })
+  })
 
   fetch(`https://api.github.com/repos/${REPO}`)
     .then((r) => (r.ok ? r.json() : null))

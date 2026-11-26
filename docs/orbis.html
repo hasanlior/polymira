@@ -1,117 +1,146 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>POLYMIRA ORBIS — Original Rust PS5 / PS4 Emulation Core &amp; Compatibility</title>
-  <meta name="description" content="POLYMIRA Orbis is an original Rust PS5 and PS4 emulation core featuring Vulkan 1.2/1.3 rendering, RDNA2 to SPIR-V shader translation, live AUTO-HEAL recovery, and an open compatibility list." />
+  <meta name="description" content="POLYMIRA Orbis is an original Rust PS5 and PS4 emulation core featuring Vulkan 1.2/1.3 rendering, RDNA2 to SPIR-V GPU-VS JIT, AUTO-HEAL recovery, FSR/DLSS Upscaler &amp; 2x/3x FrameGen, Universal NID Telemetry, and an open compatibility database." />
   <meta property="og:title" content="POLYMIRA ORBIS — Original Rust PS5 / PS4 Emulation Core" />
-  <meta property="og:description" content="Built from scratch in Rust with Vulkan, RDNA2 → SPIR-V JIT, Oberon texture untiling, and live AUTO-HEAL watchdog." />
-  <meta name="theme-color" content="#05060f" />
+  <meta property="og:description" content="Built from scratch in Rust with Vulkan, RDNA2 → SPIR-V GPU-VS JIT, AUTO-HEAL watchdog, FSR/DLSS &amp; FrameGen, and Universal NID Telemetry." />
+  <meta name="theme-color" content="#ffffff" />
+  <script>!function(){try{var t=localStorage.getItem('polymira-theme');document.documentElement.setAttribute('data-theme',t==='dark'?'dark':'light')}catch(e){document.documentElement.setAttribute('data-theme','light')}}()</script>
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="assets/site.css" />
   <style>
-    .orbis-hero {
-      position: relative;
-      padding: 92px 0 64px;
-      text-align: center;
-      overflow: hidden;
+    :root, [data-theme="light"] {
+      --st-playable-bg: rgba(16, 185, 129, 0.10);
+      --st-playable-fg: #047857;
+      --st-playable-line: rgba(16, 185, 129, 0.28);
+      --st-ingame-bg: rgba(0, 82, 255, 0.09);
+      --st-ingame-fg: #0052ff;
+      --st-ingame-line: rgba(0, 82, 255, 0.28);
+      --st-menus-bg: rgba(217, 119, 6, 0.10);
+      --st-menus-fg: #b45309;
+      --st-menus-line: rgba(217, 119, 6, 0.28);
+      --st-intro-bg: rgba(234, 88, 12, 0.10);
+      --st-intro-fg: #c2410c;
+      --st-intro-line: rgba(234, 88, 12, 0.28);
+      --st-planned-bg: rgba(100, 116, 139, 0.10);
+      --st-planned-fg: #475569;
+      --st-planned-line: rgba(100, 116, 139, 0.24);
+      --featured-row-bg: rgba(0, 82, 255, 0.035);
     }
-    .orbis-hero::before {
-      content: '';
-      position: absolute;
-      left: 50%;
-      top: -160px;
-      width: 1120px;
-      height: 680px;
-      transform: translateX(-50%);
-      z-index: -1;
-      background:
-        radial-gradient(closest-side, rgba(36, 114, 255, 0.28), transparent 68%),
-        radial-gradient(closest-side at 65% 45%, rgba(140, 100, 255, 0.2), transparent 72%);
+    [data-theme="dark"] {
+      --st-playable-bg: rgba(52, 211, 153, 0.14);
+      --st-playable-fg: #6ee7b7;
+      --st-playable-line: rgba(52, 211, 153, 0.32);
+      --st-ingame-bg: rgba(59, 130, 255, 0.16);
+      --st-ingame-fg: #7cb3ff;
+      --st-ingame-line: rgba(59, 130, 255, 0.36);
+      --st-menus-bg: rgba(251, 191, 36, 0.14);
+      --st-menus-fg: #fcd34d;
+      --st-menus-line: rgba(251, 191, 36, 0.32);
+      --st-intro-bg: rgba(251, 146, 60, 0.14);
+      --st-intro-fg: #fdba74;
+      --st-intro-line: rgba(251, 146, 60, 0.32);
+      --st-planned-bg: rgba(148, 163, 184, 0.12);
+      --st-planned-fg: #94a3b8;
+      --st-planned-line: rgba(148, 163, 184, 0.26);
+      --featured-row-bg: rgba(59, 130, 255, 0.08);
+    }
+
+    .orbis-hero {
+      padding: 76px 0 56px;
+      text-align: center;
+      border-bottom: 1px solid var(--line);
     }
     .orbis-pill {
       display: inline-flex;
       align-items: center;
-      gap: 10px;
-      padding: 6px 16px;
+      gap: 8px;
+      padding: 5px 14px;
       border-radius: 999px;
-      border: 1px solid rgba(105, 165, 255, 0.36);
-      background: rgba(18, 42, 96, 0.38);
-      color: #c7ddff;
-      font-size: 13px;
+      border: 1px solid var(--accent-line);
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11.5px;
       font-weight: 600;
-      letter-spacing: 0.08em;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
     }
     .orbis-pill i {
-      width: 8px;
-      height: 8px;
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
-      background: #4ea1ff;
-      box-shadow: 0 0 12px #4ea1ff;
+      background: var(--accent);
     }
     .orbis-hero h1 {
-      font-size: clamp(46px, 7.5vw, 86px);
-      line-height: 1.01;
-      margin: 22px auto 18px;
-      background: linear-gradient(180deg, #ffffff 15%, #b8d2ff 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
+      font-size: clamp(42px, 6.8vw, 76px);
+      line-height: 1.02;
+      margin: 20px auto 16px;
+      color: var(--fg);
     }
     .orbis-badges {
       display: flex;
       flex-wrap: wrap;
       justify-content: center;
-      gap: 10px;
-      margin: 0 auto 32px;
-      max-width: 820px;
+      gap: 8px;
+      margin: 0 auto 30px;
+      max-width: 840px;
     }
     .orbis-badge {
-      font-size: 13px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 12px;
       font-weight: 500;
-      color: #d6e4ff;
-      padding: 6px 14px;
-      border-radius: 999px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      background: rgba(255, 255, 255, 0.04);
-      backdrop-filter: blur(8px);
+      color: var(--fg-body);
+      padding: 5px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--line2);
+      background: var(--surface);
     }
 
     .orbis-stats {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 14px;
-      margin-top: 48px;
-    }
-    .ostat {
       border: 1px solid var(--line2);
       border-radius: var(--radius);
-      padding: 22px 20px;
-      background: linear-gradient(180deg, rgba(20, 26, 52, 0.72), rgba(11, 13, 28, 0.85));
+      overflow: hidden;
+      margin-top: 48px;
+      background: var(--bg);
+    }
+    .ostat {
+      padding: 22px 22px;
+      border-right: 1px solid var(--line);
       text-align: left;
     }
+    .ostat:last-child { border-right: 0; }
     .ostat small {
       display: block;
-      font-size: 12px;
-      letter-spacing: 0.1em;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: #84a9ff;
+      color: var(--accent);
       margin-bottom: 6px;
       font-weight: 600;
     }
     .ostat b {
       display: block;
-      font: 700 22px 'Space Grotesk', sans-serif;
+      font-size: 19px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
       color: var(--fg);
       margin-bottom: 4px;
     }
     .ostat span {
       font-size: 13.5px;
       color: var(--dim);
+      line-height: 1.45;
+      display: block;
     }
 
     .arch-grid {
@@ -120,47 +149,58 @@
       gap: 16px;
     }
     .arch-card {
-      border: 1px solid var(--line);
+      border: 1px solid var(--line2);
       border-radius: var(--radius);
       padding: 26px;
-      background: linear-gradient(180deg, rgba(16, 20, 42, 0.65), rgba(9, 11, 24, 0.85));
-      transition: border-color 0.18s, transform 0.18s;
+      background: var(--bg);
+      transition: border-color 0.16s ease, box-shadow 0.16s ease;
     }
     .arch-card:hover {
-      border-color: rgba(110, 165, 255, 0.42);
-      transform: translateY(-2px);
+      border-color: var(--accent-line);
+      box-shadow: var(--shadow-sm);
     }
     .arch-tag {
       display: inline-block;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
       font-size: 11px;
       font-weight: 600;
-      letter-spacing: 0.08em;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
-      color: #9ac0ff;
-      background: rgba(64, 132, 255, 0.14);
-      border: 1px solid rgba(90, 152, 255, 0.25);
+      color: var(--accent);
+      background: var(--accent-soft);
+      border: 1px solid var(--accent-line);
       padding: 3px 9px;
       border-radius: 6px;
       margin-bottom: 14px;
     }
     .arch-card h3 {
       margin: 0 0 8px;
-      font: 600 19px 'Space Grotesk', sans-serif;
+      font-size: 18px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      color: var(--fg);
     }
     .arch-card p {
       margin: 0;
       color: var(--dim);
       font-size: 14.5px;
-      line-height: 1.6;
+      line-height: 1.62;
+    }
+    .arch-card code {
+      font-size: 12.5px;
+      background: var(--code-bg);
+      color: var(--code-fg);
+      padding: 1px 5px;
+      border-radius: 5px;
     }
 
     /* Compatibility Database */
     .compat-wrap {
       border: 1px solid var(--line2);
-      border-radius: 20px;
-      background: var(--panel);
+      border-radius: 16px;
+      background: var(--bg);
       overflow: hidden;
-      box-shadow: 0 30px 90px -40px rgba(30, 80, 220, 0.35);
+      box-shadow: var(--shadow-sm);
     }
     .compat-bar {
       display: flex;
@@ -168,9 +208,9 @@
       gap: 14px;
       align-items: center;
       justify-content: space-between;
-      padding: 20px 24px;
+      padding: 18px 22px;
       border-bottom: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.02);
+      background: var(--surface);
     }
     .compat-search {
       flex: 1 1 280px;
@@ -179,72 +219,84 @@
     }
     .compat-search input {
       width: 100%;
-      height: 42px;
-      padding: 0 16px 0 40px;
+      height: 40px;
+      padding: 0 14px 0 38px;
       border-radius: 10px;
       border: 1px solid var(--line2);
-      background: rgba(5, 6, 15, 0.8);
+      background: var(--bg);
       color: var(--fg);
-      font: 400 14.5px Inter, sans-serif;
+      font: 400 14px 'Inter', sans-serif;
       outline: none;
+      transition: border-color 0.15s ease;
     }
-    .compat-search input:focus {
-      border-color: rgba(110, 165, 255, 0.65);
-    }
+    .compat-search input::placeholder { color: var(--faint); }
+    .compat-search input:focus { border-color: var(--accent); }
     .compat-search svg {
       position: absolute;
-      left: 13px;
+      left: 12px;
       top: 50%;
       transform: translateY(-50%);
-      width: 16px;
-      height: 16px;
+      width: 15px;
+      height: 15px;
       color: var(--faint);
       pointer-events: none;
     }
     .compat-filters {
       display: flex;
       flex-wrap: wrap;
-      gap: 8px;
+      gap: 7px;
     }
     .fbtn {
       display: inline-flex;
       align-items: center;
-      gap: 7px;
-      height: 36px;
-      padding: 0 13px;
+      gap: 6px;
+      height: 34px;
+      padding: 0 12px;
       border-radius: 999px;
       border: 1px solid var(--line2);
-      background: transparent;
+      background: var(--bg);
       color: var(--dim);
-      font: 500 13px Inter, sans-serif;
+      font: 500 13px 'Inter', sans-serif;
       cursor: pointer;
-      transition: all 0.15s;
+      transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
     }
-    .fbtn:hover { color: var(--fg); border-color: rgba(255, 255, 255, 0.3); }
-    .fbtn.on { color: #fff; background: rgba(78, 134, 255, 0.22); border-color: rgba(110, 165, 255, 0.65); }
+    .fbtn:hover { color: var(--fg); border-color: var(--fg); }
+    .fbtn.on {
+      color: #ffffff;
+      background: var(--accent);
+      border-color: var(--accent);
+    }
     .fbtn b {
-      font-size: 11.5px;
-      padding: 1px 7px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 1px 6px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.08);
+      background: var(--surface-2);
       color: var(--fg);
+    }
+    .fbtn.on b {
+      background: rgba(255, 255, 255, 0.22);
+      color: #ffffff;
     }
 
     .compat-table-wrap { overflow-x: auto; }
     table.compat {
       width: 100%;
       border-collapse: collapse;
-      font-size: 14.5px;
+      font-size: 14px;
     }
     table.compat th {
       text-align: left;
-      padding: 13px 18px;
-      font-size: 12px;
+      padding: 12px 18px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--faint);
       border-bottom: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.015);
+      background: var(--surface);
+      font-weight: 600;
     }
     table.compat td {
       padding: 14px 18px;
@@ -252,63 +304,78 @@
       vertical-align: middle;
     }
     table.compat tr:last-child td { border-bottom: 0; }
-    table.compat tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
-    table.compat tr.featured-row {
-      background: linear-gradient(90deg, rgba(48, 128, 255, 0.12), rgba(138, 108, 255, 0.05) 65%, transparent);
-    }
+    table.compat tbody tr:hover { background: var(--surface); }
+    table.compat tr.featured-row { background: var(--featured-row-bg); }
+    table.compat tr.featured-row:hover { background: var(--accent-soft); }
+
     .gid {
-      font: 500 13px ui-monospace, 'Cascadia Code', Consolas, monospace;
-      color: #a9b4d4;
-      background: rgba(255, 255, 255, 0.06);
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-weight: 500;
+      font-size: 12.5px;
+      color: var(--fg);
+      background: var(--code-bg);
+      border: 1px solid var(--line);
       padding: 3px 8px;
       border-radius: 6px;
       white-space: nowrap;
     }
     .gtitle { font-weight: 600; color: var(--fg); }
     .gmeta { display: block; font-size: 12.5px; color: var(--faint); margin-top: 2px; }
-    .gnotes { color: #c4c7dc; font-size: 13.5px; max-width: 440px; }
+    .gplat {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--dim);
+    }
+    .gnotes { color: var(--fg-body); font-size: 13.5px; max-width: 440px; line-height: 1.5; }
 
     .st {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      font-size: 11.5px;
-      font-weight: 700;
-      letter-spacing: 0.06em;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
       text-transform: uppercase;
       padding: 4px 10px;
       border-radius: 999px;
       white-space: nowrap;
     }
     .st::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-    .st-playable { background: rgba(72, 224, 140, 0.16); color: #6ee7a8; border: 1px solid rgba(72, 224, 140, 0.35); }
-    .st-ingame { background: rgba(68, 162, 255, 0.18); color: #7cc4ff; border: 1px solid rgba(68, 162, 255, 0.42); }
-    .st-menus { background: rgba(255, 200, 74, 0.16); color: #ffd470; border: 1px solid rgba(255, 200, 74, 0.35); }
-    .st-intro { background: rgba(255, 136, 86, 0.16); color: #ffa47a; border: 1px solid rgba(255, 136, 86, 0.35); }
-    .st-planned { background: rgba(164, 170, 204, 0.12); color: #a7adc9; border: 1px solid rgba(164, 170, 204, 0.25); }
+    .st-playable { background: var(--st-playable-bg); color: var(--st-playable-fg); border: 1px solid var(--st-playable-line); }
+    .st-ingame { background: var(--st-ingame-bg); color: var(--st-ingame-fg); border: 1px solid var(--st-ingame-line); }
+    .st-menus { background: var(--st-menus-bg); color: var(--st-menus-fg); border: 1px solid var(--st-menus-line); }
+    .st-intro { background: var(--st-intro-bg); color: var(--st-intro-fg); border: 1px solid var(--st-intro-line); }
+    .st-planned { background: var(--st-planned-bg); color: var(--st-planned-fg); border: 1px solid var(--st-planned-line); }
 
     .legend {
       display: grid;
       grid-template-columns: repeat(5, 1fr);
       gap: 12px;
-      margin-top: 22px;
+      margin-top: 20px;
     }
     .leg-item {
-      border: 1px solid var(--line);
+      border: 1px solid var(--line2);
       border-radius: 12px;
       padding: 14px;
-      background: rgba(255, 255, 255, 0.015);
+      background: var(--surface);
     }
-    .leg-item p { margin: 8px 0 0; font-size: 13px; color: var(--dim); line-height: 1.45; }
+    .leg-item p { margin: 8px 0 0; font-size: 12.5px; color: var(--dim); line-height: 1.48; }
     .compat-empty { padding: 40px 24px; text-align: center; color: var(--dim); }
 
     @media (max-width: 960px) {
       .orbis-stats { grid-template-columns: repeat(2, 1fr); }
+      .ostat { border-bottom: 1px solid var(--line); }
+      .ostat:nth-child(2n) { border-right: 0; }
+      .ostat:nth-last-child(-n + 2) { border-bottom: 0; }
       .arch-grid { grid-template-columns: 1fr; }
       .legend { grid-template-columns: repeat(2, 1fr); }
     }
     @media (max-width: 640px) {
       .orbis-stats, .legend { grid-template-columns: 1fr; }
+      .ostat { border-right: 0; border-bottom: 1px solid var(--line); }
+      .ostat:last-child { border-bottom: 0; }
     }
   </style>
 </head>
@@ -324,8 +391,14 @@
         <a href="docs/">Docs</a>
         <a href="changelog.html">Changelog</a>
       </div>
-      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
-      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+      <div class="nav-actions">
+        <button class="theme-toggle" type="button" aria-label="Switch to dark theme" title="Switch to dark theme" aria-pressed="false">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        </button>
+        <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+        <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+      </div>
     </div>
   </nav>
 
@@ -333,16 +406,16 @@
     <div class="wrap">
       <span class="orbis-pill"><i></i>Built-in PS5 &amp; PS4 Emulation Core</span>
       <h1 class="display">POLYMIRA ORBIS</h1>
-      <p class="lede">An original, clean-room Rust emulation core built directly into POLYMIRA — running decrypted PS5 &amp; PS4 executables on Vulkan with RDNA2 → SPIR-V shader translation and live GPU recovery.</p>
+      <p class="lede">An original, clean-room Rust emulation core built directly into POLYMIRA — running decrypted PS5 &amp; PS4 executables on Vulkan with RDNA2 → SPIR-V GPU-VS JIT, live AUTO-HEAL recovery, FSR/DLSS upscaling, and Universal NID Telemetry.</p>
       <div class="orbis-badges">
         <span class="orbis-badge">100% Original Rust</span>
-        <span class="orbis-badge">Vulkan 1.2 / 1.3</span>
-        <span class="orbis-badge">RDNA2 → SPIR-V JIT</span>
+        <span class="orbis-badge">RDNA2 → SPIR-V GPU-VS JIT</span>
         <span class="orbis-badge">AUTO-HEAL Watchdog</span>
-        <span class="orbis-badge">PS5 Oberon Tiling</span>
+        <span class="orbis-badge">FSR / DLSS + 2x/3x FrameGen</span>
+        <span class="orbis-badge">Universal NID Telemetry</span>
       </div>
       <div class="ctas">
-        <a class="btn btn-primary" href="#compatibility">Compatibility List</a>
+        <a class="btn btn-accent" href="#compatibility">Compatibility Database</a>
         <a class="btn btn-secondary" href="docs/orbis.html">Read Orbis Docs</a>
         <a class="btn btn-secondary dl" href="https://github.com/hasanlior/polymira/releases/latest">Download POLYMIRA</a>
       </div>
@@ -351,28 +424,28 @@
         <div class="ostat">
           <small>Core Engine</small>
           <b>Rust Native</b>
-          <span>Zero external emulator binaries required</span>
+          <span>Clean-room HLE kernel &amp; Vulkan 1.2/1.3 backend</span>
         </div>
         <div class="ostat">
-          <small>Graphics Pipeline</small>
-          <b>Vulkan + SPIR-V</b>
-          <span>Live RDNA2 ISA decoder &amp; GPU-VS offload</span>
+          <small>Shader Pipeline</small>
+          <b>RDNA2 → SPIR-V</b>
+          <span>Live gfx1013 ISA decoder &amp; GPU-VS offload</span>
         </div>
         <div class="ostat">
-          <small>Resilience</small>
-          <b>AUTO-HEAL</b>
-          <span>Live DEVICE_LOST recovery &amp; stall watchdog</span>
+          <small>Display &amp; Pacing</small>
+          <b>FSR / DLSS + 3x FG</b>
+          <span>Spatial/temporal upscaling &amp; 2x/3x FrameGen</span>
         </div>
         <div class="ostat">
           <small>Compatibility DB</small>
           <b id="stat-tracked">1 In-Game · 20 Planned</b>
-          <span>Honest, test-verified status per Title ID</span>
+          <span>Hardware-tested status per Title ID</span>
         </div>
       </div>
     </div>
   </header>
 
-  <section id="architecture" style="padding-top: 40px;">
+  <section id="architecture">
     <div class="wrap">
       <div class="head">
         <p class="kicker">Architecture</p>
@@ -381,14 +454,24 @@
       </div>
       <div class="arch-grid">
         <article class="arch-card">
-          <span class="arch-tag">Shaders</span>
-          <h3>RDNA2 → SPIR-V GPU-VS Translator</h3>
+          <span class="arch-tag">Shader JIT</span>
+          <h3>RDNA2 → SPIR-V GPU-VS JIT</h3>
           <p>LLVM-verified <code>gfx1013</code> ISA decoder with SSA fragment translation and automatic GPU vertex shader SPIR-V offload, dynamic GVBUF/GIBUF growth, and zero-copy indexed Vulkan draws.</p>
         </article>
         <article class="arch-card">
-          <span class="arch-tag">Reliability</span>
+          <span class="arch-tag">Resilience</span>
           <h3>Live AUTO-HEAL Watchdog</h3>
-          <p>Continuously monitors GPU submission latency and Vulkan device health. On <code>VK_ERROR_DEVICE_LOST</code> or stalls, Orbis tears down and rebuilds the renderer live without losing the session.</p>
+          <p>Continuously monitors GPU submission latency and Vulkan device health. On <code>VK_ERROR_DEVICE_LOST</code> or queue stalls, Orbis tears down and rebuilds the renderer live without losing the session.</p>
+        </article>
+        <article class="arch-card">
+          <span class="arch-tag">Upscaling &amp; Pacing</span>
+          <h3>FSR / DLSS &amp; 2x/3x FrameGen</h3>
+          <p>Integrated resolution upscaling with FSR and DLSS hooks paired with optional 2x and 3x Frame Generation passes to deliver smooth high-refresh output on desktop GPUs.</p>
+        </article>
+        <article class="arch-card">
+          <span class="arch-tag">Diagnostics</span>
+          <h3>Universal NID Telemetry</h3>
+          <p>Instruments dynamic symbol resolution across every loaded PRX module, recording exact missing NIDs, call frequencies, and per-Title ID readiness metrics for rapid HLE bring-up.</p>
         </article>
         <article class="arch-card">
           <span class="arch-tag">Memory &amp; Tiling</span>
@@ -396,19 +479,9 @@
           <p>Bit-exact GFX10.3 <code>SW_64KB_S</code> and <code>SW_64KB_R_X</code> macro-tile untiling with XOR bank swizzling, mip-chain offset handling, 64 GiB coalescing Direct Memory pool, and 48-RT LRU cache.</p>
         </article>
         <article class="arch-card">
-          <span class="arch-tag">Audio</span>
-          <h3>AudioOut2 7.1 → Stereo Engine</h3>
-          <p>Dedicated hardware-paced audio worker with 7.1-channel surround downmix to low-latency stereo output and clean synchronization with video presentation.</p>
-        </article>
-        <article class="arch-card">
-          <span class="arch-tag">Storage</span>
-          <h3>SaveData &amp; LevelDB Persistence</h3>
-          <p>Mounts per-title save directories inside POLYMIRA's data folder with automatic backup on unmount, stale lock cleanup, and crash-safe file flushing on window close.</p>
-        </article>
-        <article class="arch-card">
-          <span class="arch-tag">Input &amp; UX</span>
-          <h3>DualSense, XInput &amp; Borderless Fullscreen</h3>
-          <p>Native <code>ScePad</code> controller mapping alongside keyboard &amp; mouse bindings, borderless fullscreen console launch, and seamless PS5-style splash transitions from POLYMIRA OS.</p>
+          <span class="arch-tag">Audio, Saves &amp; Input</span>
+          <h3>AudioOut2, LevelDB &amp; DualSense</h3>
+          <p>Hardware-paced 7.1 → stereo audio worker, crash-safe per-title SaveData persistence with automatic backup on unmount, and native <code>ScePad</code> DualSense, XInput, and keyboard/mouse bindings.</p>
         </article>
       </div>
     </div>
@@ -419,13 +492,13 @@
       <div class="head">
         <p class="kicker">Compatibility Database</p>
         <h2 class="display">Supported games &amp; roadmap</h2>
-        <p class="section-lede">We only mark a title as Playable, In-Game, Menus, or Intro after real hardware testing. Untested roadmap targets are clearly marked <b>Planned</b>.</p>
+        <p class="section-lede">Titles are only promoted to Playable, In-Game, Menus, or Intro after real hardware verification. Untested roadmap targets remain explicitly marked <b>Planned</b>.</p>
       </div>
 
       <div class="compat-wrap">
         <div class="compat-bar">
           <div class="compat-search">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
             <input id="compat-q" type="search" placeholder="Search title, Title ID (e.g. PPSA17221), platform, notes…" aria-label="Search compatibility list" />
           </div>
           <div class="compat-filters" id="compat-filters">
@@ -535,7 +608,7 @@
         <tr class="${g.featured ? 'featured-row' : ''}">
           <td><span class="gid">${esc(g.id)}</span></td>
           <td><span class="gtitle">${esc(g.title)}</span><span class="gmeta">${esc(g.engine)}</span></td>
-          <td>${esc(g.platform)}</td>
+          <td><span class="gplat">${esc(g.platform)}</span></td>
           <td><span class="st st-${g.status}">${LABEL[g.status]}</span></td>
           <td class="gnotes">${esc(g.notes)}</td>
         </tr>

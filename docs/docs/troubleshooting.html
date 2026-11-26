@@ -1,15 +1,16 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Troubleshooting · POLYMIRA Docs</title>
   <meta name="description" content="Common problems and how to solve them." />
-  <meta name="theme-color" content="#05060f" />
+  <meta name="theme-color" content="#ffffff" />
+  <script>!function(){try{var t=localStorage.getItem('polymira-theme');document.documentElement.setAttribute('data-theme',t==='dark'?'dark':'light')}catch(e){document.documentElement.setAttribute('data-theme','light')}}()</script>
   <link rel="icon" href="../assets/icon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="../assets/site.css" />
 </head>
 <body>
@@ -23,8 +24,11 @@
         <a href="./" class="on">Docs</a>
         <a href="../changelog.html">Changelog</a>
       </div>
-      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
-      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+      <div class="nav-actions">
+        <button class="theme-toggle" type="button" aria-label="Switch to dark theme" title="Switch to dark theme" aria-pressed="false"><svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg><svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></button>
+        <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+        <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+      </div>
     </div>
   </nav>
   <div class="docs">
@@ -63,7 +67,7 @@
   </div>
   <footer>
     <div class="wrap">
-      <span>© 2026 POLYMIRA · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
+      <span>© 2026 POLYMIRA · <a href="../orbis.html">ORBIS</a> · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
       <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
     </div>
   </footer>
