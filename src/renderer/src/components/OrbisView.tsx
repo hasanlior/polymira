@@ -51,7 +51,10 @@ export function OrbisView({ gameId, mode, onClose }: { gameId?: string; mode: 'a
             <>
               <div className="orbis-score">
                 <b>%{report.readiness}</b>
-                <span>{`${report.imports} sistem fonksiyonundan ${report.implemented} tanesi Orbis'te hazır`}</span>
+                <span>
+                  {`${report.imports} sistem fonksiyonundan ${report.implemented} tanesi hazır`}
+                  {report.from_game_modules ? ` (${report.from_game_modules} tanesi oyunun kendi modüllerinden)` : ''}
+                </span>
               </div>
               <div className="trophy-bar orbis-bar">
                 <div style={{ width: `${report.readiness}%` }} />

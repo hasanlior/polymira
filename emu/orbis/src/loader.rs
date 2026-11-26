@@ -22,15 +22,42 @@ static RECENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static GAME: Mutex<(usize, usize)> = Mutex::new((0, 0));
 static TRACE_STUBS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
+/// Policy of each missing function (see heal.rs), decided on its first call.
+static POLICIES: Mutex<Vec<Option<crate::heal::Policy>>> = Mutex::new(Vec::new());
+
 thread_local! {
+    /// When this thread last called a missing function (ms since start), for crash blame.
+    static LAST_STUB_AT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Per-thread fault-correlated ring buffer of the last 16 unresolved stub indices called.
     static THREAD_STUB_RING: std::cell::RefCell<std::collections::VecDeque<usize>> =
         const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
 }
 
-/// Called by stubs of functions Orbis does not implement yet.
-extern "sysv64" fn unimplemented(index: u64) -> u64 {
+fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+// Stubs jump here with the missing function's index in r11 and the guest's arguments untouched;
+// the index becomes the 7th argument (on the stack) of `unimplemented`.
+core::arch::global_asm!(
+    ".globl orbis_stub_trampoline",
+    "orbis_stub_trampoline:",
+    "push r11",
+    "call {f}",
+    "add rsp, 8",
+    "ret",
+    f = sym unimplemented,
+);
+extern "C" {
+    fn orbis_stub_trampoline();
+}
+
+/// Called by stubs of functions Orbis does not implement yet. Answers by the function's
+/// self-healing policy (heal.rs).
+extern "sysv64" fn unimplemented(_a0: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, index: u64) -> u64 {
     let idx = index as usize;
+    let _ = LAST_STUB_AT.try_with(|t| t.set(now_ms()));
     let _ = THREAD_STUB_RING.try_with(|ring| {
         if let Ok(mut q) = ring.try_borrow_mut() {
             if q.len() >= 16 {
@@ -64,7 +91,26 @@ extern "sysv64" fn unimplemented(index: u64) -> u64 {
             recent.remove(0);
         }
     }
-    0
+    let policy = {
+        let mut p = POLICIES.lock().unwrap_or_else(|e| e.into_inner());
+        if p.len() <= idx {
+            p.resize(idx + 1, None);
+        }
+        *p[idx].get_or_insert_with(|| {
+            let name = MISSING.lock().unwrap().get(idx).cloned().unwrap_or_default();
+            let pol = crate::heal::policy(&name);
+            if pol != crate::heal::Policy::Zero {
+                eprintln!("[orbis] self-heal: {name} answers {pol:?}");
+            }
+            // One stable block per function that hands out memory.
+            if pol == crate::heal::Policy::Buffer {
+                crate::heal::Policy::Value(crate::heal::value(pol))
+            } else {
+                pol
+            }
+        })
+    };
+    crate::heal::value(policy)
 }
 
 /// Returns the calling thread's last 16 unresolved stubbed NIDs (falling back to global `RECENT`).
@@ -349,6 +395,16 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
     if !thread_recent.is_empty() {
         let _ = writeln!(out, "[orbis]   last stubbed calls (thread, max 16): {}", thread_recent.join(" → "));
     }
+    // Self-healing: a missing function called by this thread just before the crash gets a
+    // different answer on the next run.
+    let recent_stub = LAST_STUB_AT.try_with(|t| t.get()).unwrap_or(0);
+    if recent_stub != 0 && now_ms().saturating_sub(recent_stub) < 1500 {
+        let last = recent_thread_stubs().last().cloned();
+        let fault = (code == 0xC000_0005 && rec.NumberParameters >= 2).then(|| rec.ExceptionInformation[1] as u64);
+        if let Some(change) = crate::heal::learn_from_crash(last.as_deref(), fault) {
+            let _ = writeln!(out, "[orbis]   self-heal: next run {change}");
+        }
+    }
     {
         use windows_sys::Win32::Storage::FileSystem::WriteFile;
         use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
@@ -514,7 +570,7 @@ fn map(name: &str, exe: Executable) -> Result<Image, String> {
 }
 
 /// Modules shipped with the game: *.prx in sce_module/ and next to eboot.bin. libc first.
-fn game_modules(main: &std::path::Path) -> Vec<std::path::PathBuf> {
+pub fn game_modules(main: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = vec![];
     let Some(dir) = main.parent() else { return out };
     for d in [dir.join("sce_module"), dir.to_path_buf()] {
@@ -627,10 +683,11 @@ pub fn load_with_modules(main_exe: Executable, main_path: Option<&std::path::Pat
                                 let stub = unsafe { stubs.add(stub_count * 32) };
                                 stub_count += 1;
                                 let mut code = Vec::with_capacity(32);
-                                code.extend_from_slice(&[0x48, 0xBF]);
+                                // mov r11, index ; mov rax, trampoline ; jmp rax (arguments stay intact)
+                                code.extend_from_slice(&[0x49, 0xBB]);
                                 code.extend_from_slice(&index.to_le_bytes());
                                 code.extend_from_slice(&[0x48, 0xB8]);
-                                code.extend_from_slice(&(unimplemented as usize as u64).to_le_bytes());
+                                code.extend_from_slice(&(orbis_stub_trampoline as usize as u64).to_le_bytes());
                                 code.extend_from_slice(&[0xFF, 0xE0]);
                                 unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), stub, code.len()) };
                                 stub as u64

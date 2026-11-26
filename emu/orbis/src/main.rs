@@ -8,6 +8,7 @@
 //! Orbis runs only files you provide. It contains no Sony code, keys or firmware.
 
 mod format;
+mod heal;
 mod hle;
 mod hle_rt;
 mod known;
@@ -55,6 +56,8 @@ struct Report {
     libraries: Vec<LibraryReport>,
     imports: usize,
     implemented: usize,
+    /// Of those, functions the game's own modules (sce_module/*.prx) provide.
+    from_game_modules: usize,
     /// Share of imported system functions Orbis implements (0-100).
     readiness: u32,
     missing_examples: Vec<String>,
@@ -79,18 +82,30 @@ fn analyze(path: &str) -> Result<Report, String> {
     let imports = exe.imports();
     let table = hle::table();
     let names = known::names();
+    // Functions exported by the modules the game ships (libc.prx, middleware): the loader links
+    // these, so they are available even though Orbis does not implement them itself.
+    let mut game_exports: std::collections::HashSet<String> = Default::default();
+    for m in loader::game_modules(std::path::Path::new(path)) {
+        if let Ok(b) = std::fs::read(&m) {
+            if let Ok(e) = Executable::parse(&b) {
+                game_exports.extend(e.exports().into_iter().map(|(nid, _)| nid));
+            }
+        }
+    }
+    let ready = |nid: &String| table.contains_key(nid) || game_exports.contains(nid);
     let mut libs: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut missing = vec![];
     for i in &imports {
         let e = libs.entry(i.library.clone()).or_default();
         e.0 += 1;
-        if table.contains_key(&i.nid) {
+        if ready(&i.nid) {
             e.1 += 1;
         } else if missing.len() < 12 {
             missing.push(names.get(&i.nid).map(|s| s.to_string()).unwrap_or_else(|| i.nid.clone()));
         }
     }
-    let implemented = imports.iter().filter(|i| table.contains_key(&i.nid)).count();
+    let implemented = imports.iter().filter(|i| ready(&i.nid)).count();
+    let from_game_modules = imports.iter().filter(|i| !table.contains_key(&i.nid) && game_exports.contains(&i.nid)).count();
     Ok(Report {
         file: path.to_string(),
         container: exe.container,
@@ -108,6 +123,7 @@ fn analyze(path: &str) -> Result<Report, String> {
         libraries: libs.into_iter().map(|(name, (functions, implemented))| LibraryReport { name, functions, implemented }).collect(),
         imports: imports.len(),
         implemented,
+        from_game_modules,
         readiness: if imports.is_empty() { 0 } else { (implemented * 100 / imports.len()) as u32 },
         missing_examples: missing,
     })

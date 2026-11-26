@@ -296,6 +296,8 @@ export interface OrbisReport {
   libraries: { name: string; functions: number; implemented: number }[]
   imports: number
   implemented: number
+  /** Of `implemented`, functions the game's own modules (sce_module/*.prx) provide. */
+  from_game_modules?: number
   readiness: number
   missing_examples: string[]
 }

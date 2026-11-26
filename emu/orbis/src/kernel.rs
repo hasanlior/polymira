@@ -932,6 +932,11 @@ fn with_file<R>(fd: i32, f: impl FnOnce(&mut std::fs::File) -> R) -> Option<R> {
     }
 }
 
+/// Title id made safe for a file name.
+pub fn title_id_safe() -> String {
+    detect_title_id().chars().map(|c| if c.is_ascii_alphanumeric() || "-_".contains(c) { c } else { '_' }).collect()
+}
+
 fn detect_title_id() -> String {
     if let Ok(tid) = std::env::var("ORBIS_TITLE_ID") {
         let t = tid.trim();
