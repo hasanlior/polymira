@@ -1416,6 +1416,21 @@ impl VkRenderer {
         if addr < 0x1_0000_0000 || max_len == 0 {
             return 0;
         }
+        thread_local! {
+            static VK_REGIONS: std::cell::RefCell<[(usize, usize); 64]> = const { std::cell::RefCell::new([(0, 0); 64]) };
+            static VK_NEXT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        if let Some(end) = VK_REGIONS.with(|r| {
+            let arr = r.borrow();
+            for &(lo, hi) in arr.iter() {
+                if addr >= lo && addr < hi {
+                    return Some(hi);
+                }
+            }
+            None
+        }) {
+            return end.saturating_sub(addr).min(max_len);
+        }
         unsafe {
             let mut mbi: windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION = std::mem::zeroed();
             if windows_sys::Win32::System::Memory::VirtualQuery(
@@ -1427,7 +1442,17 @@ impl VkRenderer {
             {
                 return 0;
             }
-            let end = (mbi.BaseAddress as usize).saturating_add(mbi.RegionSize);
+            let base = mbi.BaseAddress as usize;
+            let end = base.saturating_add(mbi.RegionSize);
+            VK_REGIONS.with(|r| {
+                let mut arr = r.borrow_mut();
+                let slot = VK_NEXT.with(|s| {
+                    let i = s.get();
+                    s.set((i + 1) & 63);
+                    i
+                });
+                arr[slot] = (base, end);
+            });
             end.saturating_sub(addr).min(max_len)
         }
     }
@@ -1461,12 +1486,17 @@ impl VkRenderer {
         if Self::readable_bytes(mip0_addr, want_src) < want_src {
             return 0;
         }
-        let tail_start = mip0_addr.wrapping_add(want_src.saturating_sub(65536));
-        let p = tail_start as *const u64;
-        for k in (0..(65536 / 8)).step_by(64) {
+        // Sample 64 points across the full Mip-0 footprint (never only the last tile,
+        // which can be empty on partially-filled atlases like Minecraft's 2048x1024!).
+        let words = want_src / 8;
+        let step = (words / 64).max(1);
+        let p = mip0_addr as *const u64;
+        let mut k = 0usize;
+        while k < words {
             if p.add(k).read_unaligned() != 0 {
                 return off;
             }
+            k += step;
         }
         0
     }
@@ -3188,10 +3218,14 @@ impl VkRenderer {
                 && (n % 120 == 60 || n % 120 == 61 || ((gverts.len() > 5000 || gi_max > 5000) && n % 30 == 0))
                 && self.ensure_staging((ew * eh * 4) as usize);
 
-            // ORBIS_OREUI_DIAG=1: 1-shot draw list dump on 2D UI/OreUI screens (e.g. Create New World).
-            if std::env::var_os("ORBIS_OREUI_DIAG").is_some() && gens.len() >= 10 && gens.len() <= 200 && n % 60 == 0 {
+            // ORBIS_OREUI_DIAG=1: 1-shot draw list dump on OreUI screens (e.g. Create New World).
+            if std::env::var_os("ORBIS_OREUI_DIAG").is_some() && n > 2500 && gens.len() >= 10 && gens.len() <= 200 && n % 60 == 0 {
+                let has_oreui = gens.iter().any(|gd| {
+                    gd.tex.map(|(_, w, h, sw)| w == 1024 && h == 1024 && ((sw >> 8) & 0x1FF) == 1).unwrap_or(false)
+                        || (gd.scissor[0] > 0 || gd.scissor[1] > 0 || (gd.scissor[2] > 0 && (gd.scissor[2] as u32) < gd.rt.1))
+                });
                 static OREUI_DUMPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                if OREUI_DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 6 {
+                if has_oreui && OREUI_DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
                     eprintln!("[orbis] OREUI-DIAG frame={n} draws={} display={:#x}({}x{})", gens.len(), display.0, display.1, display.2);
                     for (i, gd) in gens.iter().take(80).enumerate() {
                         eprintln!(
