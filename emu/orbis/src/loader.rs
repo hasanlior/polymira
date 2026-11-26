@@ -53,6 +53,26 @@ extern "sysv64" fn unimplemented(index: u64) -> u64 {
     0
 }
 
+/// Snapshot of deduplicated unresolved NIDs `(symbol, call_count)` sorted by descending call count.
+pub fn unresolved_nid_counts() -> Vec<(String, u64)> {
+    let missing = match MISSING.try_lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return Vec::new(),
+    };
+    let seen = match SEEN.try_lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<(String, u64)> = seen
+        .into_iter()
+        .enumerate()
+        .filter(|&(_, c)| c > 0)
+        .filter_map(|(i, c)| missing.get(i).cloned().map(|name| (name, c)))
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out
+}
+
 /// Whether `addr..addr+8` can be read (the crash report must never fault itself).
 #[cfg(windows)]
 fn readable(addr: usize) -> bool {
@@ -306,6 +326,7 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
         let mut n = 0u32;
         WriteFile(GetStdHandle(STD_ERROR_HANDLE), out.as_ptr(), out.len() as u32, &mut n, std::ptr::null_mut());
     }
+    crate::kernel::write_compat_profile();
     windows_sys::Win32::System::Threading::ExitProcess(3);
 }
 

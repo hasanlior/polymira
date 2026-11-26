@@ -248,6 +248,11 @@ pub extern "sysv64" fn mprotect(addr: usize, len: usize, prot: i32) -> i32 {
 /// Direct memory: coalescing, alignment-aware free-list over a 64 GiB offset pool (virtual offsets only).
 const DIRECT_SIZE: u64 = 64 << 30;
 static DIRECT_MAPS: Mutex<Vec<(usize, usize, u64)>> = Mutex::new(Vec::new());
+static PEAK_DIRECT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn peak_direct_bytes() -> u64 {
+    PEAK_DIRECT_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 struct DirectPool {
     free: Vec<(u64, u64)>,
@@ -363,6 +368,9 @@ pub extern "sysv64" fn allocate_direct(start: i64, end: i64, len: u64, align: u6
     let off = pool.alloc(s, e, len, align).or_else(|| pool.alloc(0, DIRECT_SIZE, len, align));
     match off {
         Some(off) => {
+            let free_sum: u64 = pool.free.iter().map(|&(a, b)| b.saturating_sub(a)).sum();
+            let used = DIRECT_SIZE.saturating_sub(free_sum);
+            PEAK_DIRECT_BYTES.fetch_max(used, std::sync::atomic::Ordering::Relaxed);
             if !out.is_null() {
                 unsafe { *out = off };
             }
@@ -870,7 +878,74 @@ fn with_file<R>(fd: i32, f: impl FnOnce(&mut std::fs::File) -> R) -> Option<R> {
     }
 }
 
-/// Flushes all currently open guest file descriptors to disk (used before clean process exit).
+fn detect_title_id() -> String {
+    if let Ok(tid) = std::env::var("ORBIS_TITLE_ID") {
+        let t = tid.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    let game_dir = GAME_DIR.try_lock().map(|g| g.clone()).unwrap_or_default();
+    if !game_dir.is_empty() {
+        let param_path = format!("{game_dir}/sce_sys/param.json");
+        if let Ok(text) = std::fs::read_to_string(&param_path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(tid) = val.get("titleId").and_then(|v| v.as_str()) {
+                    if !tid.is_empty() {
+                        return tid.to_string();
+                    }
+                }
+            }
+        }
+        if let Some(base) = game_dir.trim_end_matches('/').rsplit('/').next() {
+            if !base.is_empty() {
+                return base.to_string();
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+/// Writes the Universal HLE NID Telemetry & Auto-Compat Profile JSON to `<data_root>/profiles/<title_id>.json`.
+pub fn write_compat_profile() {
+    let tid = detect_title_id();
+    let safe_tid: String = tid
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || "-_".contains(c) { c } else { '_' })
+        .collect();
+    let (submits, last_draws, last_dispatches) = crate::agc::stats();
+    let milestone = if submits >= 2500 || last_draws > 40 {
+        "In-Game"
+    } else if submits >= 60 {
+        "Menus"
+    } else if submits >= 1 {
+        "Init"
+    } else {
+        "Booted"
+    };
+    let unresolved: Vec<serde_json::Value> = crate::loader::unresolved_nid_counts()
+        .into_iter()
+        .take(64)
+        .map(|(sym, calls)| serde_json::json!({ "symbol": sym, "calls": calls }))
+        .collect();
+    let profile = serde_json::json!({
+        "title_id": tid,
+        "milestone": milestone,
+        "submits": submits,
+        "last_draws": last_draws,
+        "last_dispatches": last_dispatches,
+        "peak_direct_mb": peak_direct_bytes() / (1024 * 1024),
+        "unresolved_nids": unresolved,
+    });
+    let dir = format!("{}/profiles", data_root());
+    if std::fs::create_dir_all(&dir).is_ok() {
+        if let Ok(body) = serde_json::to_string_pretty(&profile) {
+            let _ = std::fs::write(format!("{dir}/{safe_tid}.json"), body);
+        }
+    }
+}
+
+/// Flushes all currently open guest file descriptors to disk and writes the compat telemetry profile.
 pub fn flush_all_files() {
     if let Ok(mut files) = FILES.try_lock() {
         for entry in files.iter_mut().flatten() {
@@ -879,6 +954,7 @@ pub fn flush_all_files() {
             }
         }
     }
+    write_compat_profile();
 }
 
 pub extern "sysv64" fn sce_close(fd: i32) -> i32 {
@@ -1658,5 +1734,23 @@ mod tests {
         assert_eq!(allocate_direct(0, DIRECT_SIZE as i64, 0x20_0000, 0x10_0000, 0, &mut off2), 0);
         assert_eq!(off2, off);
         assert_eq!(release_direct(off2 as i64, 0x20_0000), 0);
+    }
+
+    #[test]
+    fn compat_profile_writes_valid_json() {
+        let base = std::env::temp_dir().join(format!("orbis_prof_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::env::set_var("ORBIS_DATA", base.to_str().unwrap());
+        std::env::set_var("ORBIS_TITLE_ID", "PPSA17221");
+        write_compat_profile();
+        let path = base.join("profiles").join("PPSA17221.json");
+        let text = std::fs::read_to_string(&path).expect("profile JSON should exist");
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["title_id"], "PPSA17221");
+        assert!(val["milestone"].is_string());
+        assert!(val["unresolved_nids"].is_array());
+        std::env::remove_var("ORBIS_TITLE_ID");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

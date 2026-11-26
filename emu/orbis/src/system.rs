@@ -536,6 +536,113 @@ pub extern "sysv64" fn np_auth_create_request() -> i32 {
     SCE_NP_ERROR_SIGNED_OUT
 }
 
+// ── libSceNpTrophy2 / libSceNpUniversalDataSystem (local offline HLE) ─
+
+static NEXT_TROPHY_HANDLE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
+static UNLOCKED_TROPHIES: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
+pub extern "sysv64" fn np_trophy_create_ctx(out_ctx: *mut i32, _user: i32, _label: u32, _opts: u64) -> i32 {
+    if !out_ctx.is_null() {
+        unsafe { *out_ctx = NEXT_TROPHY_HANDLE.fetch_add(1, Ordering::SeqCst) };
+    }
+    0
+}
+
+pub extern "sysv64" fn np_trophy_create_handle(out_handle: *mut i32) -> i32 {
+    if !out_handle.is_null() {
+        unsafe { *out_handle = NEXT_TROPHY_HANDLE.fetch_add(1, Ordering::SeqCst) };
+    }
+    0
+}
+
+pub extern "sysv64" fn np_trophy_unlock(_ctx: i32, _handle: i32, trophy_id: i32, out_plat: *mut i32) -> i32 {
+    let mut list = UNLOCKED_TROPHIES.lock().unwrap_or_else(|e| e.into_inner());
+    if !list.contains(&trophy_id) {
+        list.push(trophy_id);
+        eprintln!("[orbis] trophy unlocked: #{trophy_id}");
+    }
+    if !out_plat.is_null() {
+        unsafe { *out_plat = -1 };
+    }
+    0
+}
+
+pub extern "sysv64" fn np_trophy_get_unlock_state(_ctx: i32, _handle: i32, flags: *mut u32, count: *mut u32) -> i32 {
+    let list = UNLOCKED_TROPHIES.lock().unwrap_or_else(|e| e.into_inner());
+    if !flags.is_null() {
+        unsafe {
+            std::ptr::write_bytes(flags as *mut u8, 0, 16);
+            for &id in list.iter() {
+                if (0..128).contains(&id) {
+                    let word = (id / 32) as usize;
+                    let bit = (id % 32) as u32;
+                    *flags.add(word) |= 1u32 << bit;
+                }
+            }
+        }
+    }
+    if !count.is_null() {
+        unsafe { *count = list.len() as u32 };
+    }
+    0
+}
+
+pub extern "sysv64" fn np_uds_create_out(out: *mut i32) -> i32 {
+    if !out.is_null() {
+        unsafe { *out = NEXT_TROPHY_HANDLE.fetch_add(1, Ordering::SeqCst) };
+    }
+    0
+}
+
+// ── System Dialogs (MsgDialog / SaveDataDialog / ImeDialog) ──────────
+
+/// SceCommonDialogStatus: FINISHED = 3 (auto-confirm prevents early-boot dialog soft-locks).
+pub extern "sysv64" fn dialog_status_finished() -> i32 {
+    3
+}
+
+/// MsgDialog / SaveDataDialog GetResult(res*): { i32 mode = 0, i32 result = 0 (OK), i32 buttonId = 1 (OK) }
+pub extern "sysv64" fn dialog_get_result(res: *mut i32) -> i32 {
+    if !res.is_null() {
+        unsafe {
+            std::ptr::write_bytes(res as *mut u8, 0, 32);
+            *res = 0;         // mode
+            *res.add(1) = 0;  // SCE_COMMON_DIALOG_RESULT_OK
+            *res.add(2) = 1;  // buttonId = OK
+        }
+    }
+    0
+}
+
+/// SceImeDialogStatus: FINISHED = 2.
+pub extern "sysv64" fn ime_dialog_status_finished() -> i32 {
+    2
+}
+
+/// SceImeDialogResult: { i32 endstatus = 0 (OK) }.
+pub extern "sysv64" fn ime_dialog_get_result(res: *mut i32) -> i32 {
+    if !res.is_null() {
+        unsafe { std::ptr::write_bytes(res as *mut u8, 0, 16) };
+    }
+    0
+}
+
+// ── libSceNetCtl & libSceAudio3d stubs ───────────────────────────────
+
+pub extern "sysv64" fn netctl_register_callback(_cb: usize, _arg: usize, cid: *mut i32) -> i32 {
+    if !cid.is_null() {
+        unsafe { *cid = 1 };
+    }
+    0
+}
+
+pub extern "sysv64" fn audio3d_port_open(_user: i32, _param: *const u8, out_id: *mut u32) -> i32 {
+    if !out_id.is_null() {
+        unsafe { *out_id = 1 };
+    }
+    0
+}
+
 pub extern "sysv64" fn netctl_get_state(state: *mut i32) -> i32 {
     if !state.is_null() {
         unsafe { *state = 0 }; // SCE_NET_CTL_STATE_DISCONNECTED
@@ -687,6 +794,14 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("scePadRead", pad_read as *const () as usize),
         ("scePadGetControllerInformation", pad_get_info as *const () as usize),
         ("scePadClose", ok as *const () as usize),
+        ("scePadSetVibration", ok as *const () as usize),
+        ("scePadSetLightBar", ok as *const () as usize),
+        ("scePadResetLightBar", ok as *const () as usize),
+        ("scePadSetMotionSensorState", ok as *const () as usize),
+        ("scePadSetTiltCorrectionState", ok as *const () as usize),
+        ("scePadSetAngularVelocityDeadbandState", ok as *const () as usize),
+        ("scePadResetOrientation", ok as *const () as usize),
+        ("scePadSetTriggerEffect", ok as *const () as usize),
         ("sceSaveDataTerminate", ok as *const () as usize),
         ("sceSaveDataLoadIcon", savedata_not_found as *const () as usize),
         ("sceSaveDataTransferringMount", savedata_not_found as *const () as usize),
@@ -717,7 +832,68 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("#rbknaUjpqWo", np_get_account_id as *const () as usize), // sceNpGetAccountIdA
         ("sceNpGetAccountCountryA", np_get_account_country as *const () as usize),
         ("sceNpAuthCreateRequest", np_auth_create_request as *const () as usize),
+        // libSceNpTrophy2 + PS4 libSceNpTrophy
+        ("sceNpTrophy2CreateContext", np_trophy_create_ctx as *const () as usize),
+        ("sceNpTrophy2CreateHandle", np_trophy_create_handle as *const () as usize),
+        ("sceNpTrophy2DestroyContext", ok as *const () as usize),
+        ("sceNpTrophy2DestroyHandle", ok as *const () as usize),
+        ("sceNpTrophy2RegisterContext", ok as *const () as usize),
+        ("sceNpTrophy2UnlockTrophy", np_trophy_unlock as *const () as usize),
+        ("sceNpTrophy2GetTrophyUnlockState", np_trophy_get_unlock_state as *const () as usize),
+        ("sceNpTrophyCreateContext", np_trophy_create_ctx as *const () as usize),
+        ("sceNpTrophyCreateHandle", np_trophy_create_handle as *const () as usize),
+        ("sceNpTrophyDestroyContext", ok as *const () as usize),
+        ("sceNpTrophyDestroyHandle", ok as *const () as usize),
+        ("sceNpTrophyRegisterContext", ok as *const () as usize),
+        ("sceNpTrophyUnlockTrophy", np_trophy_unlock as *const () as usize),
+        // libSceNpUniversalDataSystem
+        ("sceNpUniversalDataSystemInitialize", ok as *const () as usize),
+        ("sceNpUniversalDataSystemTerminate", ok as *const () as usize),
+        ("sceNpUniversalDataSystemCreateContext", np_uds_create_out as *const () as usize),
+        ("sceNpUniversalDataSystemDestroyContext", ok as *const () as usize),
+        ("sceNpUniversalDataSystemCreateHandle", np_uds_create_out as *const () as usize),
+        ("sceNpUniversalDataSystemDestroyHandle", ok as *const () as usize),
+        ("sceNpUniversalDataSystemRegisterContext", ok as *const () as usize),
+        ("sceNpUniversalDataSystemPostEvent", ok as *const () as usize),
+        // System Dialogs (CommonDialog / MsgDialog / SaveDataDialog / ImeDialog)
+        ("sceCommonDialogInitialize", ok as *const () as usize),
+        ("sceMsgDialogInitialize", ok as *const () as usize),
+        ("sceMsgDialogOpen", ok as *const () as usize),
+        ("sceMsgDialogUpdateStatus", dialog_status_finished as *const () as usize),
+        ("sceMsgDialogGetStatus", dialog_status_finished as *const () as usize),
+        ("sceMsgDialogGetResult", dialog_get_result as *const () as usize),
+        ("sceMsgDialogClose", ok as *const () as usize),
+        ("sceMsgDialogTerminate", ok as *const () as usize),
+        ("sceSaveDataDialogInitialize", ok as *const () as usize),
+        ("sceSaveDataDialogOpen", ok as *const () as usize),
+        ("sceSaveDataDialogUpdateStatus", dialog_status_finished as *const () as usize),
+        ("sceSaveDataDialogGetStatus", dialog_status_finished as *const () as usize),
+        ("sceSaveDataDialogGetResult", dialog_get_result as *const () as usize),
+        ("sceSaveDataDialogProgressBarSetValue", ok as *const () as usize),
+        ("sceSaveDataDialogClose", ok as *const () as usize),
+        ("sceSaveDataDialogTerminate", ok as *const () as usize),
+        ("sceImeDialogInit", ok as *const () as usize),
+        ("sceImeDialogGetStatus", ime_dialog_status_finished as *const () as usize),
+        ("sceImeDialogGetResult", ime_dialog_get_result as *const () as usize),
+        ("sceImeDialogTerm", ok as *const () as usize),
+        // libSceNetCtl
+        ("sceNetCtlInit", ok as *const () as usize),
+        ("sceNetCtlTerm", ok as *const () as usize),
         ("sceNetCtlGetState", netctl_get_state as *const () as usize),
+        ("sceNetCtlRegisterCallback", netctl_register_callback as *const () as usize),
+        ("sceNetCtlUnregisterCallback", ok as *const () as usize),
+        // libSceAudio3d
+        ("sceAudio3dInitialize", ok as *const () as usize),
+        ("sceAudio3dTerminate", ok as *const () as usize),
+        ("sceAudio3dPortOpen", audio3d_port_open as *const () as usize),
+        ("sceAudio3dPortClose", ok as *const () as usize),
+        ("sceAudio3dPortAdvance", ok as *const () as usize),
+        ("sceAudio3dPortPush", ok as *const () as usize),
+        ("sceAudio3dPortFlush", ok as *const () as usize),
+        ("sceAudio3dPortSetAttribute", ok as *const () as usize),
+        ("sceAudio3dObjectReserve", ok as *const () as usize),
+        ("sceAudio3dObjectUnreserve", ok as *const () as usize),
+        ("sceAudio3dObjectSetAttributes", ok as *const () as usize),
         ("sceHttp2CreateRequestWithURL", http2_offline as *const () as usize),
         ("sceHttp2SendRequestAsync", http2_offline as *const () as usize),
         ("socket", net_socket as *const () as usize),
@@ -837,5 +1013,33 @@ mod tests {
         assert_eq!(np_get_account_country(1, cc.as_mut_ptr()), 0);
         assert_eq!(&cc, b"us\0\0");
         assert_eq!(np_auth_create_request(), SCE_NP_ERROR_SIGNED_OUT);
+    }
+
+    #[test]
+    fn wave1_trophy_dialog_audio3d_stubs_work() {
+        let mut ctx = 0i32;
+        let mut h = 0i32;
+        assert_eq!(np_trophy_create_ctx(&mut ctx, 1, 0, 0), 0);
+        assert_eq!(np_trophy_create_handle(&mut h), 0);
+        assert!(ctx > 0 && h > 0);
+        let mut plat = 0i32;
+        assert_eq!(np_trophy_unlock(ctx, h, 5, &mut plat), 0);
+        assert_eq!(plat, -1);
+        let mut flags = [0u32; 4];
+        let mut count = 0u32;
+        assert_eq!(np_trophy_get_unlock_state(ctx, h, flags.as_mut_ptr(), &mut count), 0);
+        assert_ne!(flags[0] & (1 << 5), 0);
+        assert!(count >= 1);
+
+        assert_eq!(dialog_status_finished(), 3);
+        let mut res = [-1i32; 8];
+        assert_eq!(dialog_get_result(res.as_mut_ptr()), 0);
+        assert_eq!(res[1], 0);
+        assert_eq!(res[2], 1);
+
+        assert_eq!(ime_dialog_status_finished(), 2);
+        let mut port_id = 0u32;
+        assert_eq!(audio3d_port_open(1, std::ptr::null(), &mut port_id), 0);
+        assert_eq!(port_id, 1);
     }
 }
