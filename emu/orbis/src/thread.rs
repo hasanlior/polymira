@@ -10,12 +10,28 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::Mutex;
 
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    AcquireSRWLockExclusive, AcquireSRWLockShared, DeleteCriticalSection, EnterCriticalSection, InitializeConditionVariable,
-    InitializeCriticalSection, InitializeSRWLock, LeaveCriticalSection, ReleaseSRWLockExclusive, ReleaseSRWLockShared,
-    SleepConditionVariableCS, SwitchToThread, TryAcquireSRWLockExclusive, TryAcquireSRWLockShared, TryEnterCriticalSection,
-    WakeAllConditionVariable, WakeConditionVariable, CONDITION_VARIABLE, CRITICAL_SECTION, SRWLOCK,
+    AcquireSRWLockExclusive, AcquireSRWLockShared, DeleteCriticalSection, EnterCriticalSection,
+    InitializeConditionVariable, InitializeCriticalSection, InitializeSRWLock, LeaveCriticalSection,
+    ReleaseSRWLockExclusive, ReleaseSRWLockShared, SleepConditionVariableCS, SwitchToThread,
+    TryAcquireSRWLockExclusive, TryAcquireSRWLockShared, TryEnterCriticalSection, WaitForSingleObject,
+    WakeAllConditionVariable, WakeConditionVariable, CONDITION_VARIABLE, CRITICAL_SECTION, INFINITE, SRWLOCK,
 };
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateThread(
+        lpThreadAttributes: *const c_void,
+        dwStackSize: usize,
+        lpStartAddress: unsafe extern "system" fn(*mut c_void) -> u32,
+        lpParameter: *mut c_void,
+        dwCreationFlags: u32,
+        lpThreadId: *mut u32,
+    ) -> HANDLE;
+}
+
+const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
 
 const EBUSY: i32 = 16;
 const ETIMEDOUT: i32 = 60;
@@ -55,7 +71,7 @@ pub struct Thread {
     id: u64,
     tp: usize,
     name: String,
-    handle: Option<std::thread::JoinHandle<()>>,
+    handle: isize,
     result: usize,
 }
 
@@ -68,7 +84,7 @@ thread_local! {
 }
 
 fn new_thread(tp: usize, name: String) -> *mut Thread {
-    let t = Box::leak(Box::new(Thread { id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst), tp, name, handle: None, result: 0 }));
+    let t = Box::leak(Box::new(Thread { id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst), tp, name, handle: 0, result: 0 }));
     THREADS.lock().unwrap().push(t as *mut Thread as usize);
     t
 }
@@ -165,35 +181,53 @@ pub extern "sysv64" fn ok() -> i32 {
     0
 }
 
-struct SendPtr(usize, usize, usize);
-unsafe impl Send for SendPtr {}
+struct ThreadStart {
+    entry: usize,
+    arg: usize,
+    thread: usize,
+}
+
+unsafe extern "system" fn win32_thread_trampoline(param: *mut c_void) -> u32 {
+    let start = Box::from_raw(param as *mut ThreadStart);
+    crate::loader::install_thread_guard();
+    crate::tls::set_current((*(start.thread as *mut Thread)).tp);
+    SELF.with(|s| *s.borrow_mut() = start.thread);
+    let f: extern "sysv64" fn(usize) -> usize = std::mem::transmute(start.entry);
+    let r = f(start.arg);
+    (*(start.thread as *mut Thread)).result = r;
+    0
+}
 
 /// scePthreadCreate(thread*, attr*, entry, arg, name)
+/// Uses native Win32 CreateThread so guest calls to scePthreadExit/ExitThread never trip Rust std::thread lifecycle guards.
 pub extern "sysv64" fn create(out: *mut usize, attr: *mut usize, entry: usize, arg: usize, name: *const c_char) -> i32 {
     let a = attr_of(attr);
-    // Guarantee at least 2 MiB stack for PS5 worker threads (world-gen / LevelDB + Windows HLE frames).
+    // Guarantee at least 2 MiB stack for PS5 worker threads (world-gen / LevelDB / UE4 TaskGraph + Windows HLE frames).
     let stack = if a.is_null() { 0x20_0000 } else { unsafe { (*a).stack_size } }.max(0x20_0000) + 0x2_0000;
     let label = text(name);
     let tp = crate::tls::new_thread_block();
     let t = new_thread(tp, label.clone());
-    unsafe { *out = t as usize };
-    let pass = SendPtr(entry, arg, t as usize);
+    if !out.is_null() {
+        unsafe { *out = t as usize };
+    }
     eprintln!("[orbis] thread created: {} ({} KB stack)", if label.is_empty() { "unnamed" } else { &label }, stack / 1024);
-    let handle = std::thread::Builder::new().name(label).stack_size(stack).spawn(move || {
-        let p = pass;
-        crate::loader::install_thread_guard();
-        crate::tls::set_current(unsafe { (*(p.2 as *mut Thread)).tp });
-        SELF.with(|s| *s.borrow_mut() = p.2);
-        let f: extern "sysv64" fn(usize) -> usize = unsafe { std::mem::transmute(p.0) };
-        let r = f(p.1);
-        unsafe { (*(p.2 as *mut Thread)).result = r };
-    });
-    match handle {
-        Ok(h) => {
-            unsafe { (*t).handle = Some(h) };
-            0
-        }
-        Err(_) => 0x8002_000Cu32 as i32,
+    let param = Box::into_raw(Box::new(ThreadStart { entry, arg, thread: t as usize })) as *mut c_void;
+    let h = unsafe {
+        CreateThread(
+            std::ptr::null(),
+            stack,
+            win32_thread_trampoline,
+            param,
+            STACK_SIZE_PARAM_IS_A_RESERVATION,
+            std::ptr::null_mut(),
+        )
+    };
+    if !h.is_null() {
+        unsafe { (*t).handle = h as isize };
+        0
+    } else {
+        unsafe { drop(Box::from_raw(param as *mut ThreadStart)) };
+        0x8002_000Cu32 as i32
     }
 }
 
@@ -206,8 +240,12 @@ pub extern "sysv64" fn join(thread: usize, result: *mut usize) -> i32 {
         return EINVAL;
     }
     let t = thread as *mut Thread;
-    if let Some(h) = unsafe { (*t).handle.take() } {
-        let _ = h.join();
+    let h = unsafe { std::mem::replace(&mut (*t).handle, 0) };
+    if h != 0 {
+        unsafe {
+            WaitForSingleObject(h as HANDLE, INFINITE);
+            CloseHandle(h as HANDLE);
+        }
     }
     if !result.is_null() {
         unsafe { *result = (*t).result };

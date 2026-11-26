@@ -2136,6 +2136,9 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceKernelAprSubmitCommandBufferAndGetResult", apr_submit_cb_and_get_result as *const () as usize),
         ("sceKernelAprWaitCommandBuffer", zero as *const () as usize),
         ("sceKernelAprPollCommandBuffer", zero as *const () as usize),
+        ("sceKernelAddAmprEvent", zero as *const () as usize),
+        ("sceKernelAddAmprSystemEvent", zero as *const () as usize),
+        ("sceKernelDeleteAmprEvent", zero as *const () as usize),
         // PS5 libSceAmpr command buffer builder
         ("sceAmprCommandBufferConstructor", ampr_cb_construct as *const () as usize),
         ("sceAmprCommandBufferDestructor", ampr_cb_destruct as *const () as usize),
@@ -2143,6 +2146,7 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sceAmprAprCommandBufferDestructor", ampr_cb_destruct as *const () as usize),
         ("sceAmprCommandBufferSetBuffer", ampr_cb_set_buffer as *const () as usize),
         ("sceAmprCommandBufferReset", ampr_cb_reset as *const () as usize),
+        ("sceAmprCommandBufferGetSize", ampr_cb_get_current_offset as *const () as usize),
         ("sceAmprCommandBufferGetCurrentOffset", ampr_cb_get_current_offset as *const () as usize),
         ("sceAmprCommandBufferGetCurrentSize", ampr_cb_get_current_offset as *const () as usize),
         ("sceAmprCommandBufferGetBufferPtr", ampr_cb_get_buffer_ptr as *const () as usize),
