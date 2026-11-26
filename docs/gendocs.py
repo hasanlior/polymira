@@ -322,6 +322,7 @@ def page(slug):
       <div class="navlinks">
         <a href="../#tour">Tour</a>
         <a href="../#features">Features</a>
+        <a href="../orbis.html" class="nav-orbis">ORBIS</a>
         <a href="./" class="on">Docs</a>
         <a href="../changelog.html">Changelog</a>
       </div>

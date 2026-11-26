@@ -65,11 +65,13 @@ export async function tryRunGame(game: Game): Promise<{ code: number; log: strin
   }
   env.ORBIS_TITLE = game.title
   env.ORBIS_DATA = dataDir
+  env.ORBIS_FULLSCREEN = '1'
   const child = spawn('cmd.exe', ['/d', '/c', 'start', '"POLYMIRA Orbis"', '/min', `"${exe}"`, 'run', `"${file}"`], {
     env,
     cwd: path.dirname(file),
     detached: true,
     stdio: 'ignore',
+    windowsHide: true,
     windowsVerbatimArguments: true,
   })
   const readLog = (): string => ''

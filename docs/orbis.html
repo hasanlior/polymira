@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>POLYMIRA ORBIS — Original Rust PS5 / PS4 Emulation Core &amp; Compatibility</title>
+  <meta name="description" content="POLYMIRA Orbis is an original Rust PS5 and PS4 emulation core featuring Vulkan 1.2/1.3 rendering, RDNA2 to SPIR-V shader translation, live AUTO-HEAL recovery, and an open compatibility list." />
+  <meta property="og:title" content="POLYMIRA ORBIS — Original Rust PS5 / PS4 Emulation Core" />
+  <meta property="og:description" content="Built from scratch in Rust with Vulkan, RDNA2 → SPIR-V JIT, Oberon texture untiling, and live AUTO-HEAL watchdog." />
+  <meta name="theme-color" content="#05060f" />
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="assets/site.css" />
+  <style>
+    .orbis-hero {
+      position: relative;
+      padding: 92px 0 64px;
+      text-align: center;
+      overflow: hidden;
+    }
+    .orbis-hero::before {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: -160px;
+      width: 1120px;
+      height: 680px;
+      transform: translateX(-50%);
+      z-index: -1;
+      background:
+        radial-gradient(closest-side, rgba(36, 114, 255, 0.28), transparent 68%),
+        radial-gradient(closest-side at 65% 45%, rgba(140, 100, 255, 0.2), transparent 72%);
+    }
+    .orbis-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 16px;
+      border-radius: 999px;
+      border: 1px solid rgba(105, 165, 255, 0.36);
+      background: rgba(18, 42, 96, 0.38);
+      color: #c7ddff;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .orbis-pill i {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #4ea1ff;
+      box-shadow: 0 0 12px #4ea1ff;
+    }
+    .orbis-hero h1 {
+      font-size: clamp(46px, 7.5vw, 86px);
+      line-height: 1.01;
+      margin: 22px auto 18px;
+      background: linear-gradient(180deg, #ffffff 15%, #b8d2ff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .orbis-badges {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      margin: 0 auto 32px;
+      max-width: 820px;
+    }
+    .orbis-badge {
+      font-size: 13px;
+      font-weight: 500;
+      color: #d6e4ff;
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.04);
+      backdrop-filter: blur(8px);
+    }
+
+    .orbis-stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-top: 48px;
+    }
+    .ostat {
+      border: 1px solid var(--line2);
+      border-radius: var(--radius);
+      padding: 22px 20px;
+      background: linear-gradient(180deg, rgba(20, 26, 52, 0.72), rgba(11, 13, 28, 0.85));
+      text-align: left;
+    }
+    .ostat small {
+      display: block;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #84a9ff;
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+    .ostat b {
+      display: block;
+      font: 700 22px 'Space Grotesk', sans-serif;
+      color: var(--fg);
+      margin-bottom: 4px;
+    }
+    .ostat span {
+      font-size: 13.5px;
+      color: var(--dim);
+    }
+
+    .arch-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+    .arch-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 26px;
+      background: linear-gradient(180deg, rgba(16, 20, 42, 0.65), rgba(9, 11, 24, 0.85));
+      transition: border-color 0.18s, transform 0.18s;
+    }
+    .arch-card:hover {
+      border-color: rgba(110, 165, 255, 0.42);
+      transform: translateY(-2px);
+    }
+    .arch-tag {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #9ac0ff;
+      background: rgba(64, 132, 255, 0.14);
+      border: 1px solid rgba(90, 152, 255, 0.25);
+      padding: 3px 9px;
+      border-radius: 6px;
+      margin-bottom: 14px;
+    }
+    .arch-card h3 {
+      margin: 0 0 8px;
+      font: 600 19px 'Space Grotesk', sans-serif;
+    }
+    .arch-card p {
+      margin: 0;
+      color: var(--dim);
+      font-size: 14.5px;
+      line-height: 1.6;
+    }
+
+    /* Compatibility Database */
+    .compat-wrap {
+      border: 1px solid var(--line2);
+      border-radius: 20px;
+      background: var(--panel);
+      overflow: hidden;
+      box-shadow: 0 30px 90px -40px rgba(30, 80, 220, 0.35);
+    }
+    .compat-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .compat-search {
+      flex: 1 1 280px;
+      max-width: 420px;
+      position: relative;
+    }
+    .compat-search input {
+      width: 100%;
+      height: 42px;
+      padding: 0 16px 0 40px;
+      border-radius: 10px;
+      border: 1px solid var(--line2);
+      background: rgba(5, 6, 15, 0.8);
+      color: var(--fg);
+      font: 400 14.5px Inter, sans-serif;
+      outline: none;
+    }
+    .compat-search input:focus {
+      border-color: rgba(110, 165, 255, 0.65);
+    }
+    .compat-search svg {
+      position: absolute;
+      left: 13px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 16px;
+      height: 16px;
+      color: var(--faint);
+      pointer-events: none;
+    }
+    .compat-filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .fbtn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      height: 36px;
+      padding: 0 13px;
+      border-radius: 999px;
+      border: 1px solid var(--line2);
+      background: transparent;
+      color: var(--dim);
+      font: 500 13px Inter, sans-serif;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .fbtn:hover { color: var(--fg); border-color: rgba(255, 255, 255, 0.3); }
+    .fbtn.on { color: #fff; background: rgba(78, 134, 255, 0.22); border-color: rgba(110, 165, 255, 0.65); }
+    .fbtn b {
+      font-size: 11.5px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--fg);
+    }
+
+    .compat-table-wrap { overflow-x: auto; }
+    table.compat {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14.5px;
+    }
+    table.compat th {
+      text-align: left;
+      padding: 13px 18px;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--faint);
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.015);
+    }
+    table.compat td {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: middle;
+    }
+    table.compat tr:last-child td { border-bottom: 0; }
+    table.compat tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
+    table.compat tr.featured-row {
+      background: linear-gradient(90deg, rgba(48, 128, 255, 0.12), rgba(138, 108, 255, 0.05) 65%, transparent);
+    }
+    .gid {
+      font: 500 13px ui-monospace, 'Cascadia Code', Consolas, monospace;
+      color: #a9b4d4;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 3px 8px;
+      border-radius: 6px;
+      white-space: nowrap;
+    }
+    .gtitle { font-weight: 600; color: var(--fg); }
+    .gmeta { display: block; font-size: 12.5px; color: var(--faint); margin-top: 2px; }
+    .gnotes { color: #c4c7dc; font-size: 13.5px; max-width: 440px; }
+
+    .st {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11.5px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .st::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .st-playable { background: rgba(72, 224, 140, 0.16); color: #6ee7a8; border: 1px solid rgba(72, 224, 140, 0.35); }
+    .st-ingame { background: rgba(68, 162, 255, 0.18); color: #7cc4ff; border: 1px solid rgba(68, 162, 255, 0.42); }
+    .st-menus { background: rgba(255, 200, 74, 0.16); color: #ffd470; border: 1px solid rgba(255, 200, 74, 0.35); }
+    .st-intro { background: rgba(255, 136, 86, 0.16); color: #ffa47a; border: 1px solid rgba(255, 136, 86, 0.35); }
+    .st-planned { background: rgba(164, 170, 204, 0.12); color: #a7adc9; border: 1px solid rgba(164, 170, 204, 0.25); }
+
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 12px;
+      margin-top: 22px;
+    }
+    .leg-item {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.015);
+    }
+    .leg-item p { margin: 8px 0 0; font-size: 13px; color: var(--dim); line-height: 1.45; }
+    .compat-empty { padding: 40px 24px; text-align: center; color: var(--dim); }
+
+    @media (max-width: 960px) {
+      .orbis-stats { grid-template-columns: repeat(2, 1fr); }
+      .arch-grid { grid-template-columns: 1fr; }
+      .legend { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 640px) {
+      .orbis-stats, .legend { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="top">
+    <div class="wrap">
+      <a class="brand" href="./"><img src="assets/icon.svg" alt="" />POLYMIRA</a>
+      <div class="navlinks">
+        <a href="./#tour">Tour</a>
+        <a href="./#features">Features</a>
+        <a href="./#platforms">Platforms</a>
+        <a href="orbis.html" class="nav-orbis on">ORBIS</a>
+        <a href="docs/">Docs</a>
+        <a href="changelog.html">Changelog</a>
+      </div>
+      <a class="navstar" href="https://github.com/hasanlior/polymira" title="Star POLYMIRA on GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 3.5 2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8Z"/></svg><span>Star</span><b class="stars"></b></a>
+      <a class="navcta dl" href="https://github.com/hasanlior/polymira/releases/latest">Download</a>
+    </div>
+  </nav>
+
+  <header class="orbis-hero">
+    <div class="wrap">
+      <span class="orbis-pill"><i></i>Built-in PS5 &amp; PS4 Emulation Core</span>
+      <h1 class="display">POLYMIRA ORBIS</h1>
+      <p class="lede">An original, clean-room Rust emulation core built directly into POLYMIRA — running decrypted PS5 &amp; PS4 executables on Vulkan with RDNA2 → SPIR-V shader translation and live GPU recovery.</p>
+      <div class="orbis-badges">
+        <span class="orbis-badge">100% Original Rust</span>
+        <span class="orbis-badge">Vulkan 1.2 / 1.3</span>
+        <span class="orbis-badge">RDNA2 → SPIR-V JIT</span>
+        <span class="orbis-badge">AUTO-HEAL Watchdog</span>
+        <span class="orbis-badge">PS5 Oberon Tiling</span>
+      </div>
+      <div class="ctas">
+        <a class="btn btn-primary" href="#compatibility">Compatibility List</a>
+        <a class="btn btn-secondary" href="docs/orbis.html">Read Orbis Docs</a>
+        <a class="btn btn-secondary dl" href="https://github.com/hasanlior/polymira/releases/latest">Download POLYMIRA</a>
+      </div>
+
+      <div class="orbis-stats">
+        <div class="ostat">
+          <small>Core Engine</small>
+          <b>Rust Native</b>
+          <span>Zero external emulator binaries required</span>
+        </div>
+        <div class="ostat">
+          <small>Graphics Pipeline</small>
+          <b>Vulkan + SPIR-V</b>
+          <span>Live RDNA2 ISA decoder &amp; GPU-VS offload</span>
+        </div>
+        <div class="ostat">
+          <small>Resilience</small>
+          <b>AUTO-HEAL</b>
+          <span>Live DEVICE_LOST recovery &amp; stall watchdog</span>
+        </div>
+        <div class="ostat">
+          <small>Compatibility DB</small>
+          <b id="stat-tracked">1 In-Game · 20 Planned</b>
+          <span>Honest, test-verified status per Title ID</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <section id="architecture" style="padding-top: 40px;">
+    <div class="wrap">
+      <div class="head">
+        <p class="kicker">Architecture</p>
+        <h2 class="display">Engineered for modern PS5 hardware.</h2>
+        <p class="section-lede">Every subsystem in Orbis is written from first principles in Rust and tightly integrated into the POLYMIRA console experience.</p>
+      </div>
+      <div class="arch-grid">
+        <article class="arch-card">
+          <span class="arch-tag">Shaders</span>
+          <h3>RDNA2 → SPIR-V GPU-VS Translator</h3>
+          <p>LLVM-verified <code>gfx1013</code> ISA decoder with SSA fragment translation and automatic GPU vertex shader SPIR-V offload, dynamic GVBUF/GIBUF growth, and zero-copy indexed Vulkan draws.</p>
+        </article>
+        <article class="arch-card">
+          <span class="arch-tag">Reliability</span>
+          <h3>Live AUTO-HEAL Watchdog</h3>
+          <p>Continuously monitors GPU submission latency and Vulkan device health. On <code>VK_ERROR_DEVICE_LOST</code> or stalls, Orbis tears down and rebuilds the renderer live without losing the session.</p>
+        </article>
+        <article class="arch-card">
+          <span class="arch-tag">Memory &amp; Tiling</span>
+          <h3>PS5 Oberon SW_64KB Untiling</h3>
+          <p>Bit-exact GFX10.3 <code>SW_64KB_S</code> and <code>SW_64KB_R_X</code> macro-tile untiling with XOR bank swizzling, mip-chain offset handling, 64 GiB coalescing Direct Memory pool, and 48-RT LRU cache.</p>
+        </article>
+        <article class="arch-card">
+          <span class="arch-tag">Audio</span>
+          <h3>AudioOut2 7.1 → Stereo Engine</h3>
+          <p>Dedicated hardware-paced audio worker with 7.1-channel surround downmix to low-latency stereo output and clean synchronization with video presentation.</p>
+        </article>
+        <article class="arch-card">
+          <span class="arch-tag">Storage</span>
+          <h3>SaveData &amp; LevelDB Persistence</h3>
+          <p>Mounts per-title save directories inside POLYMIRA's data folder with automatic backup on unmount, stale lock cleanup, and crash-safe file flushing on window close.</p>
+        </article>
+        <article class="arch-card">
+          <span class="arch-tag">Input &amp; UX</span>
+          <h3>DualSense, XInput &amp; Borderless Fullscreen</h3>
+          <p>Native <code>ScePad</code> controller mapping alongside keyboard &amp; mouse bindings, borderless fullscreen console launch, and seamless PS5-style splash transitions from POLYMIRA OS.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="compatibility" style="padding-top: 20px;">
+    <div class="wrap">
+      <div class="head">
+        <p class="kicker">Compatibility Database</p>
+        <h2 class="display">Supported games &amp; roadmap</h2>
+        <p class="section-lede">We only mark a title as Playable, In-Game, Menus, or Intro after real hardware testing. Untested roadmap targets are clearly marked <b>Planned</b>.</p>
+      </div>
+
+      <div class="compat-wrap">
+        <div class="compat-bar">
+          <div class="compat-search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input id="compat-q" type="search" placeholder="Search title, Title ID (e.g. PPSA17221), platform, notes…" aria-label="Search compatibility list" />
+          </div>
+          <div class="compat-filters" id="compat-filters">
+            <button class="fbtn on" data-st="all" type="button">All <b id="c-all">0</b></button>
+            <button class="fbtn" data-st="playable" type="button">Playable <b id="c-playable">0</b></button>
+            <button class="fbtn" data-st="ingame" type="button">In-Game <b id="c-ingame">0</b></button>
+            <button class="fbtn" data-st="menus" type="button">Menus <b id="c-menus">0</b></button>
+            <button class="fbtn" data-st="intro" type="button">Intro <b id="c-intro">0</b></button>
+            <button class="fbtn" data-st="planned" type="button">Planned <b id="c-planned">0</b></button>
+          </div>
+        </div>
+        <div class="compat-table-wrap">
+          <table class="compat">
+            <thead>
+              <tr>
+                <th>Title ID</th>
+                <th>Game</th>
+                <th>Platform</th>
+                <th>Status</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody id="compat-body"></tbody>
+          </table>
+          <div id="compat-empty" class="compat-empty" hidden>No matching titles found.</div>
+        </div>
+      </div>
+
+      <div class="legend">
+        <div class="leg-item"><span class="st st-playable">Playable</span><p>Completable from start to finish with playable performance and no major glitches.</p></div>
+        <div class="leg-item"><span class="st st-ingame">In-Game</span><p>Enters active gameplay, renders 3D/2D worlds, and accepts input; graphical or stability work ongoing.</p></div>
+        <div class="leg-item"><span class="st st-menus">Menus</span><p>Reaches title screen and menus cleanly, but cannot yet load into gameplay.</p></div>
+        <div class="leg-item"><span class="st st-intro">Intro</span><p>Boots executable and displays splash screens or intro videos before stopping.</p></div>
+        <div class="leg-item"><span class="st st-planned">Planned</span><p>Tracked roadmap title awaiting testing and required HLE library milestones.</p></div>
+      </div>
+
+      <p class="caption" style="text-align:center;margin-top:26px">POLYMIRA Orbis does not include games, firmware, BIOS files, or encryption keys. Only use backups of software you legally own.</p>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap">
+      <span>© 2026 POLYMIRA · <a href="docs/orbis.html">Orbis Docs</a> · <a href="changelog.html">Changelog</a> · <a href="https://github.com/hasanlior/polymira/blob/main/LICENSE">PolyForm Strict License</a></span>
+      <span>Not affiliated with Sony, Microsoft, Nintendo, Sega or Valve.</span>
+    </div>
+  </footer>
+
+  <script src="assets/site.js"></script>
+  <script>
+    const GAMES = [
+      {
+        id: 'PPSA17221',
+        title: 'Minecraft',
+        platform: 'PS5',
+        engine: 'Bedrock / OreUI',
+        status: 'ingame',
+        featured: true,
+        notes: '3D world rendering via Vulkan + RDNA2→SPIR-V GPU-VS offload, SW_64KB_R_X terrain atlas untiling, OreUI menus, AudioOut2 stereo sound, DualSense & KB+M input, persistent world saves.'
+      },
+      { id: 'PPSA01325', title: "Astro's Playroom", platform: 'PS5', engine: 'Team ASOBI', status: 'planned', notes: 'Roadmap target · Pending libSceFios2, Audio3D, and adaptive trigger HLE.' },
+      { id: 'PPSA03355', title: 'Hades', platform: 'PS5', engine: 'Supergiant', status: 'planned', notes: 'Roadmap target · High-priority indie bring-up (2D/isometric Vulkan + FMOD).' },
+      { id: 'PPSA02081', title: 'Subnautica', platform: 'PS5', engine: 'Unity', status: 'planned', notes: 'Roadmap target · Unity PS5 runtime & libSceFios2 bring-up target.' },
+      { id: 'PPSA05725', title: 'Stray', platform: 'PS5', engine: 'Unreal Engine 4', status: 'planned', notes: 'Roadmap target · UE4 compute & indirect draw pipeline target.' },
+      { id: 'PPSA04029', title: 'Sifu', platform: 'PS5', engine: 'Unreal Engine 4', status: 'planned', notes: 'Roadmap target · Pending UE4 AGC compute/tessellation & Videodec2.' },
+      { id: 'PPSA01746', title: 'Kena: Bridge of Spirits', platform: 'PS5', engine: 'Unreal Engine 4', status: 'planned', notes: 'Roadmap target · Pending libSceVideodec2 / AvPlayer & Audio3D.' },
+      { id: 'PPSA17648', title: 'Dead Cells', platform: 'PS5', engine: 'Heaps / HashLink', status: 'planned', notes: 'Roadmap target · Lightweight 2D indie verification candidate.' },
+      { id: 'PPSA16784', title: 'Risk of Rain 2', platform: 'PS5', engine: 'Unity', status: 'planned', notes: 'Roadmap target · Unity IL2CPP + libSceNet / Np stubs.' },
+      { id: 'PPSA22014', title: 'Vampire Survivors', platform: 'PS5', engine: 'Unity', status: 'planned', notes: 'Roadmap target · 2D sprite batching & SaveDataDialog milestone.' },
+      { id: 'PPSA01342', title: "Demon's Souls", platform: 'PS5', engine: 'Bluepoint', status: 'planned', notes: 'Roadmap target · Long-term AAA AGC indirect/compute & libSceAjm target.' },
+      { id: 'PPSA01473', title: 'Ratchet & Clank: Rift Apart', platform: 'PS5', engine: 'Insomniac', status: 'planned', notes: 'Roadmap target · Long-term AAA streaming IO & mesh shader research.' },
+      { id: 'PPSA01284', title: 'Returnal', platform: 'PS5', engine: 'Unreal Engine 4', status: 'planned', notes: 'Roadmap target · Long-term UE4 particle compute & Audio3D target.' },
+      { id: 'PPSA02225', title: "Ghost of Tsushima Director's Cut", platform: 'PS5', engine: 'Sucker Punch', status: 'planned', notes: 'Roadmap target · Long-term AAA compute & foliage instancing target.' },
+      { id: 'PPSA01411', title: "Marvel's Spider-Man: Miles Morales", platform: 'PS5', engine: 'Insomniac', status: 'planned', notes: 'Roadmap target · Long-term AAA streaming & NGG geometry target.' },
+      { id: 'PPSA08329', title: 'God of War Ragnarök', platform: 'PS5', engine: 'Santa Monica', status: 'planned', notes: 'Roadmap target · Long-term AAA compute/Audio3D/Videodec2 target.' },
+      { id: 'PPSA03396', title: 'The Last of Us Part I', platform: 'PS5', engine: 'Naughty Dog', status: 'planned', notes: 'Roadmap target · Long-term AAA Fios2 & multi-queue AGC target.' },
+      { id: 'PPSA04610', title: 'Elden Ring', platform: 'PS5', engine: 'FromSoftware', status: 'planned', notes: 'Roadmap target · Pending libSceNet, SaveDataDialog & indirect draws.' },
+      { id: 'PPSA02168', title: 'It Takes Two', platform: 'PS5', engine: 'Unreal Engine 4', status: 'planned', notes: 'Roadmap target · Split-screen dual-pad ScePad & UE4 bring-up.' },
+      { id: 'CUSA00900', title: 'Bloodborne', platform: 'PS4', engine: 'FromSoftware', status: 'planned', notes: 'Roadmap target · Experimental PS4 GNM/PM4 compatibility research.' },
+      { id: 'CUSA06840', title: 'Celeste', platform: 'PS4', engine: 'XNA / FNA', status: 'planned', notes: 'Roadmap target · Lightweight 2D PS4 HLE bring-up candidate.' }
+    ]
+
+    const LABEL = { playable: 'Playable', ingame: 'In-Game', menus: 'Menus', intro: 'Intro', planned: 'Planned' }
+    let active = 'all'
+    let query = ''
+
+    const counts = { all: GAMES.length, playable: 0, ingame: 0, menus: 0, intro: 0, planned: 0 }
+    GAMES.forEach((g) => { counts[g.status] = (counts[g.status] || 0) + 1 })
+    Object.entries(counts).forEach(([k, v]) => {
+      const el = document.getElementById('c-' + k)
+      if (el) el.textContent = String(v)
+    })
+    const statTracked = document.getElementById('stat-tracked')
+    if (statTracked) statTracked.textContent = `${counts.ingame} In-Game · ${counts.planned} Planned`
+
+    const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
+
+    function render() {
+      const q = query.trim().toLowerCase()
+      const list = GAMES.filter((g) => {
+        if (active !== 'all' && g.status !== active) return false
+        if (!q) return true
+        return `${g.id} ${g.title} ${g.platform} ${g.engine} ${g.notes} ${LABEL[g.status]}`.toLowerCase().includes(q)
+      })
+      const body = document.getElementById('compat-body')
+      const empty = document.getElementById('compat-empty')
+      body.innerHTML = list.map((g) => `
+        <tr class="${g.featured ? 'featured-row' : ''}">
+          <td><span class="gid">${esc(g.id)}</span></td>
+          <td><span class="gtitle">${esc(g.title)}</span><span class="gmeta">${esc(g.engine)}</span></td>
+          <td>${esc(g.platform)}</td>
+          <td><span class="st st-${g.status}">${LABEL[g.status]}</span></td>
+          <td class="gnotes">${esc(g.notes)}</td>
+        </tr>
+      `).join('')
+      empty.hidden = list.length > 0
+    }
+
+    document.getElementById('compat-q').addEventListener('input', (e) => {
+      query = e.target.value
+      render()
+    })
+    document.querySelectorAll('#compat-filters .fbtn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        active = btn.dataset.st
+        document.querySelectorAll('#compat-filters .fbtn').forEach((b) => b.classList.toggle('on', b === btn))
+        render()
+      })
+    })
+    render()
+  </script>
+</body>
+</html>

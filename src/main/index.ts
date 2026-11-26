@@ -634,12 +634,17 @@ const handlers: Handlers = {
     // PS5 games (and PS4 games when shadPS4 is not set up) play on POLYMIRA's own emulator.
     if (game.platformId === 'ps5' || (game.platformId === 'ps4' && !store.settings.emulatorPaths['shadps4'])) {
       store.updateGame(id, { lastPlayedAt: Date.now(), playCount: game.playCount + 1 })
+      if (mainWindow && !mainWindow.isDestroyed() && store.settings.windowMode === 'fullscreen' && !mainWindow.isFullScreen()) {
+        mainWindow.setFullScreen(true)
+      }
       try {
         await tryRunGame(game)
         store.updateGame(id, { lastLaunch: { at: Date.now(), result: 'ok' } })
         toast('info', `${game.title} POLYMIRA Orbis ile açılıyor.`)
-      } finally {
+      } catch (err) {
         send('launch:ended', game.id)
+        throw err
+      } finally {
         broadcast()
       }
       return

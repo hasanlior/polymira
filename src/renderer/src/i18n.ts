@@ -622,6 +622,7 @@ const EN: Record<string, string> = {
   'İndiriliyor…': 'Downloading…',
   Kurulamadı: 'Install failed',
   'Önceki / sonraki': 'Previous / next',
+  'Başlatılıyor…': 'Starting…',
   'POLYMIRA Orbis ile deneysel. Şifresi çözülmüş oyun klasöründeki eboot.bin eklenir.': 'Experimental with POLYMIRA Orbis. Add eboot.bin from a decrypted game folder.'
 }
 

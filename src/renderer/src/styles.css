@@ -3043,3 +3043,117 @@ body.overlay-body #root {
   inset: 0;
   background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.3) 0 1px, transparent 1px 3px);
 }
+
+
+/* ── PS5-style full-screen game launch splash ────────────────────── */
+.modal-layer.launch.ps5-launch {
+  background: #03050d;
+  overflow: hidden;
+  gap: 0;
+  animation: launchFadeIn 320ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.launch-hero {
+  position: absolute;
+  inset: -4%;
+  background-size: cover;
+  background-position: center;
+  opacity: 0.62;
+  transform: scale(1.08);
+  animation: launchHeroZoom 1.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.launch-hero.fallback {
+  filter: blur(calc(3.2 * var(--u))) saturate(1.25);
+  opacity: 0.42;
+}
+.launch-glow {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(60% 52% at 50% 42%, rgba(72, 124, 255, 0.32), transparent 68%),
+    radial-gradient(48% 45% at 50% 72%, rgba(138, 108, 255, 0.22), transparent 72%);
+  pointer-events: none;
+  animation: launchGlowPulse 3.2s ease-in-out infinite alternate;
+}
+.orbis-launch .launch-glow {
+  background:
+    radial-gradient(62% 55% at 50% 40%, rgba(0, 114, 255, 0.42), transparent 68%),
+    radial-gradient(50% 45% at 50% 75%, rgba(124, 92, 255, 0.28), transparent 74%);
+}
+.launch-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, rgba(4, 6, 15, 0.25) 0%, rgba(3, 5, 13, 0.88) 78%, rgba(2, 3, 9, 0.96) 100%);
+  pointer-events: none;
+}
+.launch-content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(2.4 * var(--u));
+  animation: launchContentIn 520ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.launch-badge {
+  font-size: calc(1.35 * var(--u));
+  font-weight: 700;
+  letter-spacing: 0.26em;
+  color: rgba(198, 220, 255, 0.94);
+  padding: calc(0.55 * var(--u)) calc(1.6 * var(--u));
+  border-radius: 999px;
+  border: 1px solid rgba(110, 168, 255, 0.38);
+  background: rgba(14, 32, 76, 0.55);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 0 calc(2.6 * var(--u)) rgba(48, 128, 255, 0.35);
+}
+.ps5-launch .launch-cover {
+  height: calc(38 * var(--u));
+  border-radius: calc(1.4 * var(--u));
+  box-shadow: 0 calc(2.4 * var(--u)) calc(6 * var(--u)) rgba(0, 0, 0, 0.72), 0 0 calc(4 * var(--u)) rgba(110, 160, 255, 0.28);
+}
+.ps5-launch .launch-title {
+  font-size: calc(4.2 * var(--u));
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-shadow: 0 calc(0.4 * var(--u)) calc(2.4 * var(--u)) rgba(0, 0, 0, 0.85);
+}
+.launch-status {
+  display: flex;
+  align-items: center;
+  gap: calc(1.4 * var(--u));
+  margin-top: calc(0.4 * var(--u));
+}
+.launch-pulse {
+  font-size: calc(1.9 * var(--u));
+  color: rgba(232, 238, 255, 0.9);
+  letter-spacing: 0.04em;
+  animation: launchTextPulse 1.6s ease-in-out infinite;
+}
+.ps5-launch .launch-spinner {
+  width: calc(3.2 * var(--u));
+  height: calc(3.2 * var(--u));
+  border-color: rgba(255, 255, 255, 0.18);
+  border-top-color: #8ab8ff;
+  border-right-color: rgba(255, 255, 255, 0.85);
+  animation-duration: 0.85s;
+}
+@keyframes launchFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes launchHeroZoom {
+  from { opacity: 0; transform: scale(1.14); }
+  to { opacity: 0.62; transform: scale(1.02); }
+}
+@keyframes launchContentIn {
+  from { opacity: 0; transform: translateY(calc(2.2 * var(--u))) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes launchGlowPulse {
+  from { opacity: 0.78; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1.04); }
+}
+@keyframes launchTextPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}

@@ -14,7 +14,7 @@ import { CardShell } from './components/CardShell'
 import { ConfirmDialog, FileBrowser, OptionsPanel, Toasts } from './components/Modals'
 import { GameDetail, Gallery, Screenshots } from './components/GameViews'
 import { Setup } from './components/Setup'
-import { Backdrop, ThemeMusic, Trailer } from './components/Ambience'
+import { Backdrop, backgroundUrl, ThemeMusic, Trailer } from './components/Ambience'
 import { Store, type StoreTab } from './components/Store'
 import { WebApp } from './components/WebApp'
 import { OnScreenKeyboard } from './components/Keyboard'
@@ -114,24 +114,38 @@ function PlayingCurtain({ game }: { game: Game | undefined }) {
 
 const VIA: Record<string, string> = { steam: 'Steam', epic: 'Epic Games', ubisoft: 'Ubisoft Connect', ea: 'EA app', battlenet: 'Battle.net', riot: 'Riot Client', xbox: 'Xbox' }
 
-function LaunchSplash({ game, onCancel }: { game: Game; onCancel: () => void }) {
+function LaunchSplash({ game, isOrbis, onCancel }: { game: Game; isOrbis?: boolean; onCancel: () => void }) {
   // Back cancels waiting for a launcher; everything else is swallowed while the game starts.
   useInput((a) => {
     if (a === 'back') onCancel()
     return true
   })
   const via = game.kind === 'uri' ? VIA[game.meta.source ?? ''] : undefined
+  const heroUrl = game.hasBackground ? backgroundUrl(game) : game.hasCover ? coverUrl(game.id, game.coverRev) : null
   return (
-    <div className="modal-layer center launch">
-      {game.hasCover && <img className="launch-cover" src={coverUrl(game.id, game.coverRev)} alt="" />}
-      <div className="launch-title">{game.title}</div>
-      <div className="launch-spinner" />
-      {via && <div className="launch-via">{`${via} üzerinden başlatılıyor…`}</div>}
-      {via && (
-        <div className="launch-hint">
-          <Hint action="back">İptal</Hint>
-        </div>
+    <div className={`modal-layer center launch ps5-launch ${isOrbis ? 'orbis-launch' : ''}`}>
+      {heroUrl && (
+        <div
+          className={`launch-hero ${game.hasBackground ? '' : 'fallback'}`}
+          style={{ backgroundImage: `url("${heroUrl}")` }}
+        />
       )}
+      <div className="launch-glow" />
+      <div className="launch-vignette" />
+      <div className="launch-content">
+        {isOrbis && <div className="launch-badge">POLYMIRA ORBIS</div>}
+        {game.hasCover && <img className="launch-cover" src={coverUrl(game.id, game.coverRev)} alt="" />}
+        <div className="launch-title">{game.title}</div>
+        <div className="launch-status">
+          <div className="launch-spinner" />
+          <span className="launch-pulse">{via ? `${via} üzerinden başlatılıyor…` : 'Başlatılıyor…'}</span>
+        </div>
+        {(via || isOrbis) && (
+          <div className="launch-hint">
+            <Hint action="back">İptal</Hint>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -145,6 +159,7 @@ export function App() {
   const [toasts, setToasts] = useState<(Toast & { id: number })[]>([])
   const [pads, setPads] = useState<string[]>([])
   const [launching, setLaunching] = useState<Game | null>(null)
+  const orbisBlurredRef = useRef(false)
   const [focusId, setFocusId] = useState<string | null>(null)
   const [catalog, setCatalog] = useState<StoreItem[]>(BUILTIN_CATALOG)
   const [modCss, setModCss] = useState('')
@@ -206,6 +221,24 @@ export function App() {
   useEffect(() => {
     if (state) setLaunching(null)
   }, [state?.session?.gameId, state?.session?.paused])
+
+  // For Orbis PS5/PS4 launches, keep the PS5-style splash visible while orbis.exe boots into
+  // borderless fullscreen on top, then cleanly dismiss it as soon as focus returns after exit.
+  const isOrbisLaunch = Boolean(
+    launching && state && (launching.platformId === 'ps5' || (launching.platformId === 'ps4' && !state.settings.emulatorPaths['shadps4']))
+  )
+  useEffect(() => {
+    if (!isOrbisLaunch) {
+      orbisBlurredRef.current = false
+      return
+    }
+    if (!focused) {
+      orbisBlurredRef.current = true
+    } else if (orbisBlurredRef.current) {
+      orbisBlurredRef.current = false
+      setLaunching(null)
+    }
+  }, [isOrbisLaunch, focused])
 
   const openModal = useCallback((m: Modal) => setModals((ms) => [...ms, { ...m, key: keyRef.current++ } as ModalEntry]), [])
   const closeModal = (key: number) => setModals((ms) => ms.filter((m) => m.key !== key))
@@ -273,11 +306,15 @@ export function App() {
             return
           }
         }
+        const isOrbis = g.platformId === 'ps5' || (g.platformId === 'ps4' && !state.settings.emulatorPaths['shadps4'])
+        orbisBlurredRef.current = false
         setLaunching(g)
         call('game:launch', gameId)
           .then(() => {
             // Launcher games keep the splash until their process is found (or the wait ends).
             if (g.kind === 'uri') setTimeout(() => setLaunching((cur) => (cur?.id === g.id ? null : cur)), 125000)
+            // Orbis games dismiss on focus return (when orbis.exe exits), with a fallback if it never took focus.
+            else if (isOrbis) setTimeout(() => setLaunching((cur) => (cur?.id === g.id && !orbisBlurredRef.current ? null : cur)), 15000)
             else setTimeout(() => setLaunching(null), 1500)
           })
           .catch((err: Error) => {
@@ -400,6 +437,7 @@ export function App() {
           {launching && (
             <LaunchSplash
               game={launching}
+              isOrbis={isOrbisLaunch}
               onCancel={() => {
                 sfx('back')
                 setLaunching(null)
