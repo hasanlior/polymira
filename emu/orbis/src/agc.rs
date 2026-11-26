@@ -1334,23 +1334,12 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     let t_dedup = (*FRAME_STATS_ON).then(std::time::Instant::now);
     let cntl: [u32; 8] = std::array::from_fn(|n| gpu.cx.get(&(0x191 + n as u32)).map(|v| v & 0x3F).unwrap_or(n as u32));
     let vs_ud: [u32; 24] = std::array::from_fn(|k| *gpu.sh.get(&(0x8C + k as u32)).unwrap_or(&0));
-    let (min_ix, max_ix) = if gpu.index_32bit {
-        unsafe { std::slice::from_raw_parts(ib as *const u32, idx_cnt) }
-            .iter()
-            .fold((u32::MAX, 0u32), |(lo, hi), &v| (lo.min(v), hi.max(v)))
-    } else {
-        unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt) }
-            .iter()
-            .fold((u32::MAX, 0u32), |(lo, hi), &v| {
-                let v = v as u32;
-                (lo.min(v), hi.max(v))
-            })
-    };
     let prim = gpu.uc.get(&0x242).copied().map(|v| if v > 0xFF { v >> 8 } else { v }).unwrap_or(4);
     let indexed_draw = prim != 0x11;
 
     // Runtime Auto-GPU Vertex Shader Offload: run 3D indexed draws (>= 12 indices)
-    // natively on the GPU via translated SPIR-V VS (zero CPU per-vertex shading, zero GVBUF bloat!).
+    // natively on the GPU via translated SPIR-V VS (zero CPU index scan, zero CPU dedup,
+    // zero u16->u32 expansion, zero GVBUF/GIBUF bloat!).
     // Shaders quarantined by the live Vulkan watchdog automatically fall back to CPU hoisted VS.
     if indexed_draw && idx_cnt >= 12 && tr.is_some() && pre.is_some() && !crate::vk::is_gpu_vs_quarantined(vs_addr) {
         let vp = [
@@ -1363,7 +1352,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             have_vp as u32,
             0,
         ];
-        if let Some(gpu_data) = crate::rdna::vs::extract_gpu_vs_draw(&vs_sh, &vs_ud, max_ix, vp, mem_ok) {
+        if let Some(gpu_data) = crate::rdna::vs::extract_gpu_vs_draw(&vs_sh, &vs_ud, vp, mem_ok) {
             let vs_spv = {
                 thread_local! {
                     static TL_VS: std::cell::RefCell<[(usize, u64, [u32; 8], [u16; 8], Option<(std::sync::Arc<Vec<u32>>, u32)>); 4]> =
@@ -1443,20 +1432,14 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 }
                 let vs_param_off = (gpu.frame_vs_params.len() * 4) as u32;
                 gpu.frame_vs_params.extend_from_slice(&gpu_data.params);
-                // Copy raw guest indices straight into gibuf (zero CPU dedup / zero GVertex!).
+                // Bind guest IB directly via VRAM `guest_ib_cache` (zero CPU index scan / zero u16->u32 copy!).
                 let prim_u8 = prim as u8;
                 let n_out = match prim_u8 {
                     1 | 3 | 5 => idx_cnt,
                     2 => idx_cnt / 2 * 2,
                     _ => idx_cnt / 3 * 3,
                 };
-                let first_index = gpu.frame_gidxs.len() as u32;
-                gpu.frame_gidxs.reserve(n_out);
-                if gpu.index_32bit {
-                    gpu.frame_gidxs.extend_from_slice(unsafe { std::slice::from_raw_parts(ib as *const u32, n_out) });
-                } else {
-                    gpu.frame_gidxs.extend(unsafe { std::slice::from_raw_parts(ib as *const u16, n_out) }.iter().map(|&ix16| ix16 as u32));
-                }
+                let ib_bytes = n_out * if gpu.index_32bit { 4 } else { 2 };
                 let blend = gpu.cx.get(&0x1E0).copied().unwrap_or(0);
                 let dctl = gpu.cx.get(&0x200).copied().unwrap_or(0);
                 let dkey = dctl & 0x77;
@@ -1469,7 +1452,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                     blend,
                     first_vertex: 0,
                     vertex_count: 0,
-                    first_index,
+                    first_index: 0,
                     index_count: n_out as u32,
                     slots,
                     tex,
@@ -1482,6 +1465,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                     depth: dctl,
                     zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
                     prim: prim_u8,
+                    guest_ib: Some((ib, ib_bytes, gpu.index_32bit)),
                     vs_spirv: Some(vs_spv),
                     vs_addr,
                     vs_param_off,
@@ -1505,7 +1489,8 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                     static GVS_DIAG: AtomicU64 = AtomicU64::new(0);
                     if GVS_DIAG.fetch_add(1, Ordering::Relaxed) < 3 {
                         eprintln!(
-                            "[orbis] GPU-VS-DIAG vs={vs_addr:#x} idx={n_out} max_ix={max_ix} mk={:x?} vbs={:x?} vp={:?} mubuf_off_str={:?}",
+                            "[orbis] GPU-VS-DIAG vs={vs_addr:#x} idx={n_out} ib={ib:#x}({}b) mk={:x?} vbs={:x?} vp={:?} mubuf_off_str={:?}",
+                            ib_bytes,
                             &gpu_data.mubuf_key[..gpu_data.n_mubuf as usize],
                             &gpu_data.vbs[..gpu_data.n_vbs as usize],
                             (xs, xo, ys, yo, tw, th, have_vp),
@@ -1519,6 +1504,19 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             }
         }
     }
+
+    let (min_ix, max_ix) = if gpu.index_32bit {
+        unsafe { std::slice::from_raw_parts(ib as *const u32, idx_cnt) }
+            .iter()
+            .fold((u32::MAX, 0u32), |(lo, hi), &v| (lo.min(v), hi.max(v)))
+    } else {
+        unsafe { std::slice::from_raw_parts(ib as *const u16, idx_cnt) }
+            .iter()
+            .fold((u32::MAX, 0u32), |(lo, hi), &v| {
+                let v = v as u32;
+                (lo.min(v), hi.max(v))
+            })
+    };
     let span = max_ix.saturating_sub(min_ix) as usize;
     gpu.scratch_unique.clear();
     gpu.scratch_remap.clear();
@@ -1856,6 +1854,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         // the compare direction (1.0 for LESS-style tests, 0.0 for GREATER-style ones).
         zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
         prim: prim_u8,
+        guest_ib: None,
         vs_spirv: None,
         vs_addr: 0,
         vs_param_off: 0,

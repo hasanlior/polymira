@@ -72,6 +72,8 @@ pub struct GenDraw {
     pub zclear: f32,
     /// VGT_PRIMITIVE_TYPE (1=POINT_LIST, 2=LINE_LIST, 3=LINE_STRIP, 4=TRIANGLE_LIST, 5=TRIANGLE_STRIP).
     pub prim: u8,
+    /// Optional direct guest index buffer `(addr, byte_len, is_32bit)` bound via VRAM `guest_ib_cache`.
+    pub guest_ib: Option<(usize, usize, bool)>,
     /// Optional GPU-translated SPIR-V vertex shader (`rdna::vs::translate`).
     pub vs_spirv: Option<std::sync::Arc<Vec<u32>>>,
     /// Guest VA of the vertex shader (for runtime auto-heal quarantine if GPU-VS stalls/faults).
@@ -314,6 +316,9 @@ pub struct VkRenderer {
     /// Guest VB cache: addr -> (buf, mem, cap, uploaded_len, last_checksum, last_frame_used).
     pub guest_vb_cache: HashMap<usize, (vk::Buffer, vk::DeviceMemory, usize, usize, u64, u64)>,
     pub guest_vb_checked: HashMap<usize, u64>,
+    /// Guest IB cache: addr -> (buf, mem, cap, uploaded_len, last_checksum, last_frame_used).
+    pub guest_ib_cache: HashMap<usize, (vk::Buffer, vk::DeviceMemory, usize, usize, u64, u64)>,
+    pub guest_ib_checked: HashMap<usize, u64>,
     pub vs_dsets: HashMap<[u64; 4], vk::DescriptorSet>,
     /// Runtime self-healing state: GPU-VS shaders active on the in-flight frame, shaders proven
     /// healthy (<120ms GPU completion), and device-lost recovery flag.
@@ -624,6 +629,8 @@ impl VkRenderer {
             vs_modules: HashMap::new(),
             guest_vb_cache: HashMap::new(),
             guest_vb_checked: HashMap::new(),
+            guest_ib_cache: HashMap::new(),
+            guest_ib_checked: HashMap::new(),
             vs_dsets: HashMap::new(),
             last_frame_gpu_vs: Vec::new(),
             healthy_gpu_vs: std::collections::HashSet::new(),
@@ -2455,7 +2462,7 @@ impl VkRenderer {
         if let Some(entry) = self.guest_vb_cache.get_mut(&addr) {
             if entry.3 >= need {
                 let last_chk = self.guest_vb_checked.get(&addr).copied().unwrap_or(0);
-                if last_chk == self.frame_no || (need >= 4096 && self.frame_no.saturating_sub(last_chk) < 16) {
+                if last_chk == self.frame_no || (need >= 4096 && self.frame_no.saturating_sub(last_chk) < 60) {
                     entry.5 = self.frame_no;
                     return Some(entry.0);
                 }
@@ -2505,9 +2512,9 @@ impl VkRenderer {
                 self.device.free_memory(om, None);
             }
         }
-        // Evict stale chunk VBs from PREVIOUS frames if cache grows beyond 2048 buffers
+        // Evict stale chunk VBs from PREVIOUS frames if cache grows beyond 8192 buffers
         // (NEVER evict a buffer already bound in the current frame!).
-        if self.guest_vb_cache.len() >= 2048 {
+        if self.guest_vb_cache.len() >= 8192 {
             let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
             let cur_f = self.frame_no;
             let mut old: Vec<(u64, usize)> = self
@@ -2536,6 +2543,90 @@ impl VkRenderer {
             self.device.unmap_memory(mem);
         }
         self.guest_vb_cache.insert(addr, (buf, mem, alloc_sz, upload_len, sum, self.frame_no));
+        Some(buf)
+    }
+
+    /// Ensures a cached host-visible GPU `INDEX_BUFFER` holds up-to-date raw bytes of a
+    /// guest index buffer `(addr, need_bytes)`. Eliminates CPU index scanning & u16->u32 copies!
+    unsafe fn ensure_guest_ib(&mut self, addr: usize, need_bytes: usize) -> Option<vk::Buffer> {
+        if addr < 0x1_0000_0000 || need_bytes == 0 || need_bytes > (64 << 20) {
+            return None;
+        }
+        let need = (need_bytes + 15) & !15;
+        if let Some(entry) = self.guest_ib_cache.get_mut(&addr) {
+            if entry.3 >= need {
+                let last_chk = self.guest_ib_checked.get(&addr).copied().unwrap_or(0);
+                if last_chk == self.frame_no || (need >= 4096 && self.frame_no.saturating_sub(last_chk) < 60) {
+                    entry.5 = self.frame_no;
+                    return Some(entry.0);
+                }
+            }
+        }
+        let avail = Self::readable_bytes(addr, need);
+        if avail < need_bytes {
+            return None;
+        }
+        let upload_len = avail.min(need);
+        self.guest_ib_checked.insert(addr, self.frame_no);
+        let sum = {
+            let words = upload_len / 8;
+            let step = (words / 64).max(1);
+            let p = addr as *const u64;
+            let mut h = 0xcbf2_9ce4_8422_2325u64 ^ (upload_len as u64);
+            let mut k = 0;
+            while k < words {
+                h = (h ^ p.add(k).read_unaligned()).wrapping_mul(0x100_0000_01b3);
+                k += step;
+            }
+            h
+        };
+        if let Some(entry) = self.guest_ib_cache.get_mut(&addr) {
+            if entry.2 >= upload_len {
+                entry.5 = self.frame_no;
+                if entry.3 < upload_len || entry.4 != sum {
+                    let mem = entry.1;
+                    let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+                    if let Ok(p) = self.device.map_memory(mem, 0, upload_len as u64, vk::MemoryMapFlags::empty()) {
+                        std::ptr::copy_nonoverlapping(addr as *const u8, p as *mut u8, upload_len);
+                        self.device.unmap_memory(mem);
+                    }
+                    entry.3 = upload_len;
+                    entry.4 = sum;
+                }
+                return Some(entry.0);
+            }
+            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            if let Some((ob, om, _, _, _, _)) = self.guest_ib_cache.remove(&addr) {
+                self.device.destroy_buffer(ob, None);
+                self.device.free_memory(om, None);
+            }
+        }
+        if self.guest_ib_cache.len() >= 8192 {
+            let _ = self.device.wait_for_fences(&[self.fence], true, 1_000_000_000);
+            let cur_f = self.frame_no;
+            let mut old: Vec<(u64, usize)> = self
+                .guest_ib_cache
+                .iter()
+                .filter(|(_, e)| e.5 < cur_f)
+                .map(|(&a, e)| (e.5, a))
+                .collect();
+            old.sort_by_key(|&(f, _)| f);
+            for &(_, a) in old.iter().take(512) {
+                if let Some((ob, om, _, _, _, _)) = self.guest_ib_cache.remove(&a) {
+                    self.device.destroy_buffer(ob, None);
+                    self.device.free_memory(om, None);
+                }
+            }
+        }
+        let alloc_sz = upload_len.max(4096).next_power_of_two();
+        let Some((buf, mem)) = self.alloc_host_buffer(alloc_sz, vk::BufferUsageFlags::INDEX_BUFFER) else {
+            return None;
+        };
+        if let Ok(p) = self.device.map_memory(mem, 0, upload_len as u64, vk::MemoryMapFlags::empty()) {
+            std::ptr::copy_nonoverlapping(addr as *const u8, p as *mut u8, upload_len);
+            self.device.unmap_memory(mem);
+        }
+        self.guest_ib_cache.insert(addr, (buf, mem, alloc_sz, upload_len, sum, self.frame_no));
         Some(buf)
     }
 
@@ -2784,8 +2875,26 @@ impl VkRenderer {
                         }
                     }
                 }
+                let mut ib_max: HashMap<usize, usize> = HashMap::new();
+                for b in batches {
+                    if let Some(g) = b.gen {
+                        if let Some(gd) = gens.get(g as usize) {
+                            if let Some((ib_addr, ib_len, _)) = gd.guest_ib {
+                                if ib_addr != 0 && ib_len > 0 {
+                                    let e = ib_max.entry(ib_addr).or_insert(0);
+                                    if ib_len > *e {
+                                        *e = ib_len;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 for (addr, max_len) in vb_max {
                     let _ = self.ensure_guest_vb(addr, max_len);
+                }
+                for (addr, max_len) in ib_max {
+                    let _ = self.ensure_guest_ib(addr, max_len);
                 }
             }
 
@@ -2795,6 +2904,8 @@ impl VkRenderer {
                 first: u32,
                 count: u32,
                 indexed: bool,
+                ib_buf: vk::Buffer,
+                ib_32: bool,
                 ds: vk::DescriptorSet,
                 vs_ds: vk::DescriptorSet,
                 vs_off: u32,
@@ -2809,9 +2920,10 @@ impl VkRenderer {
             for b in batches {
                 if let Some(g) = b.gen {
                     let Some(gd) = gens.get(g as usize) else { continue };
+                    let has_guest_ib = gd.guest_ib.is_some();
                     if self.gvbuf == vk::Buffer::null()
                         || gd.first_vertex.saturating_add(gd.vertex_count) > g_max
-                        || (gd.index_count > 0 && (self.gibuf == vk::Buffer::null() || gd.first_index.saturating_add(gd.index_count) > gi_max))
+                        || (gd.index_count > 0 && !has_guest_ib && (self.gibuf == vk::Buffer::null() || gd.first_index.saturating_add(gd.index_count) > gi_max))
                         || (gd.index_count == 0 && gd.vertex_count == 0)
                     {
                         continue;
@@ -2946,6 +3058,14 @@ impl VkRenderer {
                     } else {
                         (vk::DescriptorSet::null(), 0)
                     };
+                    let (ib_buf, ib_32) = if let Some((ib_addr, ib_len, is_32)) = gd.guest_ib {
+                        let Some(buf) = self.ensure_guest_ib(ib_addr, ib_len) else {
+                            continue;
+                        };
+                        (buf, is_32)
+                    } else {
+                        (vk::Buffer::null(), true)
+                    };
                     let [x, y, w, h] = gd.scissor;
                     let scissor = vk::Rect2D { offset: vk::Offset2D { x, y }, extent: vk::Extent2D { width: w.max(0) as u32, height: h.max(0) as u32 } };
                     let (first, count, indexed) = if gd.index_count > 0 {
@@ -2953,10 +3073,10 @@ impl VkRenderer {
                     } else {
                         (gd.first_vertex, gd.vertex_count, false)
                     };
-                    items.push(Item { rt, first, count, indexed, ds, vs_ds, vs_off, pipe, gen: g as usize, scissor, sampled_rts });
+                    items.push(Item { rt, first, count, indexed, ib_buf, ib_32, ds, vs_ds, vs_off, pipe, gen: g as usize, scissor, sampled_rts });
                 } else if b.index_count > 0 && b.first_index.saturating_add(b.index_count) <= max_idx {
                     let ds = self.ensure_sampled_texture(b.tex_addr, b.tex_w, b.tex_h, b.tex_swiz);
-                    items.push(Item { rt: display, first: b.first_index, count: b.index_count, indexed: true, ds, vs_ds: vk::DescriptorSet::null(), vs_off: 0, pipe: vk::Pipeline::null(), gen: 0, scissor: full(display.1, display.2), sampled_rts: [0; 4] });
+                    items.push(Item { rt: display, first: b.first_index, count: b.index_count, indexed: true, ib_buf: vk::Buffer::null(), ib_32: true, ds, vs_ds: vk::DescriptorSet::null(), vs_off: 0, pipe: vk::Pipeline::null(), gen: 0, scissor: full(display.1, display.2), sampled_rts: [0; 4] });
                 }
             }
             if items.is_empty() {
@@ -3091,6 +3211,7 @@ impl VkRenderer {
             let mut cur_pipe = vk::Pipeline::null();
             let mut cur_vb = vk::Buffer::null();
             let mut cur_ib = vk::Buffer::null();
+            let mut cur_ib_ty = vk::IndexType::UINT32;
             let mut last_ds = vk::DescriptorSet::null();
             for it in &items {
                 for &sr in &it.sampled_rts {
@@ -3118,11 +3239,17 @@ impl VkRenderer {
                         && gens[it.gen].depth == 0x701
                         && gens[it.gen].blend == 0x60010001
                         && gens[it.gen].tex.is_none();
-                    if a != display.0 && is_cohtml_clear {
+                    let is_2d_partial_dirty = it.pipe != vk::Pipeline::null()
+                        && (gens[it.gen].depth & 2) == 0
+                        && (it.scissor.offset.x > 0
+                            || it.scissor.offset.y > 0
+                            || it.scissor.extent.width < w
+                            || it.scissor.extent.height < h);
+                    if a != display.0 && (is_cohtml_clear || is_2d_partial_dirty) {
                         self.persistent_rts.insert(a);
                     }
                     let has_prev = *self.rt_layouts.get(&a).unwrap_or(&vk::ImageLayout::UNDEFINED) != vk::ImageLayout::UNDEFINED;
-                    let is_persistent = a != display.0 && (is_cohtml_clear || self.persistent_rts.contains(&a));
+                    let is_persistent = a != display.0 && (is_cohtml_clear || is_2d_partial_dirty || self.persistent_rts.contains(&a));
                     let clear_now = !cleared.contains(&a)
                         && !sampled_this_frame.contains(&a)
                         && !(is_persistent && has_prev);
@@ -3184,10 +3311,17 @@ impl VkRenderer {
                     }
                 }
                 if it.indexed {
-                    let ib = if generic { self.gibuf } else { self.ibuf };
-                    if ib != cur_ib && ib != vk::Buffer::null() {
-                        self.device.cmd_bind_index_buffer(self.cmd_buf, ib, 0, vk::IndexType::UINT32);
+                    let (ib, ity) = if it.ib_buf != vk::Buffer::null() {
+                        (it.ib_buf, if it.ib_32 { vk::IndexType::UINT32 } else { vk::IndexType::UINT16 })
+                    } else if generic {
+                        (self.gibuf, vk::IndexType::UINT32)
+                    } else {
+                        (self.ibuf, vk::IndexType::UINT32)
+                    };
+                    if (ib != cur_ib || ity != cur_ib_ty) && ib != vk::Buffer::null() {
+                        self.device.cmd_bind_index_buffer(self.cmd_buf, ib, 0, ity);
                         cur_ib = ib;
+                        cur_ib_ty = ity;
                     }
                 }
                 let layout = if gpu_vs {

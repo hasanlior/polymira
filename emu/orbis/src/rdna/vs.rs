@@ -66,7 +66,6 @@ pub fn is_gpu_vs_eligible(sh: &CompiledShader) -> bool {
 pub fn extract_gpu_vs_draw(
     sh: &CompiledShader,
     vs_ud: &[u32; 24],
-    max_ix: u32,
     vp: [u32; 8],
     ok: MemCheck,
 ) -> Option<GpuVsDrawData> {
@@ -112,13 +111,23 @@ pub fn extract_gpu_vs_draw(
                 let soff = lane.src_pub(((w1 >> 24) & 0xFF) as u16, None) as u64;
                 let bw0 = lane.s[srsrc] as u64;
                 let bw1 = lane.s[srsrc + 1];
+                let bw2 = lane.s[srsrc + 2];
                 let base = bw0 | (((bw1 & 0xFFFF) as u64) << 32);
                 let stride = ((bw1 >> 16) & 0x3FFF) as u64;
                 let vfmt = (lane.s[srsrc + 3] >> 12) & 0x7F;
                 let fmt = if inst.fmt == Fmt::Mtbuf { (w0 >> 19) & 0x7F } else { vfmt };
                 let base_addr = base.wrapping_add(soff).wrapping_add(inst_off) as usize;
-                let need = (max_ix as usize + 1).saturating_mul(stride as usize).saturating_add(16);
-                if base_addr < 0x1_0000_0000 || !ok(base_addr, need) {
+                let raw_need = if bw2 > 0 && bw2 < 0x1000_0000 {
+                    if stride > 0 {
+                        (bw2 as usize).saturating_mul(stride as usize)
+                    } else {
+                        bw2 as usize
+                    }
+                } else {
+                    return None;
+                };
+                let need = raw_need.min(64 << 20).saturating_add(16);
+                if base_addr < 0x1_0000_0000 || !ok(base_addr, (stride as usize).max(16)) {
                     return None;
                 }
                 // Group nearby Mubuf bases (e.g. interleaved vertex attributes at +0/+12/+16/+20)
