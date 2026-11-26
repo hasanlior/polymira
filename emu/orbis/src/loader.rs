@@ -22,9 +22,23 @@ static RECENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static GAME: Mutex<(usize, usize)> = Mutex::new((0, 0));
 static TRACE_STUBS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
+thread_local! {
+    /// Per-thread fault-correlated ring buffer of the last 16 unresolved stub indices called.
+    static THREAD_STUB_RING: std::cell::RefCell<std::collections::VecDeque<usize>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
 /// Called by stubs of functions Orbis does not implement yet.
 extern "sysv64" fn unimplemented(index: u64) -> u64 {
     let idx = index as usize;
+    let _ = THREAD_STUB_RING.try_with(|ring| {
+        if let Ok(mut q) = ring.try_borrow_mut() {
+            if q.len() >= 16 {
+                q.pop_front();
+            }
+            q.push_back(idx);
+        }
+    });
     let count = {
         let mut seen = SEEN.lock().unwrap();
         if seen.len() <= idx {
@@ -46,11 +60,27 @@ extern "sysv64" fn unimplemented(index: u64) -> u64 {
         }
         let mut recent = RECENT.lock().unwrap();
         recent.push(name);
-        if recent.len() > 8 {
+        if recent.len() > 16 {
             recent.remove(0);
         }
     }
     0
+}
+
+/// Returns the calling thread's last 16 unresolved stubbed NIDs (falling back to global `RECENT`).
+pub fn recent_thread_stubs() -> Vec<String> {
+    let indices: Vec<usize> = THREAD_STUB_RING
+        .try_with(|ring| ring.try_borrow().map(|q| q.iter().copied().collect()).unwrap_or_default())
+        .unwrap_or_default();
+    if !indices.is_empty() {
+        if let Ok(missing) = MISSING.try_lock() {
+            return indices
+                .into_iter()
+                .filter_map(|i| missing.get(i).cloned())
+                .collect();
+        }
+    }
+    RECENT.try_lock().map(|r| r.clone()).unwrap_or_default()
 }
 
 /// Snapshot of deduplicated unresolved NIDs `(symbol, call_count)` sorted by descending call count.
@@ -315,10 +345,9 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
     if !frames.is_empty() {
         let _ = writeln!(out, "[orbis]   called from: {}", frames.join(" <- "));
     }
-    if let Ok(r) = RECENT.try_lock() {
-        if !r.is_empty() {
-            let _ = writeln!(out, "[orbis]   last system calls: {}", r.join(" → "));
-        }
+    let thread_recent = recent_thread_stubs();
+    if !thread_recent.is_empty() {
+        let _ = writeln!(out, "[orbis]   last stubbed calls (thread, max 16): {}", thread_recent.join(" → "));
     }
     {
         use windows_sys::Win32::Storage::FileSystem::WriteFile;

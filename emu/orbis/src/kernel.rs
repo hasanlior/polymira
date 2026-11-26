@@ -849,6 +849,11 @@ fn alloc_fd(entry: FdEntry) -> i32 {
     }
 }
 
+static FS_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+fn fs_trace() -> bool {
+    *FS_TRACE.get_or_init(|| std::env::var_os("ORBIS_FS_TRACE").is_some())
+}
+
 fn open_file(path: &str, flags: i32) -> Result<i32, i32> {
     let host = if path == "/dev/urandom" || path == "/dev/random" { random_device() } else { host_path(path) };
     let mut o = std::fs::OpenOptions::new();
@@ -878,7 +883,11 @@ fn open_file(path: &str, flags: i32) -> Result<i32, i32> {
                 }
             }
         }
-        return Ok(alloc_fd(FdEntry::Dir { path: host, entries, pos: 0 }));
+        let fd = alloc_fd(FdEntry::Dir { path: host, entries, pos: 0 });
+        if fs_trace() {
+            eprintln!("[orbis-fs] opendir {path} -> fd {fd}");
+        }
+        return Ok(fd);
     }
     match o.open(&host) {
         Ok(file) => {
@@ -973,6 +982,7 @@ pub fn write_compat_profile() {
         .take(64)
         .map(|(sym, calls)| serde_json::json!({ "symbol": sym, "calls": calls }))
         .collect();
+    let recent = crate::loader::recent_thread_stubs();
     let profile = serde_json::json!({
         "title_id": tid,
         "milestone": milestone,
@@ -981,6 +991,7 @@ pub fn write_compat_profile() {
         "last_dispatches": last_dispatches,
         "peak_direct_mb": peak_direct_bytes() / (1024 * 1024),
         "unresolved_nids": unresolved,
+        "recent_unresolved_nids": recent,
     });
     let dir = format!("{}/profiles", data_root());
     if std::fs::create_dir_all(&dir).is_ok() {
@@ -1217,9 +1228,17 @@ pub extern "sysv64" fn sce_stat(path: *const c_char, st: *mut Stat) -> i32 {
     match std::fs::metadata(host_path(&p)) {
         Ok(m) => {
             fill_stat(&m, st);
+            if fs_trace() {
+                eprintln!("[orbis-fs] stat {p} -> OK (dir={}, size={})", m.is_dir(), m.len());
+            }
             0
         }
-        Err(_) => SCE_KERNEL_ERROR_ENOENT,
+        Err(_) => {
+            if fs_trace() {
+                eprintln!("[orbis-fs] stat {p} -> ENOENT");
+            }
+            SCE_KERNEL_ERROR_ENOENT
+        }
     }
 }
 
@@ -1298,7 +1317,427 @@ pub extern "sysv64" fn sce_getdents(fd: i32, buf: *mut u8, nbytes: usize) -> i32
         written += reclen;
         *pos += 1;
     }
+    if fs_trace() {
+        eprintln!("[orbis-fs] getdents fd={fd} nbytes={nbytes} -> {written} (pos={}/{})", *pos, entries.len());
+    }
     written as i32
+}
+
+// ── libkernel AIO (PS5 async I/O used by UE4 .pak readers) ───────────
+
+#[repr(C)]
+pub struct SceKernelAioResult {
+    pub return_value: i64,
+    pub state: u32,
+    pub _pad: u32,
+}
+
+#[repr(C)]
+pub struct SceKernelAioRWRequest {
+    pub offset: i64,
+    pub nbyte: usize,
+    pub buf: *mut u8,
+    pub result: *mut SceKernelAioResult,
+    pub fd: i32,
+    pub _pad: i32,
+}
+
+const SCE_KERNEL_AIO_STATE_COMPLETED: u32 = 4;
+static NEXT_AIO_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+pub extern "sysv64" fn aio_initialize_param(param: *mut u8) -> i32 {
+    if !param.is_null() {
+        unsafe { std::ptr::write_bytes(param, 0, 32) };
+    }
+    0
+}
+
+pub extern "sysv64" fn aio_initialize_impl(_param: *const u8, _size: usize) -> i32 {
+    0
+}
+
+pub extern "sysv64" fn aio_submit_read_commands(
+    cmds: *const SceKernelAioRWRequest,
+    num: i32,
+    _prio: i32,
+    ids: *mut u32,
+) -> i32 {
+    if cmds.is_null() || num <= 0 {
+        return 0;
+    }
+    for i in 0..(num as usize) {
+        let req = unsafe { &*cmds.add(i) };
+        let got = sce_pread(req.fd, req.buf, req.nbyte, req.offset);
+        if !req.result.is_null() {
+            unsafe {
+                (*req.result).return_value = got;
+                (*req.result).state = SCE_KERNEL_AIO_STATE_COMPLETED;
+            }
+        }
+        if !ids.is_null() {
+            let id = NEXT_AIO_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            unsafe { *ids.add(i) = id };
+        }
+    }
+    0
+}
+
+pub extern "sysv64" fn aio_poll_requests(_ids: *const u32, num: i32, states: *mut i32) -> i32 {
+    if !states.is_null() && num > 0 {
+        for i in 0..(num as usize) {
+            unsafe { *states.add(i) = SCE_KERNEL_AIO_STATE_COMPLETED as i32 };
+        }
+    }
+    0
+}
+
+pub extern "sysv64" fn aio_wait_requests(
+    ids: *const u32,
+    num: i32,
+    states: *mut i32,
+    _mode: u32,
+    _timeout: *mut u32,
+) -> i32 {
+    aio_poll_requests(ids, num, states)
+}
+
+// ── libkernel APR + libSceAmpr (PS5 Asynchronous Packaged Read — UE4 .pak I/O) ──
+
+struct AprFileEntry {
+    path: std::path::PathBuf,
+    file: Option<std::fs::File>,
+}
+
+static APR_FILES: Mutex<Vec<AprFileEntry>> = Mutex::new(Vec::new());
+
+fn apr_register_path(full_guest: &str) -> Result<(u32, u64), i32> {
+    let host = host_path(full_guest);
+    let meta = std::fs::metadata(&host).map_err(|_| SCE_KERNEL_ERROR_ENOENT)?;
+    let size = meta.len();
+    let file = std::fs::File::open(&host).ok();
+    let mut table = APR_FILES.lock().unwrap_or_else(|e| e.into_inner());
+    let id = (table.len() + 1) as u32;
+    table.push(AprFileEntry { path: host, file });
+    if fs_trace() {
+        eprintln!("[orbis-fs] apr_resolve {full_guest} -> id={id}, size={size}");
+    }
+    Ok((id, size))
+}
+
+fn apr_resolve_list(
+    prefix: Option<&str>,
+    paths: *const *const c_char,
+    num: u32,
+    out_ids: *mut u32,
+    out_sizes: *mut usize,
+    out_error_index: *mut u32,
+) -> i32 {
+    if paths.is_null() || out_ids.is_null() {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    for i in 0..(num as usize) {
+        let p_ptr = unsafe { *paths.add(i) };
+        let rel = text(p_ptr);
+        let full = match prefix {
+            Some(pre) if !pre.is_empty() => format!("{}/{}", pre.trim_end_matches('/'), rel.trim_start_matches('/')),
+            _ => rel,
+        };
+        match apr_register_path(&full) {
+            Ok((id, size)) => unsafe {
+                *out_ids.add(i) = id;
+                if !out_sizes.is_null() {
+                    *out_sizes.add(i) = size as usize;
+                }
+            },
+            Err(e) => {
+                if !out_error_index.is_null() {
+                    unsafe { *out_error_index = i as u32 };
+                }
+                return e;
+            }
+        }
+    }
+    0
+}
+
+pub extern "sysv64" fn apr_resolve_to_ids(
+    paths: *const *const c_char,
+    num: u32,
+    out_ids: *mut u32,
+    out_error_index: *mut u32,
+) -> i32 {
+    apr_resolve_list(None, paths, num, out_ids, std::ptr::null_mut(), out_error_index)
+}
+
+pub extern "sysv64" fn apr_resolve_to_ids_and_sizes(
+    paths: *const *const c_char,
+    num: u32,
+    out_ids: *mut u32,
+    out_sizes: *mut usize,
+    out_error_index: *mut u32,
+) -> i32 {
+    apr_resolve_list(None, paths, num, out_ids, out_sizes, out_error_index)
+}
+
+pub extern "sysv64" fn apr_resolve_with_prefix_to_ids(
+    prefix: *const c_char,
+    paths: *const *const c_char,
+    num: u32,
+    out_ids: *mut u32,
+    out_error_index: *mut u32,
+) -> i32 {
+    let pre = text(prefix);
+    apr_resolve_list(Some(&pre), paths, num, out_ids, std::ptr::null_mut(), out_error_index)
+}
+
+pub extern "sysv64" fn apr_resolve_with_prefix_to_ids_and_sizes(
+    prefix: *const c_char,
+    paths: *const *const c_char,
+    num: u32,
+    out_ids: *mut u32,
+    out_sizes: *mut usize,
+    out_error_index: *mut u32,
+) -> i32 {
+    let pre = text(prefix);
+    apr_resolve_list(Some(&pre), paths, num, out_ids, out_sizes, out_error_index)
+}
+
+pub extern "sysv64" fn apr_resolve_for_each(
+    paths: *const *const c_char,
+    num: u32,
+    out_ids: *mut u32,
+    out_errors: *mut i32,
+) -> i32 {
+    if paths.is_null() || out_ids.is_null() {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    for i in 0..(num as usize) {
+        let full = text(unsafe { *paths.add(i) });
+        match apr_register_path(&full) {
+            Ok((id, _)) => unsafe {
+                *out_ids.add(i) = id;
+                if !out_errors.is_null() {
+                    *out_errors.add(i) = 0;
+                }
+            },
+            Err(e) => unsafe {
+                *out_ids.add(i) = 0;
+                if !out_errors.is_null() {
+                    *out_errors.add(i) = e;
+                }
+            },
+        }
+    }
+    0
+}
+
+pub extern "sysv64" fn apr_get_file_size(file_id: u32, out_size: *mut usize) -> i32 {
+    if file_id == 0 || out_size.is_null() {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    let path = {
+        let table = APR_FILES.lock().unwrap_or_else(|e| e.into_inner());
+        table.get((file_id - 1) as usize).map(|e| e.path.clone())
+    };
+    let Some(p) = path else { return SCE_KERNEL_ERROR_ENOENT };
+    match std::fs::metadata(&p) {
+        Ok(m) => {
+            unsafe { *out_size = m.len() as usize };
+            0
+        }
+        Err(_) => SCE_KERNEL_ERROR_ENOENT,
+    }
+}
+
+pub extern "sysv64" fn apr_get_file_stat(file_id: u32, st: *mut Stat) -> i32 {
+    if file_id == 0 || st.is_null() {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    let path = {
+        let table = APR_FILES.lock().unwrap_or_else(|e| e.into_inner());
+        table.get((file_id - 1) as usize).map(|e| e.path.clone())
+    };
+    let Some(p) = path else { return SCE_KERNEL_ERROR_ENOENT };
+    match std::fs::metadata(&p) {
+        Ok(m) => {
+            fill_stat(&m, st);
+            0
+        }
+        Err(_) => SCE_KERNEL_ERROR_ENOENT,
+    }
+}
+
+enum AprOp {
+    ReadFile {
+        file_id: u32,
+        dst: usize,
+        size: usize,
+        offset: u64,
+    },
+}
+
+struct AprCmdBuf {
+    buf: usize,
+    buf_size: usize,
+    ops: Vec<AprOp>,
+}
+
+static AMPR_CBS: Mutex<Option<std::collections::HashMap<usize, AprCmdBuf>>> = Mutex::new(None);
+static NEXT_APR_SUBMIT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn with_ampr_cbs<R>(f: impl FnOnce(&mut std::collections::HashMap<usize, AprCmdBuf>) -> R) -> R {
+    let mut g = AMPR_CBS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.get_or_insert_with(std::collections::HashMap::new);
+    f(map)
+}
+
+pub extern "sysv64" fn ampr_cb_construct(cb: usize) -> i32 {
+    if cb != 0 {
+        with_ampr_cbs(|m| {
+            m.insert(cb, AprCmdBuf { buf: 0, buf_size: 0, ops: Vec::new() });
+        });
+    }
+    0
+}
+
+pub extern "sysv64" fn ampr_cb_destruct(cb: usize) -> i32 {
+    if cb != 0 {
+        with_ampr_cbs(|m| {
+            m.remove(&cb);
+        });
+    }
+    0
+}
+
+pub extern "sysv64" fn ampr_cb_set_buffer(cb: usize, buf: usize, size: usize) -> i32 {
+    if cb != 0 {
+        with_ampr_cbs(|m| {
+            let entry = m.entry(cb).or_insert_with(|| AprCmdBuf { buf: 0, buf_size: 0, ops: Vec::new() });
+            entry.buf = buf;
+            entry.buf_size = size;
+            entry.ops.clear();
+        });
+    }
+    0
+}
+
+pub extern "sysv64" fn ampr_cb_reset(cb: usize) -> i32 {
+    if cb != 0 {
+        with_ampr_cbs(|m| {
+            if let Some(entry) = m.get_mut(&cb) {
+                entry.ops.clear();
+            }
+        });
+    }
+    0
+}
+
+/// sceAmprAprCommandBufferReadFile(cb, out1, out2, file_id, dst, size, offset)
+pub extern "sysv64" fn ampr_apr_read_file(
+    cb: usize,
+    a1: usize,
+    a2: usize,
+    file_id: u32,
+    dst: usize,
+    size: usize,
+    offset: u64,
+) -> i32 {
+    if fs_trace() {
+        eprintln!(
+            "[orbis-fs] ampr_read_file cb={cb:#x} a1={a1:#x} a2={a2:#x} file_id={file_id} dst={dst:#x} size={size:#x} off={offset:#x}"
+        );
+    }
+    if cb == 0 || dst == 0 {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    with_ampr_cbs(|m| {
+        let entry = m.entry(cb).or_insert_with(|| AprCmdBuf { buf: 0, buf_size: 0, ops: Vec::new() });
+        entry.ops.push(AprOp::ReadFile { file_id, dst, size, offset });
+    });
+    0
+}
+
+pub extern "sysv64" fn ampr_cb_get_current_offset(cb: usize) -> u32 {
+    with_ampr_cbs(|m| m.get(&cb).map(|e| (e.ops.len() * 32) as u32).unwrap_or(0))
+}
+
+pub extern "sysv64" fn ampr_cb_get_buffer_ptr(cb: usize) -> usize {
+    with_ampr_cbs(|m| m.get(&cb).map(|e| e.buf).unwrap_or(0))
+}
+
+pub extern "sysv64" fn ampr_cb_get_buffer_size(cb: usize) -> usize {
+    with_ampr_cbs(|m| m.get(&cb).map(|e| e.buf_size).unwrap_or(0))
+}
+
+fn apr_execute_cb(cb: usize) -> i32 {
+    use std::io::{Read, Seek, SeekFrom};
+    let ops = with_ampr_cbs(|m| {
+        m.get_mut(&cb).map(|e| std::mem::take(&mut e.ops)).unwrap_or_default()
+    });
+    for op in ops {
+        match op {
+            AprOp::ReadFile { file_id, dst, size, offset } => {
+                if file_id == 0 || dst == 0 || size == 0 {
+                    continue;
+                }
+                let mut table = APR_FILES.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(entry) = table.get_mut((file_id - 1) as usize) else {
+                    return SCE_KERNEL_ERROR_ENOENT;
+                };
+                if entry.file.is_none() {
+                    entry.file = std::fs::File::open(&entry.path).ok();
+                }
+                let Some(ref mut f) = entry.file else {
+                    return SCE_KERNEL_ERROR_ENOENT;
+                };
+                if f.seek(SeekFrom::Start(offset)).is_err() {
+                    return SCE_KERNEL_ERROR_EINVAL;
+                }
+                let slice = unsafe { std::slice::from_raw_parts_mut(dst as *mut u8, size) };
+                let mut done = 0usize;
+                while done < size {
+                    match f.read(&mut slice[done..]) {
+                        Ok(0) => break,
+                        Ok(n) => done += n,
+                        Err(_) => return SCE_KERNEL_ERROR_EINVAL,
+                    }
+                }
+                if fs_trace() {
+                    eprintln!("[orbis-fs] apr_read id={file_id} off={offset:#x} len={size} -> {done}B");
+                }
+            }
+        }
+    }
+    0
+}
+
+/// sceKernelAprSubmitCommandBufferAndGetResult(cb, prio, outResult*, outId*)
+pub extern "sysv64" fn apr_submit_cb_and_get_result(
+    cb: usize,
+    prio: i32,
+    out_result: *mut i32,
+    out_id: *mut u32,
+) -> i32 {
+    if fs_trace() {
+        eprintln!("[orbis-fs] apr_submit cb={cb:#x} prio={prio} out_res={out_result:p} out_id={out_id:p}");
+    }
+    let rc = apr_execute_cb(cb);
+    if !out_result.is_null() {
+        unsafe {
+            *out_result = rc;
+            *out_result.add(1) = 0; // errorOffset
+        }
+    }
+    if !out_id.is_null() {
+        let id = NEXT_APR_SUBMIT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        unsafe { *out_id = id };
+    }
+    rc
+}
+
+/// sceKernelAprSubmitCommandBuffer(cb, prio, outId*)
+pub extern "sysv64" fn apr_submit_cb(cb: usize, prio: i32, out_id: *mut u32) -> i32 {
+    apr_submit_cb_and_get_result(cb, prio, std::ptr::null_mut(), out_id)
 }
 
 pub extern "sysv64" fn sce_check_reachability(path: *const c_char) -> i32 {
@@ -1670,6 +2109,45 @@ pub fn functions() -> Vec<(&'static str, usize)> {
         ("sched_get_priority_max", sched_get_priority_max as *const () as usize),
         ("pthread_setschedparam", zero as *const () as usize),
         ("sceKernelSync", zero as *const () as usize),
+        // PS5 libkernel AIO (UE4 async .pak reads)
+        ("sceKernelAioInitializeParam", aio_initialize_param as *const () as usize),
+        ("sceKernelAioInitializeImpl", aio_initialize_impl as *const () as usize),
+        ("sceKernelAioSubmitReadCommands", aio_submit_read_commands as *const () as usize),
+        ("sceKernelAioSubmitReadCommandsMultiple", aio_submit_read_commands as *const () as usize),
+        ("sceKernelAioPollRequests", aio_poll_requests as *const () as usize),
+        ("sceKernelAioPollRequest", aio_poll_requests as *const () as usize),
+        ("sceKernelAioWaitRequests", aio_wait_requests as *const () as usize),
+        ("sceKernelAioWaitRequest", aio_wait_requests as *const () as usize),
+        ("sceKernelAioDeleteRequests", zero as *const () as usize),
+        ("sceKernelAioDeleteRequest", zero as *const () as usize),
+        ("sceKernelAioCancelRequests", zero as *const () as usize),
+        ("sceKernelAioCancelRequest", zero as *const () as usize),
+        ("sceKernelAioSetParam", zero as *const () as usize),
+        // PS5 libkernel APR (UE4 .pak file ID resolution)
+        ("sceKernelAprResolveFilepathsToIds", apr_resolve_to_ids as *const () as usize),
+        ("sceKernelAprResolveFilepathsToIdsAndFileSizes", apr_resolve_to_ids_and_sizes as *const () as usize),
+        ("sceKernelAprResolveFilepathsWithPrefixToIds", apr_resolve_with_prefix_to_ids as *const () as usize),
+        ("sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes", apr_resolve_with_prefix_to_ids_and_sizes as *const () as usize),
+        ("sceKernelAprResolveFilepathsToIdsForEach", apr_resolve_for_each as *const () as usize),
+        ("sceKernelAprGetFileSize", apr_get_file_size as *const () as usize),
+        ("sceKernelAprGetFileStat", apr_get_file_stat as *const () as usize),
+        ("sceKernelAprSubmitCommandBuffer", apr_submit_cb as *const () as usize),
+        ("sceKernelAprSubmitCommandBufferAndGetId", apr_submit_cb as *const () as usize),
+        ("sceKernelAprSubmitCommandBufferAndGetResult", apr_submit_cb_and_get_result as *const () as usize),
+        ("sceKernelAprWaitCommandBuffer", zero as *const () as usize),
+        ("sceKernelAprPollCommandBuffer", zero as *const () as usize),
+        // PS5 libSceAmpr command buffer builder
+        ("sceAmprCommandBufferConstructor", ampr_cb_construct as *const () as usize),
+        ("sceAmprCommandBufferDestructor", ampr_cb_destruct as *const () as usize),
+        ("sceAmprAprCommandBufferConstructor", ampr_cb_construct as *const () as usize),
+        ("sceAmprAprCommandBufferDestructor", ampr_cb_destruct as *const () as usize),
+        ("sceAmprCommandBufferSetBuffer", ampr_cb_set_buffer as *const () as usize),
+        ("sceAmprCommandBufferReset", ampr_cb_reset as *const () as usize),
+        ("sceAmprCommandBufferGetCurrentOffset", ampr_cb_get_current_offset as *const () as usize),
+        ("sceAmprCommandBufferGetCurrentSize", ampr_cb_get_current_offset as *const () as usize),
+        ("sceAmprCommandBufferGetBufferPtr", ampr_cb_get_buffer_ptr as *const () as usize),
+        ("sceAmprCommandBufferGetBufferSize", ampr_cb_get_buffer_size as *const () as usize),
+        ("sceAmprAprCommandBufferReadFile", ampr_apr_read_file as *const () as usize),
     ]
 }
 
@@ -1802,6 +2280,7 @@ mod tests {
         assert_eq!(val["title_id"], "PPSA17221");
         assert!(val["milestone"].is_string());
         assert!(val["unresolved_nids"].is_array());
+        assert!(val["recent_unresolved_nids"].is_array());
         std::env::remove_var("ORBIS_TITLE_ID");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1827,5 +2306,41 @@ mod tests {
         entry.operation = 1; // UNMAP
         assert_eq!(batch_map(&mut entry, 1, &mut out), 0);
         assert_eq!(out, 1);
+    }
+
+    #[test]
+    fn apr_command_buffer_reads_file_end_to_end() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("orbis_apr_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("data")).unwrap();
+        std::fs::write(base.join("data").join("test.pak"), b"UE4_PAK_HEADER_0123456789").unwrap();
+        std::env::set_var("ORBIS_DATA", base.to_str().unwrap());
+
+        let guest = CString::new("/data/test.pak").unwrap();
+        let paths = [guest.as_ptr()];
+        let mut id = 0u32;
+        let mut size = 0usize;
+        let mut err_idx = 99u32;
+        assert_eq!(apr_resolve_to_ids_and_sizes(paths.as_ptr(), 1, &mut id, &mut size, &mut err_idx), 0);
+        assert!(id >= 1);
+        assert_eq!(size, 25);
+
+        let mut cb_storage = [0u64; 8];
+        let cb = cb_storage.as_mut_ptr() as usize;
+        let mut backing = [0u8; 256];
+        assert_eq!(ampr_cb_construct(cb), 0);
+        assert_eq!(ampr_cb_set_buffer(cb, backing.as_mut_ptr() as usize, backing.len()), 0);
+        let mut out_buf = [0u8; 10];
+        assert_eq!(ampr_apr_read_file(cb, 0, 0, id, out_buf.as_mut_ptr() as usize, 10, 15), 0);
+        let mut res = [-1i32; 2];
+        let mut submit_id = 0u32;
+        assert_eq!(apr_submit_cb_and_get_result(cb, 0, res.as_mut_ptr(), &mut submit_id), 0);
+        assert_eq!(res[0], 0);
+        assert!(submit_id >= 1);
+        assert_eq!(&out_buf, b"0123456789");
+        assert_eq!(ampr_cb_destruct(cb), 0);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

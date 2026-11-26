@@ -634,6 +634,7 @@ pub fn functions() -> Vec<(&'static str, usize)> {
     let mut v: Vec<(&'static str, usize)> = vec![
         ("scePthreadCreate", create as *const () as usize),
         ("pthread_create", posix_create as *const () as usize),
+        ("pthread_create_name_np", create as *const () as usize),
         ("scePthreadJoin", join as *const () as usize),
         ("pthread_join", join as *const () as usize),
         ("scePthreadDetach", ok as *const () as usize),
