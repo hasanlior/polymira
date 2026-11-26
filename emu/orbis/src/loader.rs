@@ -295,13 +295,9 @@ unsafe extern "system" fn on_exception(info: *mut windows_sys::Win32::System::Di
     let rec = &*(*info).ExceptionRecord;
     let ctx = &mut *(*info).ContextRecord;
     let code = rec.ExceptionCode as u32;
-    // int3 leaves RIP after the instruction: step back onto it before looking it up.
-    if code == 0x8000_0003 {
-        ctx.Rip -= 1;
-        if hit_breakpoint(ctx) {
-            return -1; // EXCEPTION_CONTINUE_EXECUTION, with the original byte back in place
-        }
-        ctx.Rip += 1;
+    // On Windows x64 a breakpoint exception reports RIP at the int3 itself.
+    if code == 0x8000_0003 && hit_breakpoint(ctx) {
+        return -1; // EXCEPTION_CONTINUE_EXECUTION, with the original byte back in place
     }
     // Demand-commit reserved (MEM_RESERVE) game arena pages on read/write AV (e.g. mimalloc/libc arenas).
     if code == 0xC000_0005 && rec.NumberParameters >= 2 && rec.ExceptionInformation[0] != 8 {
