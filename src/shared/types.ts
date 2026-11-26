@@ -155,6 +155,12 @@ export interface Settings {
   enabledMods: string[]
   /** Optional URL of a remote store catalog (JSON array of StoreItem). */
   storeCatalogUrl: string
+  /** POLYMIRA Orbis upscaler mode: auto selects DLSS/RTX on NVIDIA, FSR on AMD/Intel. */
+  orbisUpscaler: 'auto' | 'dlss' | 'fsr' | 'off'
+  /** POLYMIRA Orbis upscaling quality preset. */
+  orbisUpscaleQuality: 'quality' | 'balanced' | 'performance' | 'native'
+  /** POLYMIRA Orbis optical-flow frame generation: auto selects 3x on RTX 40/50, 2x on other GPUs. */
+  orbisFrameGen: 'auto' | '2x' | '3x' | 'off'
 }
 
 export interface DiscoverGroup {

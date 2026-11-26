@@ -638,7 +638,27 @@ const handlers: Handlers = {
         mainWindow.setFullScreen(true)
       }
       try {
-        await tryRunGame(game)
+        await tryRunGame(game, {
+          upscaler: store.settings.orbisUpscaler,
+          quality: store.settings.orbisUpscaleQuality,
+          frameGen: store.settings.orbisFrameGen,
+          onExit: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.show()
+              if (store.settings.windowMode === 'fullscreen' && !mainWindow.isFullScreen()) {
+                mainWindow.setFullScreen(true)
+              }
+              mainWindow.focus()
+            }
+            send('launch:ended', game.id)
+            broadcast()
+          }
+        })
+        // Yield foreground focus after the PS5 launch splash so orbis.exe pops straight on top without Alt+Tab.
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.setAlwaysOnTop(false)
+          mainWindow.blur()
+        }
         store.updateGame(id, { lastLaunch: { at: Date.now(), result: 'ok' } })
         toast('info', `${game.title} POLYMIRA Orbis ile açılıyor.`)
       } catch (err) {
@@ -869,7 +889,11 @@ const handlers: Handlers = {
   'orbis:run': (id) => {
     const g = store.games.find((x) => x.id === id)
     if (!g) throw new Error('Oyun bulunamadı.')
-    return tryRunGame(g)
+    return tryRunGame(g, {
+      upscaler: store.settings.orbisUpscaler,
+      quality: store.settings.orbisUpscaleQuality,
+      frameGen: store.settings.orbisFrameGen
+    })
   },
   'orbis:selftest': () => orbisSelftest(),
   'trophies:games': () => trophyGames(),

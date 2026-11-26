@@ -47,7 +47,10 @@ export const DEFAULT_SETTINGS: Settings = {
   gameTrailers: true,
   installedThemes: [],
   enabledMods: [],
-  storeCatalogUrl: ''
+  storeCatalogUrl: '',
+  orbisUpscaler: 'auto',
+  orbisUpscaleQuality: 'quality',
+  orbisFrameGen: 'auto'
 }
 
 export const paths = {

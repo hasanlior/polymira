@@ -763,10 +763,63 @@ function settingsCategory(ctx: MenuCtx): XItem[] {
     children: [
       {
         id: 'set:emu:orbis',
-        title: 'POLYMIRA Orbis (deneysel)',
+        title: 'POLYMIRA Orbis (PS5 / PS4)',
         icon: 'chip',
-        subtitle: 'Kendi PS4 çekirdeğimiz: oyun dosyalarını okur, sistem çağrılarını bağlar. Kendi testini çalıştır.',
-        onActivate: () => ctx.openOrbis('selftest')
+        subtitle: 'Yerleşik PS5/PS4 çekirdeği: FSR/DLSS ölçekleme, Kare Üretimi (2x/3x) ve kendi testi.',
+        children: [
+          choice(
+            'set:orbis:upscaler',
+            'Ölçekleme (FSR / DLSS)',
+            'tv',
+            s.orbisUpscaler ?? 'auto',
+            [
+              { value: 'auto', label: 'Otomatik (Donanım)' },
+              { value: 'dlss', label: 'DLSS / RTX' },
+              { value: 'fsr', label: 'FSR' },
+              { value: 'off', label: 'Kapalı' }
+            ],
+            (v) => ctx.setSettings({ orbisUpscaler: v }),
+            ctx,
+            'Otomatik: NVIDIA RTX kartlarda DLSS/RTX, AMD ve Intel kartlarda FSR seçer.'
+          ),
+          choice(
+            'set:orbis:quality',
+            'Ölçekleme kalitesi',
+            'sparkle',
+            s.orbisUpscaleQuality ?? 'quality',
+            [
+              { value: 'quality', label: 'Kalite' },
+              { value: 'balanced', label: 'Dengeli' },
+              { value: 'performance', label: 'Performans' },
+              { value: 'native', label: 'Doğal' }
+            ],
+            (v) => ctx.setSettings({ orbisUpscaleQuality: v }),
+            ctx,
+            'Ölçekleme keskinliği ve performans dengesi.'
+          ),
+          choice(
+            'set:orbis:framegen',
+            'Kare Üretimi (FrameGen)',
+            'bolt',
+            s.orbisFrameGen ?? 'auto',
+            [
+              { value: 'auto', label: 'Otomatik (2x / 3x)' },
+              { value: '3x', label: '3x Çoklu Kare Üretimi' },
+              { value: '2x', label: '2x Kare Üretimi' },
+              { value: 'off', label: 'Kapalı' }
+            ],
+            (v) => ctx.setSettings({ orbisFrameGen: v }),
+            ctx,
+            'Otomatik: RTX 40/50 serisinde 3x Çoklu Kare Üretimi, diğer GPU’larda 2x Kare Üretimi açar.'
+          ),
+          {
+            id: 'set:orbis:selftest',
+            title: 'Orbis kendi testini çalıştır',
+            icon: 'chip',
+            subtitle: 'Çekirdeğin sistem çağrılarını ve Vulkan hattını doğrular.',
+            onActivate: () => ctx.openOrbis('selftest')
+          }
+        ]
       },
       {
         id: 'set:emu:detect',

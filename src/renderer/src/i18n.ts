@@ -623,6 +623,23 @@ const EN: Record<string, string> = {
   Kurulamadı: 'Install failed',
   'Önceki / sonraki': 'Previous / next',
   'Başlatılıyor…': 'Starting…',
+  'POLYMIRA Orbis (PS5 / PS4)': 'POLYMIRA Orbis (PS5 / PS4)',
+  'Yerleşik PS5/PS4 çekirdeği: FSR/DLSS ölçekleme, Kare Üretimi (2x/3x) ve kendi testi.': 'Built-in PS5/PS4 core: FSR/DLSS upscaling, Frame Generation (2x/3x) and self-test.',
+  'Ölçekleme (FSR / DLSS)': 'Upscaling (FSR / DLSS)',
+  'Otomatik (Donanım)': 'Auto (Hardware)',
+  'Otomatik: NVIDIA RTX kartlarda DLSS/RTX, AMD ve Intel kartlarda FSR seçer.': 'Auto: selects DLSS/RTX on NVIDIA RTX GPUs and FSR on AMD/Intel GPUs.',
+  'Ölçekleme kalitesi': 'Upscaling quality',
+  Kalite: 'Quality',
+  Dengeli: 'Balanced',
+  Doğal: 'Native',
+  'Ölçekleme keskinliği ve performans dengesi.': 'Balance between upscaling sharpness and performance.',
+  'Kare Üretimi (FrameGen)': 'Frame Generation (FrameGen)',
+  'Otomatik (2x / 3x)': 'Auto (2x / 3x)',
+  '3x Çoklu Kare Üretimi': '3x Multi-FrameGen',
+  '2x Kare Üretimi': '2x FrameGen',
+  'Otomatik: RTX 40/50 serisinde 3x Çoklu Kare Üretimi, diğer GPU’larda 2x Kare Üretimi açar.': 'Auto: enables 3x Multi-FrameGen on RTX 40/50 series and 2x FrameGen on other GPUs.',
+  'Orbis kendi testini çalıştır': 'Run Orbis self-test',
+  'Çekirdeğin sistem çağrılarını ve Vulkan hattını doğrular.': 'Verifies core system calls and the Vulkan pipeline.',
   'POLYMIRA Orbis ile deneysel. Şifresi çözülmüş oyun klasöründeki eboot.bin eklenir.': 'Experimental with POLYMIRA Orbis. Add eboot.bin from a decrypted game folder.'
 }
 

@@ -49,8 +49,15 @@ export async function analyzeGame(game: Game): Promise<OrbisReport> {
   return json
 }
 
+export interface OrbisRunOptions {
+  upscaler?: 'auto' | 'dlss' | 'fsr' | 'off'
+  quality?: 'quality' | 'balanced' | 'performance' | 'native'
+  frameGen?: 'auto' | '2x' | '3x' | 'off'
+  onExit?: (code: number) => void
+}
+
 /** Launches the game in a live POLYMIRA Orbis window (Vulkan / RTX) without a forced timeout. */
-export async function tryRunGame(game: Game): Promise<{ code: number; log: string }> {
+export async function tryRunGame(game: Game, opts?: OrbisRunOptions): Promise<{ code: number; log: string }> {
   const exe = orbisExe()
   if (!exe) throw new Error('Orbis bu sürümde bulunamadı.')
   const file = executableOf(game)
@@ -66,7 +73,10 @@ export async function tryRunGame(game: Game): Promise<{ code: number; log: strin
   env.ORBIS_TITLE = game.title
   env.ORBIS_DATA = dataDir
   env.ORBIS_FULLSCREEN = '1'
-  const child = spawn('cmd.exe', ['/d', '/c', 'start', '"POLYMIRA Orbis"', '/min', `"${exe}"`, 'run', `"${file}"`], {
+  env.ORBIS_UPSCALER = opts?.upscaler ?? 'auto'
+  env.ORBIS_UPSCALE_QUALITY = opts?.quality ?? 'quality'
+  env.ORBIS_FRAMEGEN = opts?.frameGen ?? 'auto'
+  const child = spawn('cmd.exe', ['/d', '/c', 'start', '"POLYMIRA Orbis"', '/min', '/wait', `"${exe}"`, 'run', `"${file}"`], {
     env,
     cwd: path.dirname(file),
     detached: true,
@@ -83,9 +93,17 @@ export async function tryRunGame(game: Game): Promise<{ code: number; log: strin
       child.unref()
       resolve({ code, log: readLog() || 'POLYMIRA Orbis penceresi açıldı.' })
     }
-    child.on('exit', (c) => finish(typeof c === 'number' ? c : 0))
-    child.on('error', () => finish(1))
-    setTimeout(() => finish(0), 4000)
+    child.once('exit', (c) => {
+      const code = typeof c === 'number' ? c : 0
+      finish(code)
+      opts?.onExit?.(code)
+    })
+    child.once('error', () => {
+      finish(1)
+      opts?.onExit?.(1)
+    })
+    // Let the PS5 launch splash display briefly (~500ms) before yielding focus to orbis.exe.
+    setTimeout(() => finish(0), 500)
   })
 }
 
