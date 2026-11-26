@@ -815,6 +815,319 @@ pub fn compile_rdna2_to_spirv(words: &[u32], stage: ShaderStage) -> (DecodedShad
     (decoded, spv)
 }
 
+/// Generates a SPIR-V 1.3 fragment shader implementing AMD FidelityFX RCAS-style
+/// 5-tap Contrast-Adaptive Sharpening / Upscaling.
+///
+/// Interface:
+/// - `layout(location = 0) in vec2 uv` (from `spv_fullscreen_vs`)
+/// - `layout(set = 0, binding = 0) uniform sampler2D src_tex`
+/// - `layout(push_constant) uniform Params { vec4 params; }` = `(inv_w, inv_h, sharpness, 0.0)`
+/// - `layout(location = 0) out vec4 out_color`
+pub fn spv_rcas_upscale_fs() -> Vec<u32> {
+    use rspirv::binary::Assemble;
+    use rspirv::dr::{Builder, Operand};
+    use rspirv::spirv;
+
+    const GLSL_FMIN: u32 = 37;
+    const GLSL_FMAX: u32 = 40;
+    const GLSL_FCLAMP: u32 = 43;
+    const GLSL_SQRT: u32 = 31;
+
+    let mut b = Builder::new();
+    b.set_version(1, 3);
+    b.capability(spirv::Capability::Shader);
+    let glsl = b.ext_inst_import("GLSL.std.450");
+    b.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
+
+    let t_void = b.type_void();
+    let t_f32 = b.type_float(32);
+    let t_u32 = b.type_int(32, 0);
+    let t_v2f = b.type_vector(t_f32, 2);
+    let t_v3f = b.type_vector(t_f32, 3);
+    let t_v4f = b.type_vector(t_f32, 4);
+    let t_fn = b.type_function(t_void, []);
+
+    let t_img = b.type_image(t_f32, spirv::Dim::Dim2D, 0, 0, 0, 1, spirv::ImageFormat::Unknown, None);
+    let t_samp = b.type_sampled_image(t_img);
+    let p_tex = b.type_pointer(None, spirv::StorageClass::UniformConstant, t_samp);
+    let v_tex = b.variable(p_tex, None, spirv::StorageClass::UniformConstant, None);
+    b.decorate(v_tex, spirv::Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
+    b.decorate(v_tex, spirv::Decoration::Binding, [Operand::LiteralBit32(0)]);
+
+    let t_pc = b.type_struct([t_v4f]);
+    b.decorate(t_pc, spirv::Decoration::Block, []);
+    b.member_decorate(t_pc, 0, spirv::Decoration::Offset, [Operand::LiteralBit32(0)]);
+    let p_pc = b.type_pointer(None, spirv::StorageClass::PushConstant, t_pc);
+    let p_pc_v4 = b.type_pointer(None, spirv::StorageClass::PushConstant, t_v4f);
+    let v_pc = b.variable(p_pc, None, spirv::StorageClass::PushConstant, None);
+
+    let p_in_v2 = b.type_pointer(None, spirv::StorageClass::Input, t_v2f);
+    let v_uv = b.variable(p_in_v2, None, spirv::StorageClass::Input, None);
+    b.decorate(v_uv, spirv::Decoration::Location, [Operand::LiteralBit32(0)]);
+
+    let p_out_v4 = b.type_pointer(None, spirv::StorageClass::Output, t_v4f);
+    let v_out = b.variable(p_out_v4, None, spirv::StorageClass::Output, None);
+    b.decorate(v_out, spirv::Decoration::Location, [Operand::LiteralBit32(0)]);
+
+    let c_u0 = b.constant_bit32(t_u32, 0);
+    let c_f0 = b.constant_bit32(t_f32, 0.0f32.to_bits());
+    let c_f1 = b.constant_bit32(t_f32, 1.0f32.to_bits());
+    let c_eps = b.constant_bit32(t_f32, 0.0001f32.to_bits());
+    let c_lobe = b.constant_bit32(t_f32, (-0.22f32).to_bits());
+    let c_f4 = b.constant_bit32(t_f32, 4.0f32.to_bits());
+    let c_lr = b.constant_bit32(t_f32, 0.299f32.to_bits());
+    let c_lg = b.constant_bit32(t_f32, 0.587f32.to_bits());
+    let c_lb = b.constant_bit32(t_f32, 0.114f32.to_bits());
+    let c_luma = b.constant_composite(t_v3f, [c_lr, c_lg, c_lb]);
+    let c_v3_0 = b.constant_composite(t_v3f, [c_f0, c_f0, c_f0]);
+    let c_v3_1 = b.constant_composite(t_v3f, [c_f1, c_f1, c_f1]);
+
+    let main_fn = b.begin_function(t_void, None, spirv::FunctionControl::NONE, t_fn).unwrap();
+    let _ = b.begin_block(None).unwrap();
+
+    let uv = b.load(t_v2f, None, v_uv, None, []).unwrap();
+    let pc_ptr = b.access_chain(p_pc_v4, None, v_pc, [c_u0]).unwrap();
+    let params = b.load(t_v4f, None, pc_ptr, None, []).unwrap();
+    let inv_w = b.composite_extract(t_f32, None, params, [0]).unwrap();
+    let inv_h = b.composite_extract(t_f32, None, params, [1]).unwrap();
+    let sharp = b.composite_extract(t_f32, None, params, [2]).unwrap();
+    let n_inv_w = b.f_negate(t_f32, None, inv_w).unwrap();
+    let n_inv_h = b.f_negate(t_f32, None, inv_h).unwrap();
+
+    let off_n = b.composite_construct(t_v2f, None, [c_f0, n_inv_h]).unwrap();
+    let off_s = b.composite_construct(t_v2f, None, [c_f0, inv_h]).unwrap();
+    let off_w = b.composite_construct(t_v2f, None, [n_inv_w, c_f0]).unwrap();
+    let off_r = b.composite_construct(t_v2f, None, [inv_w, c_f0]).unwrap();
+
+    let uv_n = b.f_add(t_v2f, None, uv, off_n).unwrap();
+    let uv_s = b.f_add(t_v2f, None, uv, off_s).unwrap();
+    let uv_w = b.f_add(t_v2f, None, uv, off_w).unwrap();
+    let uv_r = b.f_add(t_v2f, None, uv, off_r).unwrap();
+
+    let sample_2d = |b: &mut Builder, coord: u32| -> u32 {
+        let samp = b.load(t_samp, None, v_tex, None, []).unwrap();
+        b.image_sample_implicit_lod(t_v4f, None, samp, coord, None, []).unwrap()
+    };
+    let e4 = sample_2d(&mut b, uv);
+    let n4 = sample_2d(&mut b, uv_n);
+    let s4 = sample_2d(&mut b, uv_s);
+    let w4 = sample_2d(&mut b, uv_w);
+    let r4 = sample_2d(&mut b, uv_r);
+
+    let e = b.vector_shuffle(t_v3f, None, e4, e4, [0, 1, 2]).unwrap();
+    let n = b.vector_shuffle(t_v3f, None, n4, n4, [0, 1, 2]).unwrap();
+    let s = b.vector_shuffle(t_v3f, None, s4, s4, [0, 1, 2]).unwrap();
+    let w = b.vector_shuffle(t_v3f, None, w4, w4, [0, 1, 2]).unwrap();
+    let r = b.vector_shuffle(t_v3f, None, r4, r4, [0, 1, 2]).unwrap();
+
+    let le = b.dot(t_f32, None, e, c_luma).unwrap();
+    let ln = b.dot(t_f32, None, n, c_luma).unwrap();
+    let ls = b.dot(t_f32, None, s, c_luma).unwrap();
+    let lw = b.dot(t_f32, None, w, c_luma).unwrap();
+    let lr = b.dot(t_f32, None, r, c_luma).unwrap();
+
+    let mn_ns = b.ext_inst(t_f32, None, glsl, GLSL_FMIN, [Operand::IdRef(ln), Operand::IdRef(ls)]).unwrap();
+    let mn_wr = b.ext_inst(t_f32, None, glsl, GLSL_FMIN, [Operand::IdRef(lw), Operand::IdRef(lr)]).unwrap();
+    let mn_4 = b.ext_inst(t_f32, None, glsl, GLSL_FMIN, [Operand::IdRef(mn_ns), Operand::IdRef(mn_wr)]).unwrap();
+    let mn_l = b.ext_inst(t_f32, None, glsl, GLSL_FMIN, [Operand::IdRef(le), Operand::IdRef(mn_4)]).unwrap();
+
+    let mx_ns = b.ext_inst(t_f32, None, glsl, GLSL_FMAX, [Operand::IdRef(ln), Operand::IdRef(ls)]).unwrap();
+    let mx_wr = b.ext_inst(t_f32, None, glsl, GLSL_FMAX, [Operand::IdRef(lw), Operand::IdRef(lr)]).unwrap();
+    let mx_4 = b.ext_inst(t_f32, None, glsl, GLSL_FMAX, [Operand::IdRef(mx_ns), Operand::IdRef(mx_wr)]).unwrap();
+    let mx_l = b.ext_inst(t_f32, None, glsl, GLSL_FMAX, [Operand::IdRef(le), Operand::IdRef(mx_4)]).unwrap();
+
+    // amp = clamp(min(mn_l, 1.0 - mx_l) / max(mx_l, 1e-4), 0.0, 1.0)
+    let one_m_mx = b.f_sub(t_f32, None, c_f1, mx_l).unwrap();
+    let head = b.ext_inst(t_f32, None, glsl, GLSL_FMIN, [Operand::IdRef(mn_l), Operand::IdRef(one_m_mx)]).unwrap();
+    let denom_l = b.ext_inst(t_f32, None, glsl, GLSL_FMAX, [Operand::IdRef(mx_l), Operand::IdRef(c_eps)]).unwrap();
+    let ratio = b.f_div(t_f32, None, head, denom_l).unwrap();
+    let amp = b.ext_inst(t_f32, None, glsl, GLSL_FCLAMP, [Operand::IdRef(ratio), Operand::IdRef(c_f0), Operand::IdRef(c_f1)]).unwrap();
+    let amp_sq = b.ext_inst(t_f32, None, glsl, GLSL_SQRT, [Operand::IdRef(amp)]).unwrap();
+
+    // w_rcas = -0.22 * sharpness * sqrt(amp)
+    let ws = b.f_mul(t_f32, None, c_lobe, sharp).unwrap();
+    let w_rcas = b.f_mul(t_f32, None, ws, amp_sq).unwrap();
+
+    // sum = n + s + w + r; out_rgb = clamp((e + w_rcas * sum) / (1.0 + 4.0 * w_rcas), 0.0, 1.0)
+    let ns = b.f_add(t_v3f, None, n, s).unwrap();
+    let wr = b.f_add(t_v3f, None, w, r).unwrap();
+    let sum = b.f_add(t_v3f, None, ns, wr).unwrap();
+    let scaled = b.vector_times_scalar(t_v3f, None, sum, w_rcas).unwrap();
+    let num = b.f_add(t_v3f, None, e, scaled).unwrap();
+    let w4f = b.f_mul(t_f32, None, c_f4, w_rcas).unwrap();
+    let den = b.f_add(t_f32, None, c_f1, w4f).unwrap();
+    let inv_den = b.f_div(t_f32, None, c_f1, den).unwrap();
+    let sharp_rgb = b.vector_times_scalar(t_v3f, None, num, inv_den).unwrap();
+    let clamped = b.ext_inst(t_v3f, None, glsl, GLSL_FCLAMP, [Operand::IdRef(sharp_rgb), Operand::IdRef(c_v3_0), Operand::IdRef(c_v3_1)]).unwrap();
+
+    let cr = b.composite_extract(t_f32, None, clamped, [0]).unwrap();
+    let cg = b.composite_extract(t_f32, None, clamped, [1]).unwrap();
+    let cb = b.composite_extract(t_f32, None, clamped, [2]).unwrap();
+    let ea = b.composite_extract(t_f32, None, e4, [3]).unwrap();
+    let out4 = b.composite_construct(t_v4f, None, [cr, cg, cb, ea]).unwrap();
+    b.store(v_out, out4, None, []).unwrap();
+    b.ret().unwrap();
+    b.end_function().unwrap();
+
+    b.entry_point(spirv::ExecutionModel::Fragment, main_fn, "main", [v_uv, v_out]);
+    b.execution_mode(main_fn, spirv::ExecutionMode::OriginUpperLeft, []);
+    b.module().assemble()
+}
+
+/// Generates a SPIR-V 1.3 fragment shader implementing Motion-Compensated Optical-Flow
+/// Frame Generation (2x/3x) with UI/HUD ghost-guard and scene-cut fallback.
+///
+/// Interface:
+/// - `layout(location = 0) in vec2 uv` (from `spv_fullscreen_vs`)
+/// - `layout(set = 0, binding = 0) uniform sampler2D prev_tex`
+/// - `layout(set = 0, binding = 1) uniform sampler2D curr_tex`
+/// - `layout(push_constant) uniform Params { vec4 params; }` = `(inv_w, inv_h, t_blend, 0.0)`
+/// - `layout(location = 0) out vec4 out_color`
+pub fn spv_framegen_fs() -> Vec<u32> {
+    use rspirv::binary::Assemble;
+    use rspirv::dr::{Builder, Operand};
+    use rspirv::spirv;
+
+    const GLSL_FABS: u32 = 4;
+    const GLSL_FCLAMP: u32 = 43;
+    const GLSL_FMIX: u32 = 46;
+
+    let mut b = Builder::new();
+    b.set_version(1, 3);
+    b.capability(spirv::Capability::Shader);
+    let glsl = b.ext_inst_import("GLSL.std.450");
+    b.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
+
+    let t_void = b.type_void();
+    let t_bool = b.type_bool();
+    let t_v2b = b.type_vector(t_bool, 2);
+    let t_v4b = b.type_vector(t_bool, 4);
+    let t_f32 = b.type_float(32);
+    let t_u32 = b.type_int(32, 0);
+    let t_v2f = b.type_vector(t_f32, 2);
+    let t_v3f = b.type_vector(t_f32, 3);
+    let t_v4f = b.type_vector(t_f32, 4);
+    let t_fn = b.type_function(t_void, []);
+
+    let t_img = b.type_image(t_f32, spirv::Dim::Dim2D, 0, 0, 0, 1, spirv::ImageFormat::Unknown, None);
+    let t_samp = b.type_sampled_image(t_img);
+    let p_tex = b.type_pointer(None, spirv::StorageClass::UniformConstant, t_samp);
+
+    let v_prev = b.variable(p_tex, None, spirv::StorageClass::UniformConstant, None);
+    b.decorate(v_prev, spirv::Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
+    b.decorate(v_prev, spirv::Decoration::Binding, [Operand::LiteralBit32(0)]);
+
+    let v_curr = b.variable(p_tex, None, spirv::StorageClass::UniformConstant, None);
+    b.decorate(v_curr, spirv::Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
+    b.decorate(v_curr, spirv::Decoration::Binding, [Operand::LiteralBit32(1)]);
+
+    let t_pc = b.type_struct([t_v4f]);
+    b.decorate(t_pc, spirv::Decoration::Block, []);
+    b.member_decorate(t_pc, 0, spirv::Decoration::Offset, [Operand::LiteralBit32(0)]);
+    let p_pc = b.type_pointer(None, spirv::StorageClass::PushConstant, t_pc);
+    let p_pc_v4 = b.type_pointer(None, spirv::StorageClass::PushConstant, t_v4f);
+    let v_pc = b.variable(p_pc, None, spirv::StorageClass::PushConstant, None);
+
+    let p_in_v2 = b.type_pointer(None, spirv::StorageClass::Input, t_v2f);
+    let v_uv = b.variable(p_in_v2, None, spirv::StorageClass::Input, None);
+    b.decorate(v_uv, spirv::Decoration::Location, [Operand::LiteralBit32(0)]);
+
+    let p_out_v4 = b.type_pointer(None, spirv::StorageClass::Output, t_v4f);
+    let v_out = b.variable(p_out_v4, None, spirv::StorageClass::Output, None);
+    b.decorate(v_out, spirv::Decoration::Location, [Operand::LiteralBit32(0)]);
+
+    let c_u0 = b.constant_bit32(t_u32, 0);
+    let c_f0 = b.constant_bit32(t_f32, 0.0f32.to_bits());
+    let c_f1 = b.constant_bit32(t_f32, 1.0f32.to_bits());
+    let c_step = b.constant_bit32(t_f32, 4.0f32.to_bits());
+    let c_static_eps = b.constant_bit32(t_f32, 0.018f32.to_bits());
+    let c_cut_eps = b.constant_bit32(t_f32, 0.85f32.to_bits());
+    let c_v2_0 = b.constant_composite(t_v2f, [c_f0, c_f0]);
+    let c_v2_1 = b.constant_composite(t_v2f, [c_f1, c_f1]);
+    let c_ones3 = b.constant_composite(t_v3f, [c_f1, c_f1, c_f1]);
+
+    let main_fn = b.begin_function(t_void, None, spirv::FunctionControl::NONE, t_fn).unwrap();
+    let _ = b.begin_block(None).unwrap();
+
+    let uv = b.load(t_v2f, None, v_uv, None, []).unwrap();
+    let pc_ptr = b.access_chain(p_pc_v4, None, v_pc, [c_u0]).unwrap();
+    let params = b.load(t_v4f, None, pc_ptr, None, []).unwrap();
+    let inv_w = b.composite_extract(t_f32, None, params, [0]).unwrap();
+    let inv_h = b.composite_extract(t_f32, None, params, [1]).unwrap();
+    let t_blend = b.composite_extract(t_f32, None, params, [2]).unwrap();
+    let one_m_t = b.f_sub(t_f32, None, c_f1, t_blend).unwrap();
+
+    let sx = b.f_mul(t_f32, None, inv_w, c_step).unwrap();
+    let sy = b.f_mul(t_f32, None, inv_h, c_step).unwrap();
+    let nsx = b.f_negate(t_f32, None, sx).unwrap();
+    let nsy = b.f_negate(t_f32, None, sy).unwrap();
+
+    let sample_tex = |b: &mut Builder, var: u32, coord: u32| -> u32 {
+        let s = b.load(t_samp, None, var, None, []).unwrap();
+        b.image_sample_implicit_lod(t_v4f, None, s, coord, None, []).unwrap()
+    };
+
+    let sad = |b: &mut Builder, a4: u32, c4: u32| -> u32 {
+        let a3 = b.vector_shuffle(t_v3f, None, a4, a4, [0, 1, 2]).unwrap();
+        let c3 = b.vector_shuffle(t_v3f, None, c4, c4, [0, 1, 2]).unwrap();
+        let diff = b.f_sub(t_v3f, None, a3, c3).unwrap();
+        let ad = b.ext_inst(t_v3f, None, glsl, GLSL_FABS, [Operand::IdRef(diff)]).unwrap();
+        b.dot(t_f32, None, ad, c_ones3).unwrap()
+    };
+
+    let p0 = sample_tex(&mut b, v_prev, uv);
+    let c0 = sample_tex(&mut b, v_curr, uv);
+    let diff0 = sad(&mut b, p0, c0);
+
+    let mut best_cost = diff0;
+    let mut best_mv = c_v2_0;
+
+    let candidates = [
+        b.composite_construct(t_v2f, None, [sx, c_f0]).unwrap(),
+        b.composite_construct(t_v2f, None, [nsx, c_f0]).unwrap(),
+        b.composite_construct(t_v2f, None, [c_f0, sy]).unwrap(),
+        b.composite_construct(t_v2f, None, [c_f0, nsy]).unwrap(),
+    ];
+    for mv in candidates {
+        let uvp = b.f_sub(t_v2f, None, uv, mv).unwrap();
+        let uvc = b.f_add(t_v2f, None, uv, mv).unwrap();
+        let ps = sample_tex(&mut b, v_prev, uvp);
+        let cs = sample_tex(&mut b, v_curr, uvc);
+        let cost = sad(&mut b, ps, cs);
+        let better = b.f_ord_less_than(t_bool, None, cost, best_cost).unwrap();
+        let better2 = b.composite_construct(t_v2b, None, [better, better]).unwrap();
+        best_cost = b.select(t_f32, None, better, cost, best_cost).unwrap();
+        best_mv = b.select(t_v2f, None, better2, mv, best_mv).unwrap();
+    }
+
+    // Motion-compensated blend at t_blend
+    let mv_p = b.vector_times_scalar(t_v2f, None, best_mv, t_blend).unwrap();
+    let mv_c = b.vector_times_scalar(t_v2f, None, best_mv, one_m_t).unwrap();
+    let raw_uvp = b.f_sub(t_v2f, None, uv, mv_p).unwrap();
+    let raw_uvc = b.f_add(t_v2f, None, uv, mv_c).unwrap();
+    let uvp = b.ext_inst(t_v2f, None, glsl, GLSL_FCLAMP, [Operand::IdRef(raw_uvp), Operand::IdRef(c_v2_0), Operand::IdRef(c_v2_1)]).unwrap();
+    let uvc = b.ext_inst(t_v2f, None, glsl, GLSL_FCLAMP, [Operand::IdRef(raw_uvc), Operand::IdRef(c_v2_0), Operand::IdRef(c_v2_1)]).unwrap();
+    let sp_mc = sample_tex(&mut b, v_prev, uvp);
+    let sc_mc = sample_tex(&mut b, v_curr, uvc);
+    let t_v4 = b.composite_construct(t_v4f, None, [t_blend, t_blend, t_blend, t_blend]).unwrap();
+    let blended = b.ext_inst(t_v4f, None, glsl, GLSL_FMIX, [Operand::IdRef(sp_mc), Operand::IdRef(sc_mc), Operand::IdRef(t_v4)]).unwrap();
+
+    // UI/HUD ghost-guard & scene-cut fallback: static UI or hard cut outputs curr directly.
+    let is_static = b.f_ord_less_than(t_bool, None, diff0, c_static_eps).unwrap();
+    let is_cut = b.f_ord_greater_than(t_bool, None, diff0, c_cut_eps).unwrap();
+    let use_curr = b.logical_or(t_bool, None, is_static, is_cut).unwrap();
+    let use_curr4 = b.composite_construct(t_v4b, None, [use_curr, use_curr, use_curr, use_curr]).unwrap();
+    let final_col = b.select(t_v4f, None, use_curr4, c0, blended).unwrap();
+
+    b.store(v_out, final_col, None, []).unwrap();
+    b.ret().unwrap();
+    b.end_function().unwrap();
+
+    b.entry_point(spirv::ExecutionModel::Fragment, main_fn, "main", [v_uv, v_out]);
+    b.execution_mode(main_fn, spirv::ExecutionMode::OriginUpperLeft, []);
+    b.module().assemble()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,9 +1139,38 @@ mod tests {
         let solid = spv_solid_fs();
         let vvs = spv_vertex_vs();
         let tfs = spv_textured_color_fs();
-        for spv in [&vs, &fs, &solid, &vvs, &tfs] {
+        let rcas = spv_rcas_upscale_fs();
+        let fg = spv_framegen_fs();
+        for spv in [&vs, &fs, &solid, &vvs, &tfs, &rcas, &fg] {
             assert_eq!(spv[0], 0x0723_0203);
             assert!(spv.len() > 20);
+        }
+    }
+
+    #[test]
+    fn rcas_and_framegen_spirv_parse_cleanly() {
+        for (name, words, expected_bindings) in [
+            ("rcas", spv_rcas_upscale_fs(), 1usize),
+            ("framegen", spv_framegen_fs(), 2usize),
+        ] {
+            let mut loader = rspirv::dr::Loader::new();
+            rspirv::binary::parse_words(&words, &mut loader)
+                .unwrap_or_else(|e| panic!("{name} spv parse failed: {e:?}"));
+            let m = loader.module();
+            assert_eq!(m.entry_points.len(), 1, "{name}: expected 1 entry point");
+            assert_eq!(m.functions.len(), 1, "{name}: expected 1 function");
+            let bindings = m
+                .annotations
+                .iter()
+                .filter(|inst| {
+                    inst.class.opcode == rspirv::spirv::Op::Decorate
+                        && matches!(
+                            inst.operands.get(1),
+                            Some(rspirv::dr::Operand::Decoration(rspirv::spirv::Decoration::Binding))
+                        )
+                })
+                .count();
+            assert_eq!(bindings, expected_bindings, "{name}: binding count mismatch");
         }
     }
 

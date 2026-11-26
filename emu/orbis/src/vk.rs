@@ -89,6 +89,103 @@ static READY_VS_PARAMS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static QUARANTINED_GPU_VS: std::sync::LazyLock<Mutex<std::collections::HashSet<usize>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 static SAVED_WINDOW: Mutex<Option<(usize, usize, u32, u32)>> = Mutex::new(None);
+static RENDER_MODE_LABEL: OnceLock<String> = OnceLock::new();
+
+/// Returns a short badge describing the active hardware upscaler / FrameGen mode
+/// (e.g. `"DLSS Quality | FG 3x"`, `"FSR Quality | FG 2x"`, or `""` when native).
+pub fn render_mode_label() -> &'static str {
+    RENDER_MODE_LABEL.get().map(|s| s.as_str()).unwrap_or("")
+}
+
+/// Detects hardware-appropriate Vulkan upscaler (DLSS/FSR via RCAS) and Optical-Flow FrameGen
+/// settings from the GPU vendor/name and `ORBIS_UPSCALER`, `ORBIS_UPSCALE_QUALITY`, `ORBIS_FRAMEGEN`.
+fn detect_render_mode(vendor_id: u32, gpu_name: &str) -> (f32, u32, String) {
+    let up_env = std::env::var("ORBIS_UPSCALER").unwrap_or_else(|_| "auto".into()).to_ascii_lowercase();
+    let qual_env = std::env::var("ORBIS_UPSCALE_QUALITY").unwrap_or_else(|_| "quality".into()).to_ascii_lowercase();
+    let fg_env = std::env::var("ORBIS_FRAMEGEN").unwrap_or_else(|_| "auto".into()).to_ascii_lowercase();
+
+    let name_up = gpu_name.to_ascii_uppercase();
+    let is_nvidia_rtx = vendor_id == 0x10DE && name_up.contains("RTX");
+    let is_rtx_40_50 = is_nvidia_rtx
+        && (name_up.contains("RTX 40")
+            || name_up.contains("RTX 50")
+            || name_up.contains(" 40")
+            || name_up.contains(" 50"));
+    let is_modern_gpu = matches!(vendor_id, 0x10DE | 0x1002 | 0x8086);
+
+    let upscaler_tag = match up_env.as_str() {
+        "off" | "none" | "0" => "",
+        "dlss" => "DLSS",
+        "fsr" => "FSR",
+        _ => {
+            if is_nvidia_rtx {
+                "DLSS"
+            } else {
+                "FSR"
+            }
+        }
+    };
+
+    let (rcas_sharpness, qual_tag) = if upscaler_tag.is_empty() {
+        (0.0f32, "")
+    } else {
+        match qual_env.as_str() {
+            "balanced" => (0.65f32, "Balanced"),
+            "performance" | "perf" => (0.55f32, "Perf"),
+            "native" => (0.35f32, "Native"),
+            _ => (0.75f32, "Quality"),
+        }
+    };
+
+    let disable_fg = std::env::var_os("ORBIS_OFFSCREEN").is_some()
+        || std::env::var_os("ORBIS_VK_DUMP").is_some()
+        || std::env::var_os("ORBIS_HIDDEN").is_some();
+    let fg_mult: u32 = if disable_fg {
+        1
+    } else {
+        match fg_env.as_str() {
+            "off" | "none" | "1x" | "0" => 1,
+            "2x" | "2" => 2,
+            "3x" | "3" => 3,
+            _ => {
+                if is_rtx_40_50 {
+                    3
+                } else if is_modern_gpu {
+                    2
+                } else {
+                    1
+                }
+            }
+        }
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    if !upscaler_tag.is_empty() {
+        parts.push(format!("{upscaler_tag} {qual_tag}"));
+    }
+    if fg_mult > 1 {
+        parts.push(format!("FG {fg_mult}x"));
+    }
+    let label = parts.join(" | ");
+    (rcas_sharpness, fg_mult, label)
+}
+
+unsafe fn choose_present_mode(
+    surface_loader: &ash::khr::surface::Instance,
+    physical: vk::PhysicalDevice,
+    surface: vk::SurfaceKHR,
+) -> vk::PresentModeKHR {
+    let modes = surface_loader
+        .get_physical_device_surface_present_modes(physical, surface)
+        .unwrap_or_default();
+    if modes.contains(&vk::PresentModeKHR::MAILBOX) {
+        vk::PresentModeKHR::MAILBOX
+    } else if modes.contains(&vk::PresentModeKHR::FIFO_RELAXED) {
+        vk::PresentModeKHR::FIFO_RELAXED
+    } else {
+        vk::PresentModeKHR::FIFO
+    }
+}
 
 /// Quarantines a faulty GPU-VS shader at runtime so subsequent frames automatically fall back
 /// to the CPU hoisted vertex shader without crashing or stalling the GPU.
@@ -221,6 +318,19 @@ pub struct VkRenderer {
     pub last_frame_gpu_vs: Vec<usize>,
     pub healthy_gpu_vs: std::collections::HashSet<usize>,
     pub device_lost: bool,
+    /// Hardware-aware Vulkan upscaler (RCAS) & Optical-Flow FrameGen (2x/3x) state.
+    pub rcas_sharpness: f32,
+    pub fg_mult: u32,
+    pub rcas_layout: vk::PipelineLayout,
+    pub rcas_pipe: vk::Pipeline,
+    pub fg_dset_layout: vk::DescriptorSetLayout,
+    pub fg_layout: vk::PipelineLayout,
+    pub fg_pipe: vk::Pipeline,
+    pub fg_hist: [Option<VkTarget>; 2],
+    pub fg_dsets: [vk::DescriptorSet; 2],
+    pub fg_idx: usize,
+    pub fg_has_prev: bool,
+    pub fg_size: (u32, u32),
 }
 
 unsafe impl Send for VkRenderer {}
@@ -348,7 +458,14 @@ impl VkRenderer {
         let (physical, queue_family, _) = chosen.ok_or_else(|| "no Vulkan graphics+present GPU".to_string())?;
         let props = instance.get_physical_device_properties(physical);
         let gpu_name = CStr::from_ptr(props.device_name.as_ptr()).to_string_lossy();
-        eprintln!("[orbis] Vulkan: using {gpu_name} (queue family {queue_family})");
+        let (rcas_sharpness, fg_mult, mode_label) = detect_render_mode(props.vendor_id, &gpu_name);
+        let _ = RENDER_MODE_LABEL.set(mode_label.clone());
+        eprintln!(
+            "[orbis] Vulkan: using {gpu_name} (vendor={:#06x}, queue family {queue_family}) -> mode={} (rcas={rcas_sharpness:.2}, fg={}x)",
+            props.vendor_id,
+            if mode_label.is_empty() { "Native" } else { &mode_label },
+            fg_mult
+        );
 
         let prio = [1.0f32];
         let q_ci = [vk::DeviceQueueCreateInfo::default()
@@ -383,6 +500,7 @@ impl VkRenderer {
             }
         };
         let min_images = (caps.min_image_count + 1).min(if caps.max_image_count > 0 { caps.max_image_count } else { 3 });
+        let present_mode = choose_present_mode(&surface_loader, physical, surface);
         let sc_ci = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
             .min_image_count(min_images)
@@ -394,7 +512,7 @@ impl VkRenderer {
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(caps.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(vk::PresentModeKHR::FIFO)
+            .present_mode(present_mode)
             .clipped(true);
         let swapchain = swapchain_loader
             .create_swapchain(&sc_ci, None)
@@ -508,6 +626,18 @@ impl VkRenderer {
             last_frame_gpu_vs: Vec::new(),
             healthy_gpu_vs: std::collections::HashSet::new(),
             device_lost: false,
+            rcas_sharpness,
+            fg_mult,
+            rcas_layout: vk::PipelineLayout::null(),
+            rcas_pipe: vk::Pipeline::null(),
+            fg_dset_layout: vk::DescriptorSetLayout::null(),
+            fg_layout: vk::PipelineLayout::null(),
+            fg_pipe: vk::Pipeline::null(),
+            fg_hist: [None, None],
+            fg_dsets: [vk::DescriptorSet::null(), vk::DescriptorSet::null()],
+            fg_idx: 0,
+            fg_has_prev: false,
+            fg_size: (0, 0),
         };
         if let Err(e) = r.init_blit_pipeline() {
             eprintln!("[orbis] Vulkan: blit pipeline init warning: {e}");
@@ -705,13 +835,243 @@ impl VkRenderer {
         self.init_white_texture();
 
         self.quad_pipe = self.create_quad_pipeline(swap_rp, pl).unwrap_or(vk::Pipeline::null());
+        self.init_post_pipelines(swap_rp, dsl);
         self.blit_ready = true;
         eprintln!(
-            "[orbis] Vulkan: SPIR-V fullscreen blit + indexed quad pipelines compiled on GPU (quad={}, fbs={})",
+            "[orbis] Vulkan: SPIR-V fullscreen blit + indexed quad + RCAS({}) + FrameGen({}) pipelines compiled on GPU (quad={}, fbs={})",
+            self.rcas_pipe != vk::Pipeline::null(),
+            self.fg_pipe != vk::Pipeline::null(),
             self.quad_pipe != vk::Pipeline::null(),
             self.swap_fbs.len()
         );
         Ok(())
+    }
+
+    unsafe fn init_post_pipelines(&mut self, swap_rp: vk::RenderPass, blit_dsl: vk::DescriptorSetLayout) {
+        let vs_code = crate::shader::spv_fullscreen_vs();
+        let Ok(vs_mod) = self.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&vs_code), None) else {
+            return;
+        };
+        let entry = c"main";
+        let vi = vk::PipelineVertexInputStateCreateInfo::default();
+        let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+        let rs = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .line_width(1.0);
+        let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let cba = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
+        let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&cba);
+        let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let ds = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+        let pc_ranges = [vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+            offset: 0,
+            size: 16,
+        }];
+
+        // 1. RCAS Contrast-Adaptive Sharpening / Upscale pipeline
+        let rcas_code = crate::shader::spv_rcas_upscale_fs();
+        if let Ok(rcas_fs) = self.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&rcas_code), None) {
+            let dsls = [blit_dsl];
+            if let Ok(pl) = self.device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&dsls).push_constant_ranges(&pc_ranges),
+                None,
+            ) {
+                let stages = [
+                    vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vs_mod).name(entry),
+                    vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(rcas_fs).name(entry),
+                ];
+                let gp_ci = [vk::GraphicsPipelineCreateInfo::default()
+                    .stages(&stages)
+                    .vertex_input_state(&vi)
+                    .input_assembly_state(&ia)
+                    .viewport_state(&vp)
+                    .rasterization_state(&rs)
+                    .multisample_state(&ms)
+                    .color_blend_state(&cb)
+                    .dynamic_state(&ds)
+                    .layout(pl)
+                    .render_pass(swap_rp)];
+                if let Ok(pipes) = self.device.create_graphics_pipelines(vk::PipelineCache::null(), &gp_ci, None) {
+                    self.rcas_layout = pl;
+                    self.rcas_pipe = pipes[0];
+                } else {
+                    self.device.destroy_pipeline_layout(pl, None);
+                }
+            }
+            self.device.destroy_shader_module(rcas_fs, None);
+        }
+
+        // 2. Optical-Flow FrameGen (2x/3x) pipeline (2 combined image samplers: prev + curr)
+        let fg_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
+        if let Ok(fg_dsl) = self.device.create_descriptor_set_layout(
+            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&fg_bindings),
+            None,
+        ) {
+            let fg_code = crate::shader::spv_framegen_fs();
+            if let Ok(fg_fs) = self.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&fg_code), None) {
+                let dsls = [fg_dsl];
+                if let Ok(pl) = self.device.create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo::default().set_layouts(&dsls).push_constant_ranges(&pc_ranges),
+                    None,
+                ) {
+                    let stages = [
+                        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vs_mod).name(entry),
+                        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fg_fs).name(entry),
+                    ];
+                    let gp_ci = [vk::GraphicsPipelineCreateInfo::default()
+                        .stages(&stages)
+                        .vertex_input_state(&vi)
+                        .input_assembly_state(&ia)
+                        .viewport_state(&vp)
+                        .rasterization_state(&rs)
+                        .multisample_state(&ms)
+                        .color_blend_state(&cb)
+                        .dynamic_state(&ds)
+                        .layout(pl)
+                        .render_pass(swap_rp)];
+                    if let Ok(pipes) = self.device.create_graphics_pipelines(vk::PipelineCache::null(), &gp_ci, None) {
+                        let alloc_dsls = [fg_dsl, fg_dsl];
+                        if let Ok(sets) = self.device.allocate_descriptor_sets(
+                            &vk::DescriptorSetAllocateInfo::default().descriptor_pool(self.desc_pool).set_layouts(&alloc_dsls),
+                        ) {
+                            self.fg_dset_layout = fg_dsl;
+                            self.fg_layout = pl;
+                            self.fg_pipe = pipes[0];
+                            self.fg_dsets = [sets[0], sets[1]];
+                        } else {
+                            self.device.destroy_pipeline(pipes[0], None);
+                            self.device.destroy_pipeline_layout(pl, None);
+                            self.device.destroy_descriptor_set_layout(fg_dsl, None);
+                        }
+                    } else {
+                        self.device.destroy_pipeline_layout(pl, None);
+                        self.device.destroy_descriptor_set_layout(fg_dsl, None);
+                    }
+                } else {
+                    self.device.destroy_descriptor_set_layout(fg_dsl, None);
+                }
+                self.device.destroy_shader_module(fg_fs, None);
+            } else {
+                self.device.destroy_descriptor_set_layout(fg_dsl, None);
+            }
+        }
+        self.device.destroy_shader_module(vs_mod, None);
+    }
+
+    unsafe fn ensure_fg_history(&mut self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 || self.fg_pipe == vk::Pipeline::null() {
+            return false;
+        }
+        if self.fg_size == (width, height) && self.fg_hist[0].is_some() && self.fg_hist[1].is_some() {
+            return true;
+        }
+        for slot in &mut self.fg_hist {
+            if let Some(old) = slot.take() {
+                self.device.destroy_image_view(old.view, None);
+                self.device.destroy_image(old.image, None);
+                self.device.free_memory(old.memory, None);
+            }
+        }
+        self.fg_has_prev = false;
+        self.fg_idx = 0;
+        self.fg_size = (0, 0);
+        let mut created: [Option<VkTarget>; 2] = [None, None];
+        for slot in &mut created {
+            let img_ci = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(vk::Format::B8G8R8A8_UNORM)
+                .extent(vk::Extent3D { width, height, depth: 1 })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let Ok(image) = self.device.create_image(&img_ci, None) else {
+                return false;
+            };
+            let req = self.device.get_image_memory_requirements(image);
+            let Some(mi) = self.find_mem_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL) else {
+                self.device.destroy_image(image, None);
+                return false;
+            };
+            let Ok(memory) = self.device.allocate_memory(
+                &vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mi),
+                None,
+            ) else {
+                self.device.destroy_image(image, None);
+                return false;
+            };
+            if self.device.bind_image_memory(image, memory, 0).is_err() {
+                self.device.destroy_image(image, None);
+                self.device.free_memory(memory, None);
+                return false;
+            }
+            let Ok(view) = self.device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(vk::Format::B8G8R8A8_UNORM)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }),
+                None,
+            ) else {
+                self.device.destroy_image(image, None);
+                self.device.free_memory(memory, None);
+                return false;
+            };
+            *slot = Some(VkTarget { image, memory, view, width, height });
+        }
+        let v0 = created[0].as_ref().unwrap().view;
+        let v1 = created[1].as_ref().unwrap().view;
+        // fg_dsets[0]: curr=0 (binding 1), prev=1 (binding 0)
+        // fg_dsets[1]: curr=1 (binding 1), prev=0 (binding 0)
+        let pairs = [(self.fg_dsets[0], v1, v0), (self.fg_dsets[1], v0, v1)];
+        for (ds, prev_v, curr_v) in pairs {
+            let i0 = [vk::DescriptorImageInfo::default()
+                .sampler(self.sampler)
+                .image_view(prev_v)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let i1 = [vk::DescriptorImageInfo::default()
+                .sampler(self.sampler)
+                .image_view(curr_v)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let writes = [
+                vk::WriteDescriptorSet::default()
+                    .dst_set(ds)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&i0),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(ds)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&i1),
+            ];
+            self.device.update_descriptor_sets(&writes, &[]);
+        }
+        self.fg_hist = created;
+        self.fg_size = (width, height);
+        true
     }
 
     pub fn recreate_swapchain(&mut self, width: u32, height: u32) -> bool {
@@ -741,6 +1101,7 @@ impl VkRenderer {
                 .and_then(|fmts| fmts.iter().find(|f| f.format == self.swap_format).map(|f| f.color_space))
                 .unwrap_or(vk::ColorSpaceKHR::SRGB_NONLINEAR);
             let min_images = (caps.min_image_count + 1).min(if caps.max_image_count > 0 { caps.max_image_count } else { 3 });
+            let present_mode = choose_present_mode(&self.surface_loader, self.physical, self.surface);
             let old_swapchain = self.swapchain;
             let sc_ci = vk::SwapchainCreateInfoKHR::default()
                 .surface(self.surface)
@@ -753,7 +1114,7 @@ impl VkRenderer {
                 .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .pre_transform(caps.current_transform)
                 .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                .present_mode(vk::PresentModeKHR::FIFO)
+                .present_mode(present_mode)
                 .clipped(true)
                 .old_swapchain(old_swapchain);
             let Ok(new_sc) = self.swapchain_loader.create_swapchain(&sc_ci, None) else {
@@ -773,6 +1134,7 @@ impl VkRenderer {
             self.swapchain = new_sc;
             self.swap_images = new_images;
             self.swap_extent = swap_extent;
+            self.fg_has_prev = false;
             if self.swap_rp != vk::RenderPass::null() {
                 for &img in &self.swap_images {
                     let Ok(view) = self.device.create_image_view(
@@ -2655,9 +3017,38 @@ impl VkRenderer {
                     self.device.unmap_memory(self.imem);
                 }
             }
-            let Some(img_idx) = self.acquire_swapchain_image() else {
-                return false;
+            // ORBIS_VK_DUMP=<dir>: copy every 120th shown frame back for checking.
+            static DUMP_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let dump_dir = std::env::var("ORBIS_VK_DUMP").ok();
+            let n = DUMP_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (ew, eh) = (self.swap_extent.width, self.swap_extent.height);
+            let dump = dump_dir.is_some()
+                && (n % 120 == 60 || n % 120 == 61 || ((gverts.len() > 5000 || gi_max > 5000) && n % 30 == 0))
+                && self.ensure_staging((ew * eh * 4) as usize);
+
+            let use_fg = !dump
+                && self.fg_mult > 1
+                && self.fg_pipe != vk::Pipeline::null()
+                && self.swap_rp != vk::RenderPass::null()
+                && !self.swap_fbs.is_empty()
+                && self.ensure_fg_history(display.1, display.2);
+
+            let disp_dset = if !dump && self.rcas_sharpness > 0.0 && self.rcas_pipe != vk::Pipeline::null() && self.swap_rp != vk::RenderPass::null() && !self.swap_fbs.is_empty() {
+                let view = self.targets[&display.0].view;
+                self.dset_for(view, [0, 0, (1 << 20) | (1 << 22), 0])
+            } else {
+                None
             };
+
+            let initial_img_idx = if use_fg {
+                None
+            } else {
+                let Some(idx) = self.acquire_swapchain_image() else {
+                    return false;
+                };
+                Some(idx)
+            };
+
             let _ = self.device.reset_fences(&[self.fence]);
             let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
             let _ = self.device.begin_command_buffer(self.cmd_buf, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
@@ -2800,70 +3191,6 @@ impl VkRenderer {
                 self.device.cmd_end_render_pass(self.cmd_buf);
             }
 
-            // Show the display buffer.
-            let swap_img = self.swap_images[img_idx as usize];
-            let sub = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
-            let layers = vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 };
-            if !cleared.contains(&display.0) && *self.rt_layouts.get(&display.0).unwrap_or(&vk::ImageLayout::UNDEFINED) == vk::ImageLayout::UNDEFINED {
-                self.rt_barrier(display.0, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-                let img = self.targets[&display.0].image;
-                let c = vk::ClearColorValue { float32: clear_rgba };
-                self.device.cmd_clear_color_image(self.cmd_buf, img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &c, &[sub]);
-            }
-            self.rt_barrier(display.0, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-            let to_dst = [vk::ImageMemoryBarrier::default()
-                .image(swap_img)
-                .subresource_range(sub)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
-            self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &to_dst);
-            let (dw, dh) = (display.1 as i32, display.2 as i32);
-            let blit = vk::ImageBlit {
-                src_subresource: layers,
-                src_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: dw, y: dh, z: 1 }],
-                dst_subresource: layers,
-                dst_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: self.swap_extent.width as i32, y: self.swap_extent.height as i32, z: 1 }],
-            };
-            let disp_img = self.targets[&display.0].image;
-            self.device.cmd_blit_image(self.cmd_buf, disp_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::LINEAR);
-
-            // ORBIS_VK_DUMP=<dir>: copy every 120th shown frame back for checking.
-            static DUMP_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let dump_dir = std::env::var("ORBIS_VK_DUMP").ok();
-            let n = DUMP_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let (ew, eh) = (self.swap_extent.width, self.swap_extent.height);
-            let dump = dump_dir.is_some()
-                && (n % 120 == 60 || n % 120 == 61 || ((gverts.len() > 5000 || gi_max > 5000) && n % 30 == 0))
-                && self.ensure_staging((ew * eh * 4) as usize);
-            let mut swap_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
-            if dump {
-                let b = [vk::ImageMemoryBarrier::default()
-                    .image(swap_img)
-                    .subresource_range(sub)
-                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)];
-                self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &b);
-                let region = [vk::BufferImageCopy::default().image_subresource(layers).image_extent(vk::Extent3D { width: ew, height: eh, depth: 1 })];
-                self.device.cmd_copy_image_to_buffer(self.cmd_buf, swap_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, self.staging_buf, &region);
-                swap_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
-            }
-            let to_present = [vk::ImageMemoryBarrier::default()
-                .image(swap_img)
-                .subresource_range(sub)
-                .old_layout(swap_layout)
-                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
-            self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &to_present);
-            let _ = self.device.end_command_buffer(self.cmd_buf);
-
-            let wait_sems = [self.image_avail];
-            let sig_sems = [self.render_done];
-            let wait_stages = [vk::PipelineStageFlags::TRANSFER];
-            let cmds = [self.cmd_buf];
-            let submit = [vk::SubmitInfo::default().wait_semaphores(&wait_sems).wait_dst_stage_mask(&wait_stages).command_buffers(&cmds).signal_semaphores(&sig_sems)];
             // Record active GPU-VS shaders in this frame for the next frame's GPU watchdog.
             self.last_frame_gpu_vs.clear();
             for it in &items {
@@ -2874,6 +3201,251 @@ impl VkRenderer {
                     }
                 }
             }
+
+            // Show the display buffer.
+            let sub = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+            let layers = vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 };
+            if !cleared.contains(&display.0) && *self.rt_layouts.get(&display.0).unwrap_or(&vk::ImageLayout::UNDEFINED) == vk::ImageLayout::UNDEFINED {
+                self.rt_barrier(display.0, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+                let img = self.targets[&display.0].image;
+                let c = vk::ClearColorValue { float32: clear_rgba };
+                self.device.cmd_clear_color_image(self.cmd_buf, img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &c, &[sub]);
+            }
+            let (dw, dh) = (display.1 as i32, display.2 as i32);
+            let disp_img = self.targets[&display.0].image;
+
+            if use_fg {
+                // Step 1: Copy display buffer into current FrameGen history slot & finish offscreen render.
+                let hist_img = self.fg_hist[self.fg_idx].as_ref().unwrap().image;
+                self.rt_barrier(display.0, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+                let hist_to_dst = [vk::ImageMemoryBarrier::default()
+                    .image(hist_img)
+                    .subresource_range(sub)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+                self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &hist_to_dst);
+                let hist_blit = vk::ImageBlit {
+                    src_subresource: layers,
+                    src_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: dw, y: dh, z: 1 }],
+                    dst_subresource: layers,
+                    dst_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: dw, y: dh, z: 1 }],
+                };
+                self.device.cmd_blit_image(self.cmd_buf, disp_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, hist_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[hist_blit], vk::Filter::NEAREST);
+                let hist_to_read = [vk::ImageMemoryBarrier::default()
+                    .image(hist_img)
+                    .subresource_range(sub)
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)];
+                self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &hist_to_read);
+                if disp_dset.is_some() {
+                    self.rt_barrier(display.0, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                }
+                let _ = self.device.end_command_buffer(self.cmd_buf);
+                let cmds = [self.cmd_buf];
+                let submit = [vk::SubmitInfo::default().command_buffers(&cmds)];
+                if let Err(e) = self.device.queue_submit(self.queue, &submit, self.fence) {
+                    eprintln!("[orbis] AUTO-HEAL: fg offscreen queue_submit failed ({e:?})");
+                    self.quarantine_active_gpu_vs(&format!("fg submit {e:?}"));
+                    if e == vk::Result::ERROR_DEVICE_LOST {
+                        self.device_lost = true;
+                    }
+                    return false;
+                }
+                if let Err(e) = self.device.wait_for_fences(&[self.fence], true, 400_000_000) {
+                    eprintln!("[orbis] AUTO-HEAL: fg offscreen wait_for_fences failed ({e:?})");
+                    self.quarantine_active_gpu_vs(&format!("fg fence {e:?}"));
+                    if e == vk::Result::ERROR_DEVICE_LOST {
+                        self.device_lost = true;
+                    }
+                    return false;
+                }
+
+                let vp = [vk::Viewport { x: 0.0, y: 0.0, width: ew as f32, height: eh as f32, min_depth: 0.0, max_depth: 1.0 }];
+                let sc = [vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.swap_extent }];
+                let clear_val = [vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } }];
+
+                // Step 2: Present (fg_mult - 1) motion-compensated interpolated frames between prev & curr.
+                if self.fg_has_prev {
+                    let fg_ds = self.fg_dsets[self.fg_idx];
+                    for k in 1..self.fg_mult {
+                        let Some(inter_idx) = self.acquire_swapchain_image() else {
+                            break;
+                        };
+                        let _ = self.device.reset_fences(&[self.fence]);
+                        let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
+                        let _ = self.device.begin_command_buffer(self.cmd_buf, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+                        let rp_bi = vk::RenderPassBeginInfo::default()
+                            .render_pass(self.swap_rp)
+                            .framebuffer(self.swap_fbs[inter_idx as usize])
+                            .render_area(sc[0])
+                            .clear_values(&clear_val);
+                        self.device.cmd_begin_render_pass(self.cmd_buf, &rp_bi, vk::SubpassContents::INLINE);
+                        self.device.cmd_set_viewport(self.cmd_buf, 0, &vp);
+                        self.device.cmd_set_scissor(self.cmd_buf, 0, &sc);
+                        self.device.cmd_bind_pipeline(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, self.fg_pipe);
+                        self.device.cmd_bind_descriptor_sets(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, self.fg_layout, 0, &[fg_ds], &[]);
+                        let t_blend = k as f32 / self.fg_mult as f32;
+                        let params = [1.0 / (display.1.max(1) as f32), 1.0 / (display.2.max(1) as f32), t_blend, 0.0f32];
+                        let pbytes = std::slice::from_raw_parts(params.as_ptr() as *const u8, 16);
+                        self.device.cmd_push_constants(self.cmd_buf, self.fg_layout, vk::ShaderStageFlags::FRAGMENT, 0, pbytes);
+                        self.device.cmd_draw(self.cmd_buf, 3, 1, 0, 0);
+                        self.device.cmd_end_render_pass(self.cmd_buf);
+                        let _ = self.device.end_command_buffer(self.cmd_buf);
+                        let wait_sems = [self.image_avail];
+                        let sig_sems = [self.render_done];
+                        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+                        let cmds = [self.cmd_buf];
+                        let submit = [vk::SubmitInfo::default().wait_semaphores(&wait_sems).wait_dst_stage_mask(&wait_stages).command_buffers(&cmds).signal_semaphores(&sig_sems)];
+                        if self.device.queue_submit(self.queue, &submit, self.fence).is_err() {
+                            break;
+                        }
+                        self.present_swapchain_image(inter_idx);
+                        let _ = self.device.wait_for_fences(&[self.fence], true, 400_000_000);
+                    }
+                }
+
+                // Step 3: Present the real curr frame (through RCAS if enabled, else linear blit).
+                let Some(real_idx) = self.acquire_swapchain_image() else {
+                    self.fg_idx ^= 1;
+                    self.fg_has_prev = true;
+                    return false;
+                };
+                let _ = self.device.reset_fences(&[self.fence]);
+                let _ = self.device.reset_command_buffer(self.cmd_buf, vk::CommandBufferResetFlags::empty());
+                let _ = self.device.begin_command_buffer(self.cmd_buf, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT));
+                let wait_stage = if let Some(ds) = disp_dset {
+                    let rp_bi = vk::RenderPassBeginInfo::default()
+                        .render_pass(self.swap_rp)
+                        .framebuffer(self.swap_fbs[real_idx as usize])
+                        .render_area(sc[0])
+                        .clear_values(&clear_val);
+                    self.device.cmd_begin_render_pass(self.cmd_buf, &rp_bi, vk::SubpassContents::INLINE);
+                    self.device.cmd_set_viewport(self.cmd_buf, 0, &vp);
+                    self.device.cmd_set_scissor(self.cmd_buf, 0, &sc);
+                    self.device.cmd_bind_pipeline(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, self.rcas_pipe);
+                    self.device.cmd_bind_descriptor_sets(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, self.rcas_layout, 0, &[ds], &[]);
+                    let params = [1.0 / (display.1.max(1) as f32), 1.0 / (display.2.max(1) as f32), self.rcas_sharpness, 0.0f32];
+                    let pbytes = std::slice::from_raw_parts(params.as_ptr() as *const u8, 16);
+                    self.device.cmd_push_constants(self.cmd_buf, self.rcas_layout, vk::ShaderStageFlags::FRAGMENT, 0, pbytes);
+                    self.device.cmd_draw(self.cmd_buf, 3, 1, 0, 0);
+                    self.device.cmd_end_render_pass(self.cmd_buf);
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                } else {
+                    let swap_img = self.swap_images[real_idx as usize];
+                    let to_dst = [vk::ImageMemoryBarrier::default()
+                        .image(swap_img)
+                        .subresource_range(sub)
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+                    self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &to_dst);
+                    let blit = vk::ImageBlit {
+                        src_subresource: layers,
+                        src_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: dw, y: dh, z: 1 }],
+                        dst_subresource: layers,
+                        dst_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: ew as i32, y: eh as i32, z: 1 }],
+                    };
+                    self.device.cmd_blit_image(self.cmd_buf, disp_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::LINEAR);
+                    let to_present = [vk::ImageMemoryBarrier::default()
+                        .image(swap_img)
+                        .subresource_range(sub)
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+                    self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &to_present);
+                    vk::PipelineStageFlags::TRANSFER
+                };
+                let _ = self.device.end_command_buffer(self.cmd_buf);
+                let wait_sems = [self.image_avail];
+                let sig_sems = [self.render_done];
+                let wait_stages = [wait_stage];
+                let cmds = [self.cmd_buf];
+                let submit = [vk::SubmitInfo::default().wait_semaphores(&wait_sems).wait_dst_stage_mask(&wait_stages).command_buffers(&cmds).signal_semaphores(&sig_sems)];
+                if let Err(e) = self.device.queue_submit(self.queue, &submit, self.fence) {
+                    eprintln!("[orbis] AUTO-HEAL: fg final queue_submit failed ({e:?})");
+                    if e == vk::Result::ERROR_DEVICE_LOST {
+                        self.device_lost = true;
+                    }
+                    return false;
+                }
+                self.present_swapchain_image(real_idx);
+                self.fg_idx ^= 1;
+                self.fg_has_prev = true;
+                return true;
+            }
+
+            let img_idx = initial_img_idx.unwrap();
+            let swap_img = self.swap_images[img_idx as usize];
+            let wait_stage = if let Some(ds) = disp_dset {
+                self.rt_barrier(display.0, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                let vp = [vk::Viewport { x: 0.0, y: 0.0, width: ew as f32, height: eh as f32, min_depth: 0.0, max_depth: 1.0 }];
+                let sc = [vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.swap_extent }];
+                let clear_val = [vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } }];
+                let rp_bi = vk::RenderPassBeginInfo::default()
+                    .render_pass(self.swap_rp)
+                    .framebuffer(self.swap_fbs[img_idx as usize])
+                    .render_area(sc[0])
+                    .clear_values(&clear_val);
+                self.device.cmd_begin_render_pass(self.cmd_buf, &rp_bi, vk::SubpassContents::INLINE);
+                self.device.cmd_set_viewport(self.cmd_buf, 0, &vp);
+                self.device.cmd_set_scissor(self.cmd_buf, 0, &sc);
+                self.device.cmd_bind_pipeline(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, self.rcas_pipe);
+                self.device.cmd_bind_descriptor_sets(self.cmd_buf, vk::PipelineBindPoint::GRAPHICS, self.rcas_layout, 0, &[ds], &[]);
+                let params = [1.0 / (display.1.max(1) as f32), 1.0 / (display.2.max(1) as f32), self.rcas_sharpness, 0.0f32];
+                let pbytes = std::slice::from_raw_parts(params.as_ptr() as *const u8, 16);
+                self.device.cmd_push_constants(self.cmd_buf, self.rcas_layout, vk::ShaderStageFlags::FRAGMENT, 0, pbytes);
+                self.device.cmd_draw(self.cmd_buf, 3, 1, 0, 0);
+                self.device.cmd_end_render_pass(self.cmd_buf);
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+            } else {
+                self.rt_barrier(display.0, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+                let to_dst = [vk::ImageMemoryBarrier::default()
+                    .image(swap_img)
+                    .subresource_range(sub)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+                self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &to_dst);
+                let blit = vk::ImageBlit {
+                    src_subresource: layers,
+                    src_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: dw, y: dh, z: 1 }],
+                    dst_subresource: layers,
+                    dst_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, vk::Offset3D { x: ew as i32, y: eh as i32, z: 1 }],
+                };
+                self.device.cmd_blit_image(self.cmd_buf, disp_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, swap_img, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::LINEAR);
+                let mut swap_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+                if dump {
+                    let b = [vk::ImageMemoryBarrier::default()
+                        .image(swap_img)
+                        .subresource_range(sub)
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)];
+                    self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &b);
+                    let region = [vk::BufferImageCopy::default().image_subresource(layers).image_extent(vk::Extent3D { width: ew, height: eh, depth: 1 })];
+                    self.device.cmd_copy_image_to_buffer(self.cmd_buf, swap_img, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, self.staging_buf, &region);
+                    swap_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+                }
+                let to_present = [vk::ImageMemoryBarrier::default()
+                    .image(swap_img)
+                    .subresource_range(sub)
+                    .old_layout(swap_layout)
+                    .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+                self.device.cmd_pipeline_barrier(self.cmd_buf, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[], &to_present);
+                vk::PipelineStageFlags::TRANSFER
+            };
+            let _ = self.device.end_command_buffer(self.cmd_buf);
+
+            let wait_sems = [self.image_avail];
+            let sig_sems = [self.render_done];
+            let wait_stages = [wait_stage];
+            let cmds = [self.cmd_buf];
+            let submit = [vk::SubmitInfo::default().wait_semaphores(&wait_sems).wait_dst_stage_mask(&wait_stages).command_buffers(&cmds).signal_semaphores(&sig_sems)];
             if let Err(e) = self.device.queue_submit(self.queue, &submit, self.fence) {
                 eprintln!("[orbis] AUTO-HEAL: queue_submit failed ({e:?})");
                 self.quarantine_active_gpu_vs(&format!("queue_submit {e:?}"));

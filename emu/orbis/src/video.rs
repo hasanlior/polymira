@@ -323,9 +323,12 @@ fn present(buf: &Buffer, n: u64) {
                 let (_, draws, dispatches) = crate::agc::stats();
                 let shaders = crate::gpu::SHADERS.lock().map(|s| s.len()).unwrap_or(0);
                 let name = std::env::var("ORBIS_TITLE").unwrap_or_else(|_| "PS5".into());
-                let title: Vec<u16> = format!(
-                    "POLYMIRA Orbis — {name} | {w}x{h} | Frame #{n} | {draws} draws, {dispatches} dispatches, {shaders} shaders\0"
-                ).encode_utf16().collect();
+                let badge = crate::vk::render_mode_label();
+                let title: Vec<u16> = if badge.is_empty() {
+                    format!("POLYMIRA Orbis — {name} | {w}x{h} | Frame #{n} | {draws} draws, {dispatches} dispatches, {shaders} shaders\0")
+                } else {
+                    format!("POLYMIRA Orbis — {name} | {badge} | {w}x{h} | Frame #{n}\0")
+                }.encode_utf16().collect();
                 windows_sys::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, title.as_ptr());
             }
             let clear = CLEAR_RGBA.lock().map(|c| *c).unwrap_or([0.12, 0.12, 0.12, 1.0]);
@@ -571,14 +574,29 @@ fn start_window() {
                 // calling ShowWindow twice guarantees the window becomes visible.
                 if offscreen {
                     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                } else if want_fs {
-                    SetWindowPos(hwnd, HWND_TOP, wx, wy, ww, wh, SWP_SHOWWINDOW | SWP_FRAMECHANGED);
-                    ShowWindow(hwnd, SW_SHOW);
-                    SetForegroundWindow(hwnd);
                 } else {
-                    ShowWindow(hwnd, SW_SHOW);
-                    ShowWindow(hwnd, SW_SHOWNORMAL);
-                    SetForegroundWindow(hwnd);
+                    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+                    let fg = GetForegroundWindow();
+                    let fg_tid = if !fg.is_null() { GetWindowThreadProcessId(fg, std::ptr::null_mut()) } else { 0 };
+                    let cur_tid = GetCurrentThreadId();
+                    let attached = fg_tid != 0 && fg_tid != cur_tid && AttachThreadInput(fg_tid, cur_tid, 1) != 0;
+                    if want_fs {
+                        SetWindowPos(hwnd, HWND_TOPMOST, wx, wy, ww, wh, SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+                        ShowWindow(hwnd, SW_SHOW);
+                        BringWindowToTop(hwnd);
+                        SetForegroundWindow(hwnd);
+                        SetWindowPos(hwnd, HWND_NOTOPMOST, wx, wy, ww, wh, SWP_SHOWWINDOW);
+                    } else {
+                        SetWindowPos(hwnd, HWND_TOPMOST, wx, wy, ww, wh, SWP_SHOWWINDOW);
+                        ShowWindow(hwnd, SW_SHOW);
+                        ShowWindow(hwnd, SW_SHOWNORMAL);
+                        BringWindowToTop(hwnd);
+                        SetForegroundWindow(hwnd);
+                        SetWindowPos(hwnd, HWND_NOTOPMOST, wx, wy, ww, wh, SWP_SHOWWINDOW);
+                    }
+                    if attached {
+                        AttachThreadInput(fg_tid, cur_tid, 0);
+                    }
                 }
                 windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0);
             }
