@@ -44,8 +44,16 @@ function sizeOf(sizes: string | null | undefined, fallback: number): number {
   return Math.max(0, ...sizes.split(/\s+/).map((s) => Number(s.split(/x/i)[0]) || 0)) || fallback
 }
 
+/** Banner image of an app (its site's og:image), shown on the store page. */
+export function appBannerFile(id: string): string {
+  return path.join(paths.cache, 'appicons', `${id.replace(/[^a-z0-9_-]/gi, '_')}__banner.png`)
+}
+
+let pendingBanner: string | null = null
+
 async function candidates(item: StoreItem): Promise<Candidate[]> {
   const out: Candidate[] = []
+  pendingBanner = item.banner ?? null
   if (item.icon) out.push({ url: item.icon, size: 10000 })
   if (!item.app) return out
   // The site's home page usually lists the big icons; app sub-pages (e.g. a TV UI) often do not.
@@ -58,6 +66,19 @@ async function candidates(item: StoreItem): Promise<Candidate[]> {
   const page = (await get(home)) ?? (await get(item.app.url))
   const base = page?.url || home
   const html = page ? (await page.text()).slice(0, 400_000) : ''
+  if (!pendingBanner) {
+    for (const tag of html.match(/<meta\b[^>]*>/gi) ?? []) {
+      const key = (attr(tag, 'property') ?? attr(tag, 'name') ?? '').toLowerCase()
+      const content = attr(tag, 'content')
+      if (!content || !/^(og:image(:secure_url)?|twitter:image)$/.test(key)) continue
+      try {
+        pendingBanner = new URL(content.replace(/&amp;/g, '&'), base).toString()
+        break
+      } catch {
+        // bad URL
+      }
+    }
+  }
   for (const tag of html.match(/<link\b[^>]*>/gi) ?? []) {
     const rel = (attr(tag, 'rel') ?? '').toLowerCase()
     const href = attr(tag, 'href')
@@ -111,11 +132,32 @@ async function download(url: string): Promise<Electron.NativeImage | null> {
   return img.isEmpty() ? null : img
 }
 
-/** Fetches and caches one app's icon. Returns true when a (new) icon was stored. */
+/** Saves the banner; when the site has none, a marker stops refetching until the next refresh. */
+async function saveBanner(item: StoreItem, url: string | null): Promise<boolean> {
+  const file = appBannerFile(item.id)
+  const marker = file.replace(/\.png$/, '.none')
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const img = url ? await download(url) : null
+  const size = img?.getSize()
+  if (!img || !size || size.width < 320 || size.height < 160) {
+    if (!fs.existsSync(file)) fs.writeFileSync(marker, '')
+    return false
+  }
+  fs.writeFileSync(file, (size.width > 1280 ? img.resize({ width: 1280, quality: 'best' }) : img).toPNG())
+  fs.rmSync(marker, { force: true })
+  return true
+}
+
+/** Fetches and caches one app's icon (and banner). Returns true when something new was stored. */
 export async function fetchAppIcon(item: StoreItem, force = false): Promise<boolean> {
   const file = appIconFile(item.id)
-  if (!force && fs.existsSync(file) && Date.now() - fs.statSync(file).mtimeMs < REFRESH_MS) return false
-  for (const c of (await candidates(item)).slice(0, 6)) {
+  const fresh = (f: string) => fs.existsSync(f) && Date.now() - fs.statSync(f).mtimeMs < REFRESH_MS
+  const bannerFresh = () => fresh(appBannerFile(item.id)) || fresh(appBannerFile(item.id).replace(/\.png$/, '.none'))
+  if (!force && fresh(file) && (!item.app || bannerFresh())) return false
+  const list = await candidates(item)
+  const banner = !bannerFresh() || force ? await saveBanner(item, pendingBanner).catch(() => false) : false
+  if (!force && fresh(file)) return banner
+  for (const c of list.slice(0, 6)) {
     const img = await download(c.url)
     if (!img) continue
     const { width } = img.getSize()
@@ -127,7 +169,7 @@ export async function fetchAppIcon(item: StoreItem, force = false): Promise<bool
   }
   // Keep an old icon rather than losing it when offline.
   if (fs.existsSync(file)) fs.utimesSync(file, new Date(), new Date())
-  return false
+  return banner
 }
 
 /** id → icon revision (file mtime) for every cached app icon. */

@@ -48,6 +48,12 @@ export interface StoreItem {
   author?: string
   /** Optional icon image URL (PNG/JPEG). Without it the icon is read from the app's website. */
   icon?: string
+  /** Optional wide image for the store page (PNG/JPEG). Without it, the site's og:image is used. */
+  banner?: string
+  /** Optional screenshots shown on the store page. */
+  screenshots?: string[]
+  /** Optional version shown on the store page. */
+  version?: string
   /** Store section the item is listed in (defaults by kind). */
   section?: string
   app?: StoreApp

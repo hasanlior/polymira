@@ -2,6 +2,17 @@
 
 All notable changes to POLYMIRA. Release notes are also shown in the app (Settings → About → What's new) and on the [website](https://hasanlior.github.io/polymira/changelog.html).
 
+## 0.1.2
+
+### New
+- **Store redesign**: new full-page store layout with wide banners, screenshots, version details, and animated inline install flow for apps, emulators, themes, and mods.
+- **Interface styles & themes**: new layout styles, themes, silent launcher starts, PS button support over HID, and PS3/PS4 compatibility lists.
+- **POLYMIRA Orbis (experimental PS4/PS5 core)**: built-in Rust emulation core with Vulkan renderer, RDNA2 shader decoder & GPU vertex offload, GFX10 texture untiling, AudioOut2, save data mounting, and live controller/keyboard input. Decrypted PS5 game folders are recognised by the scanner and launch directly with Orbis.
+
+### Fixed
+- App icons in Store now fetch crisp website icons and Open Graph banners reliably.
+- Added English translations for all new Store and Orbis UI strings.
+
 ## 0.1.1
 
 ### New

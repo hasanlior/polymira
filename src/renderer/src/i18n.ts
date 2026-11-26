@@ -598,7 +598,31 @@ const EN: Record<string, string> = {
   'Bana bir oyun seç': 'Pick a game for me',
   'Kütüphanenden rastgele bir oyun; önce hiç oynamadıkların': "A random game from your library, unplayed ones first",
   'Emülatörlerde kenarlıksız tam ekran': 'Borderless full screen in emulators',
-  'Oyun içi menünün emülatörlerin üstünde görünmesi için RetroArch, DuckStation, PCSX2 ve Dolphin kenarlıksız tam ekrana alınır': 'RetroArch, DuckStation, PCSX2 and Dolphin are set to borderless full screen so the in-game menu can appear over them'
+  'Oyun içi menünün emülatörlerin üstünde görünmesi için RetroArch, DuckStation, PCSX2 ve Dolphin kenarlıksız tam ekrana alınır': 'RetroArch, DuckStation, PCSX2 and Dolphin are set to borderless full screen so the in-game menu can appear over them',
+  'POLYMIRA Orbis penceresi açıldı.': 'POLYMIRA Orbis window opened.',
+  'TV arayüzü: yön tuşları, seç ve geri tuşlarıyla gezilir.': 'TV interface: navigate with directional keys, select and back.',
+  'Sol çubuk imleç, sağ çubuk kaydırma, sanal klavye.': 'Left stick cursor, right stick scroll, on-screen keyboard.',
+  Açılış: 'Startup',
+  'TV arayüzü': 'TV interface',
+  'İmleç ve sanal klavye': 'Cursor and on-screen keyboard',
+  Sürüm: 'Version',
+  'Ana ekranın düzenini değiştirir.': 'Changes the home screen layout.',
+  'Renkleri ve yazı stilini değiştirir.': 'Changes colors and typography.',
+  'Arka plan rengini değiştirir.': 'Changes the background color.',
+  Düzen: 'Layout',
+  Görünüm: 'Appearance',
+  'BIOS ve firmware dosyaları dahil değildir; resmi sürüm kaynağından indirilir.': 'BIOS and firmware files are not included; downloaded from the official release source.',
+  'Kurulu değil': 'Not installed',
+  'Modlar yalnızca görünümü değiştirir, kod çalıştıramaz.': 'Mods only change appearance and cannot run code.',
+  'Görünüm modu': 'Appearance mod',
+  Klasör: 'Folder',
+  'Topluluk modu: görünümü değiştirir, kod çalıştırmaz.': 'Community mod: changes appearance, does not run code.',
+  Araç: 'Tool',
+  İndirme: 'Download',
+  'İndiriliyor…': 'Downloading…',
+  Kurulamadı: 'Install failed',
+  'Önceki / sonraki': 'Previous / next',
+  'POLYMIRA Orbis ile deneysel. Şifresi çözülmüş oyun klasöründeki eboot.bin eklenir.': 'Experimental with POLYMIRA Orbis. Add eboot.bin from a decrypted game folder.'
 }
 
 /** Texts with names or numbers inside. */

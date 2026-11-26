@@ -291,6 +291,8 @@ export function App() {
   }, [state, pads, openModal, pushToast, catalog, refreshCatalog])
 
   const cats = useMemo(() => (ctx ? buildMenu(ctx) : []), [ctx])
+  // Development hook for the screenshot runner (src/main/shot.ts).
+  if (ctx) (window as unknown as { __poly: unknown }).__poly = ctx
 
   // A full-screen app (store, browser) covers the XMB: hide it and silence the ambience.
   const inApp = modals.some((m) => m.type === 'web' || m.type === 'store')

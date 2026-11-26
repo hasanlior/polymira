@@ -31,6 +31,9 @@ import { RETROARCH_CMD_PORT } from './emulators'
 import { backupAll, emulatorOfGame, openSaveFolder, refreshSaves, restoreBackup, savesSnapshot } from './saves'
 import { enterGameMode, exitGameMode, startExplorer } from './gameMode'
 import { getRuntime, initRuntime, readRuntime, runtimeFile, updateRuntime } from './runtime'
+import { prepareShotMode, runShotScript, shotDir } from './shot'
+
+prepareShotMode()
 
 /** Keyboard fallback for opening the in-game menu (works while the emulator has focus). */
 const OVERLAY_SHORTCUT = 'Control+Shift+Home'
@@ -45,6 +48,7 @@ protocol.registerSchemesAsPrivileged([
  * settings, artwork and app logins from the old data folder (Chromium caches are skipped).
  */
 function migrateLegacyData(): void {
+  if (shotDir) return
   const target = app.getPath('userData')
   if (fs.existsSync(path.join(target, 'settings.json'))) return
   for (const old of BRAND.legacyNames) {
@@ -224,8 +228,9 @@ function windowOptions(mode: WindowMode): Electron.BrowserWindowConstructorOptio
 function createMainWindow(): void {
   const old = mainWindow
   // `--windowed` forces a normal window (handy during development).
-  const mode = process.argv.includes('--windowed') ? 'windowed' : store.settings.windowMode
+  const mode = process.argv.includes('--windowed') || shotDir ? 'windowed' : store.settings.windowMode
   mainWindow = new BrowserWindow(windowOptions(mode))
+  runShotScript(mainWindow)
   if (!app.isPackaged) {
     mainWindow.webContents.on('console-message', (e) => {
       const d = e as unknown as { level: string | number; message: string }
@@ -236,6 +241,7 @@ function createMainWindow(): void {
   mainWindow.on('focus', () => send('window:focus', true))
   mainWindow.on('blur', () => send('window:focus', false))
   mainWindow.once('ready-to-show', () => {
+    if (shotDir) return
     mainWindow?.show()
     mainWindow?.focus()
   })
