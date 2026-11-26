@@ -1883,11 +1883,19 @@ impl VkRenderer {
             // (e.g. Minecraft's 2048x1024 terrain atlas drawn into by Flipbook before
             // being sampled for the first time), upload it into the new RT and mark persistent.
             let want_src = (((w as usize) + 127) / 128) * (((h as usize) + 127) / 128) * 65536;
-            let avail = Self::readable_bytes(addr, want_src);
+            // PS5 mipmapped 2048x1024 SW_64KB_R_X terrain atlas stores Mip 3 (2 tiles) +
+            // Mip 2 (8 tiles) + Mip 1 (32 tiles) = 42 tiles (0x2A0000 bytes) before Mip 0!
+            let mip0_off = if w == 2048 && h == 1024 && Self::readable_bytes(addr.wrapping_add(0x2A0000), want_src) >= want_src {
+                0x2A0000usize
+            } else {
+                0
+            };
+            let src_addr = addr.wrapping_add(mip0_off);
+            let avail = Self::readable_bytes(src_addr, want_src);
             if avail >= 65536 {
                 let words = avail / 8;
                 let step = (words / 512).max(1);
-                let p = addr as *const u64;
+                let p = src_addr as *const u64;
                 let mut hsum = 0xcbf2_9ce4_8422_2325u64;
                 let mut nz_cnt = 0u32;
                 let mut k = 0;
@@ -1900,10 +1908,10 @@ impl VkRenderer {
                     k += step;
                 }
                 if std::env::var_os("ORBIS_FRAME_STATS").is_some() {
-                    eprintln!("[orbis] ATLAS-SYNC(rt_target) {addr:#x} {w}x{h} avail={avail} nz={nz_cnt}/512");
+                    eprintln!("[orbis] ATLAS-SYNC(rt_target) {addr:#x}+{mip0_off:#x} {w}x{h} avail={avail} nz={nz_cnt}/512");
                 }
                 if nz_cnt > 0 {
-                    let src = std::slice::from_raw_parts(addr as *const u8, avail);
+                    let src = std::slice::from_raw_parts(src_addr as *const u8, avail);
                     let pixels = crate::tiling::untile_32bpp(src, w, h, 27 | (56 << 8) | (0xFAC << 20));
                     if w == 2048 && h == 1024 {
                         if let Ok(dir) = std::env::var("ORBIS_VK_DUMP") {
@@ -2461,11 +2469,17 @@ impl VkRenderer {
                                     } else {
                                         (((w as usize) + 127) / 128) * (((h as usize) + 127) / 128) * 65536
                                     };
-                                    let avail = Self::readable_bytes(a, want_src);
+                                    let mip0_off = if sw_mode == 27 && w == 2048 && h == 1024 && Self::readable_bytes(a.wrapping_add(0x2A0000), want_src) >= want_src {
+                                        0x2A0000usize
+                                    } else {
+                                        0
+                                    };
+                                    let src_a = a.wrapping_add(mip0_off);
+                                    let avail = Self::readable_bytes(src_a, want_src);
                                     if avail >= 64 {
                                         let words = avail / 8;
                                         let step = (words / 512).max(1);
-                                        let p = a as *const u64;
+                                        let p = src_a as *const u64;
                                         let mut hsum = 0xcbf2_9ce4_8422_2325u64;
                                         let mut nz_cnt = 0u32;
                                         let mut j = 0;
@@ -2482,10 +2496,10 @@ impl VkRenderer {
                                                 let img = t.image;
                                                 let (tw, th) = (t.width, t.height);
                                                 if std::env::var_os("ORBIS_FRAME_STATS").is_some() {
-                                                    eprintln!("[orbis] ATLAS-SYNC(sample) {a:#x} target={tw}x{th} tex={w}x{h} sw={sw_mode} nz={nz_cnt}/512");
+                                                    eprintln!("[orbis] ATLAS-SYNC(sample) {a:#x}+{mip0_off:#x} target={tw}x{th} tex={w}x{h} sw={sw_mode} nz={nz_cnt}/512");
                                                 }
                                                 if tw == w && th == h {
-                                                    let src = std::slice::from_raw_parts(a as *const u8, avail);
+                                                    let src = std::slice::from_raw_parts(src_a as *const u8, avail);
                                                     let pixels = crate::tiling::untile_32bpp(src, w, h, sw);
                                                     self.reupload_texture(img, w, h, &pixels);
                                                     self.rt_layouts.insert(a, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
