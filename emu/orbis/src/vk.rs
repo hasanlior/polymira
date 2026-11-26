@@ -1437,6 +1437,40 @@ impl VkRenderer {
         0
     }
 
+    /// Universal Self-Healing 2.0 Auto Mip-0 Calibrator for PS5 Oberon GFX10.3 `SW_64KB_R_X`
+    /// (`sw=27`) mipmapped 32bpp render-target atlases. Computes the exact mip-chain tile prefix
+    /// (e.g. `2048x1024 -> 42 tiles = 0x2A0000`, `1024x1024 -> 21 tiles = 0x150000`,
+    /// `2048x2048 -> 85 tiles = 0x550000`) and verifies non-zero occupancy at `addr + prefix`.
+    unsafe fn detect_sw27_mip0_offset(addr: usize, w: u32, h: u32, want_src: usize) -> usize {
+        if w < 256 || h < 256 || !w.is_power_of_two() || !h.is_power_of_two() {
+            return 0;
+        }
+        let mut prefix_tiles = 0usize;
+        let mut mw = w / 2;
+        let mut mh = h / 2;
+        while mw >= 128 && mh >= 128 {
+            prefix_tiles += (((mw as usize) + 127) / 128) * (((mh as usize) + 127) / 128);
+            mw /= 2;
+            mh /= 2;
+        }
+        if prefix_tiles == 0 {
+            return 0;
+        }
+        let off = prefix_tiles * 65536;
+        let mip0_addr = addr.wrapping_add(off);
+        if Self::readable_bytes(mip0_addr, want_src) < want_src {
+            return 0;
+        }
+        let tail_start = mip0_addr.wrapping_add(want_src.saturating_sub(65536));
+        let p = tail_start as *const u64;
+        for k in (0..(65536 / 8)).step_by(64) {
+            if p.add(k).read_unaligned() != 0 {
+                return off;
+            }
+        }
+        0
+    }
+
     /// Untiles and uploads a PS5 GFX10 8/16/32-bpp texture to a cached VkImage + VkDescriptorSet.
     unsafe fn ensure_sampled_texture(&mut self, addr: usize, width: u32, height: u32, swiz: u32) -> vk::DescriptorSet {
         if addr == 0 || width == 0 || height == 0 || width > 4096 || height > 4096 {
@@ -2254,13 +2288,7 @@ impl VkRenderer {
             // (e.g. Minecraft's 2048x1024 terrain atlas drawn into by Flipbook before
             // being sampled for the first time), upload it into the new RT and mark persistent.
             let want_src = (((w as usize) + 127) / 128) * (((h as usize) + 127) / 128) * 65536;
-            // PS5 mipmapped 2048x1024 SW_64KB_R_X terrain atlas stores Mip 3 (2 tiles) +
-            // Mip 2 (8 tiles) + Mip 1 (32 tiles) = 42 tiles (0x2A0000 bytes) before Mip 0!
-            let mip0_off = if w == 2048 && h == 1024 && Self::readable_bytes(addr.wrapping_add(0x2A0000), want_src) >= want_src {
-                0x2A0000usize
-            } else {
-                0
-            };
+            let mip0_off = Self::detect_sw27_mip0_offset(addr, w, h, want_src);
             let src_addr = addr.wrapping_add(mip0_off);
             let avail = Self::readable_bytes(src_addr, want_src);
             if avail >= 65536 {
@@ -2458,11 +2486,12 @@ impl VkRenderer {
             return None;
         }
         let need = (need_bytes + 15) & !15;
-        // Fast path: already checked this frame, OR static chunk VB (>= 4 KiB) validated recently.
+        // Fast path: already checksum-verified this frame (64-u64 checksum takes ~100ns,
+        // so checking once per frame is instant and never serves stale reused ring-buffer VBs!).
         if let Some(entry) = self.guest_vb_cache.get_mut(&addr) {
             if entry.3 >= need {
                 let last_chk = self.guest_vb_checked.get(&addr).copied().unwrap_or(0);
-                if last_chk == self.frame_no || (need >= 4096 && self.frame_no.saturating_sub(last_chk) < 60) {
+                if last_chk == self.frame_no {
                     entry.5 = self.frame_no;
                     return Some(entry.0);
                 }
@@ -2556,7 +2585,7 @@ impl VkRenderer {
         if let Some(entry) = self.guest_ib_cache.get_mut(&addr) {
             if entry.3 >= need {
                 let last_chk = self.guest_ib_checked.get(&addr).copied().unwrap_or(0);
-                if last_chk == self.frame_no || (need >= 4096 && self.frame_no.saturating_sub(last_chk) < 60) {
+                if last_chk == self.frame_no {
                     entry.5 = self.frame_no;
                     return Some(entry.0);
                 }
@@ -2951,8 +2980,8 @@ impl VkRenderer {
                                     } else {
                                         (((w as usize) + 127) / 128) * (((h as usize) + 127) / 128) * 65536
                                     };
-                                    let mip0_off = if sw_mode == 27 && w == 2048 && h == 1024 && Self::readable_bytes(a.wrapping_add(0x2A0000), want_src) >= want_src {
-                                        0x2A0000usize
+                                    let mip0_off = if sw_mode == 27 {
+                                        Self::detect_sw27_mip0_offset(a, w, h, want_src)
                                     } else {
                                         0
                                     };
@@ -3158,6 +3187,20 @@ impl VkRenderer {
             let dump = dump_dir.is_some()
                 && (n % 120 == 60 || n % 120 == 61 || ((gverts.len() > 5000 || gi_max > 5000) && n % 30 == 0))
                 && self.ensure_staging((ew * eh * 4) as usize);
+
+            // ORBIS_OREUI_DIAG=1: 1-shot draw list dump on 2D UI/OreUI screens (e.g. Create New World).
+            if std::env::var_os("ORBIS_OREUI_DIAG").is_some() && gens.len() >= 10 && gens.len() <= 200 && n % 60 == 0 {
+                static OREUI_DUMPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                if OREUI_DUMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 6 {
+                    eprintln!("[orbis] OREUI-DIAG frame={n} draws={} display={:#x}({}x{})", gens.len(), display.0, display.1, display.2);
+                    for (i, gd) in gens.iter().take(80).enumerate() {
+                        eprintln!(
+                            "[orbis]   #{i:02}: rt={:#x}({}x{}) ps={:#x} blend={:#x} dctl={:#x} wm={:#x} prim={} sc={:?} v={} i={} tex={:x?}",
+                            gd.rt.0, gd.rt.1, gd.rt.2, gd.key.0, gd.blend, gd.depth, gd.wmask, gd.prim, gd.scissor, gd.vertex_count, gd.index_count, gd.tex
+                        );
+                    }
+                }
+            }
 
             // Auto-bypass FrameGen on 2D UI / OreUI / Menu / Inventory screens so UI animations,
             // Inventory slots, and Create New World tabs NEVER bounce or flicker!

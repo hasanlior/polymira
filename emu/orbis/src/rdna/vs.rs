@@ -66,6 +66,7 @@ pub fn is_gpu_vs_eligible(sh: &CompiledShader) -> bool {
 pub fn extract_gpu_vs_draw(
     sh: &CompiledShader,
     vs_ud: &[u32; 24],
+    index_32bit: bool,
     vp: [u32; 8],
     ok: MemCheck,
 ) -> Option<GpuVsDrawData> {
@@ -119,7 +120,8 @@ pub fn extract_gpu_vs_draw(
                 let base_addr = base.wrapping_add(soff).wrapping_add(inst_off) as usize;
                 let raw_need = if bw2 > 0 && bw2 < 0x1000_0000 {
                     if stride > 0 {
-                        (bw2 as usize).saturating_mul(stride as usize)
+                        let recs = if index_32bit { bw2 as usize } else { (bw2 as usize).min(65536) };
+                        recs.saturating_mul(stride as usize)
                     } else {
                         bw2 as usize
                     }

@@ -1276,13 +1276,13 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                     None
                 }
                 Err(e) => {
-                    eprintln!("[orbis] PS {ps_addr:#x}: not translated ({e})");
+                    eprintln!("[orbis] AUTO-HEAL: PS {ps_addr:#x} untranslated ({e}) -> using safe fallback SPIR-V FS");
                     if let Ok(dir) = std::env::var("ORBIS_GEN_DUMP") {
                         let n = crate::rdna::decode_shader(ps_code).last().map(|i| i.pc as usize / 4 + i.words.len()).unwrap_or(0);
                         let b: Vec<u8> = ps_code[..n].iter().flat_map(|w| w.to_le_bytes()).collect();
                         let _ = std::fs::write(format!("{dir}/bad_{ps_addr:x}.bin"), b);
                     }
-                    None
+                    Some((std::sync::Arc::new(crate::rdna::ps::fallback_fs()), false))
                 }
             })
             .clone()
@@ -1352,7 +1352,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
             have_vp as u32,
             0,
         ];
-        if let Some(gpu_data) = crate::rdna::vs::extract_gpu_vs_draw(&vs_sh, &vs_ud, vp, mem_ok) {
+        if let Some(gpu_data) = crate::rdna::vs::extract_gpu_vs_draw(&vs_sh, &vs_ud, gpu.index_32bit, vp, mem_ok) {
             let vs_spv = {
                 thread_local! {
                     static TL_VS: std::cell::RefCell<[(usize, u64, [u32; 8], [u16; 8], Option<(std::sync::Arc<Vec<u32>>, u32)>); 4]> =

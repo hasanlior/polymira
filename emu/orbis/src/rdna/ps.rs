@@ -1051,3 +1051,49 @@ pub fn passthrough_vs() -> Vec<u32> {
     use rspirv::binary::Assemble;
     b.module().assemble()
 }
+
+/// Safe fallback SPIR-V 1.3 fragment shader used by Self-Healing 2.0 when any PS5 game
+/// (e.g. UE4 titles) hits an untranslated RDNA2 pixel shader opcode. Samples binding 0
+/// at `attr[0].xy` so textured/untextured geometry renders visibly instead of dropping/crashing.
+pub fn fallback_fs() -> Vec<u32> {
+    let mut b = Builder::new();
+    b.set_version(1, 3);
+    b.capability(spirv::Capability::Shader);
+    b.memory_model(spirv::AddressingModel::Logical, spirv::MemoryModel::GLSL450);
+
+    let t_void = b.type_void();
+    let t_f32 = b.type_float(32);
+    let t_v2f = b.type_vector(t_f32, 2);
+    let t_v4f = b.type_vector(t_f32, 4);
+    let t_fn = b.type_function(t_void, []);
+
+    let t_img = b.type_image(t_f32, spirv::Dim::Dim2D, 0, 0, 0, 1, spirv::ImageFormat::Unknown, None);
+    let t_samp = b.type_sampled_image(t_img);
+    let p_tex = b.type_pointer(None, spirv::StorageClass::UniformConstant, t_samp);
+    let v_tex0 = b.variable(p_tex, None, spirv::StorageClass::UniformConstant, None);
+    b.decorate(v_tex0, spirv::Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
+    b.decorate(v_tex0, spirv::Decoration::Binding, [Operand::LiteralBit32(0)]);
+
+    let p_in = b.type_pointer(None, spirv::StorageClass::Input, t_v4f);
+    let v_a0 = b.variable(p_in, None, spirv::StorageClass::Input, None);
+    b.decorate(v_a0, spirv::Decoration::Location, [Operand::LiteralBit32(0)]);
+
+    let p_out = b.type_pointer(None, spirv::StorageClass::Output, t_v4f);
+    let v_out = b.variable(p_out, None, spirv::StorageClass::Output, None);
+    b.decorate(v_out, spirv::Decoration::Location, [Operand::LiteralBit32(0)]);
+
+    let main = b.begin_function(t_void, None, spirv::FunctionControl::NONE, t_fn).unwrap();
+    b.begin_block(None).unwrap();
+    let a0 = b.load(t_v4f, None, v_a0, None, []).unwrap();
+    let uv = b.vector_shuffle(t_v2f, None, a0, a0, [0, 1]).unwrap();
+    let s = b.load(t_samp, None, v_tex0, None, []).unwrap();
+    let col = b.image_sample_implicit_lod(t_v4f, None, s, uv, None, []).unwrap();
+    b.store(v_out, col, None, []).unwrap();
+    b.ret().unwrap();
+    b.end_function().unwrap();
+
+    b.entry_point(spirv::ExecutionModel::Fragment, main, "main", [v_a0, v_out]);
+    b.execution_mode(main, spirv::ExecutionMode::OriginUpperLeft, []);
+    use rspirv::binary::Assemble;
+    b.module().assemble()
+}
