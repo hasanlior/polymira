@@ -734,11 +734,77 @@ pub struct SubmitPacket {
     dwords: u32,
 }
 
+/// O(1) flat register bank for PS5 context (`cx`), shader (`sh`), and uconfig (`uc`) registers
+/// (0..1024 in-place with bitmask presence, falling back to `BTreeMap` for rare regs >= 1024).
+struct RegBank {
+    fast: [u32; 1024],
+    present: [u64; 16],
+    extra: BTreeMap<u32, u32>,
+}
+
+impl Default for RegBank {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RegBank {
+    const fn new() -> Self {
+        Self {
+            fast: [0; 1024],
+            present: [0; 16],
+            extra: BTreeMap::new(),
+        }
+    }
+
+    #[inline(always)]
+    fn get(&self, k: &u32) -> Option<&u32> {
+        let idx = *k as usize;
+        if idx < 1024 {
+            if (self.present[idx >> 6] & (1u64 << (idx & 63))) != 0 {
+                Some(&self.fast[idx])
+            } else {
+                None
+            }
+        } else {
+            self.extra.get(k)
+        }
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, k: u32, v: u32) {
+        let idx = k as usize;
+        if idx < 1024 {
+            self.fast[idx] = v;
+            self.present[idx >> 6] |= 1u64 << (idx & 63);
+        } else {
+            self.extra.insert(k, v);
+        }
+    }
+
+    fn iter(&self) -> std::vec::IntoIter<(u32, u32)> {
+        let mut out = Vec::new();
+        for (w_idx, &mask) in self.present.iter().enumerate() {
+            let mut m = mask;
+            while m != 0 {
+                let bit = m.trailing_zeros() as usize;
+                let idx = (w_idx << 6) | bit;
+                out.push((idx as u32, self.fast[idx]));
+                m &= m - 1;
+            }
+        }
+        for (&k, &v) in &self.extra {
+            out.push((k, v));
+        }
+        out.into_iter()
+    }
+}
+
 #[derive(Default)]
 struct GpuState {
-    cx: BTreeMap<u32, u32>,
-    sh: BTreeMap<u32, u32>,
-    uc: BTreeMap<u32, u32>,
+    cx: RegBank,
+    sh: RegBank,
+    uc: RegBank,
     clear_rgba: [f32; 4],
     bound_tex: Option<(usize, u32, u32)>,
     index_base: u64,
@@ -762,9 +828,9 @@ struct GpuState {
 }
 
 static GPU: Mutex<GpuState> = Mutex::new(GpuState {
-    cx: BTreeMap::new(),
-    sh: BTreeMap::new(),
-    uc: BTreeMap::new(),
+    cx: RegBank::new(),
+    sh: RegBank::new(),
+    uc: RegBank::new(),
     clear_rgba: [0.0, 0.0, 0.0, 1.0],
     bound_tex: None,
     index_base: 0,
@@ -1283,10 +1349,10 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     let prim = gpu.uc.get(&0x242).copied().map(|v| if v > 0xFF { v >> 8 } else { v }).unwrap_or(4);
     let indexed_draw = prim != 0x11;
 
-    // Runtime Auto-GPU Vertex Shader Offload: run large 3D triangle-list draws (>= 36 indices)
+    // Runtime Auto-GPU Vertex Shader Offload: run 3D indexed draws (>= 12 indices)
     // natively on the GPU via translated SPIR-V VS (zero CPU per-vertex shading, zero GVBUF bloat!).
     // Shaders quarantined by the live Vulkan watchdog automatically fall back to CPU hoisted VS.
-    if indexed_draw && idx_cnt >= 36 && tr.is_some() && pre.is_some() && !crate::vk::is_gpu_vs_quarantined(vs_addr) {
+    if indexed_draw && idx_cnt >= 12 && tr.is_some() && pre.is_some() && !crate::vk::is_gpu_vs_quarantined(vs_addr) {
         let vp = [
             xs.to_bits(),
             xo.to_bits(),
@@ -1378,7 +1444,12 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 let vs_param_off = (gpu.frame_vs_params.len() * 4) as u32;
                 gpu.frame_vs_params.extend_from_slice(&gpu_data.params);
                 // Copy raw guest indices straight into gibuf (zero CPU dedup / zero GVertex!).
-                let n_out = idx_cnt / 3 * 3;
+                let prim_u8 = prim as u8;
+                let n_out = match prim_u8 {
+                    1 | 3 | 5 => idx_cnt,
+                    2 => idx_cnt / 2 * 2,
+                    _ => idx_cnt / 3 * 3,
+                };
                 let first_index = gpu.frame_gidxs.len() as u32;
                 gpu.frame_gidxs.reserve(n_out);
                 if gpu.index_32bit {
@@ -1392,7 +1463,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                 let g = gpu.frame_gens.len() as u32;
                 let vs_ptr_key = std::sync::Arc::as_ptr(&vs_spv) as usize;
                 gpu.frame_gens.push(crate::vk::GenDraw {
-                    key: (ps_addr ^ (ps_hash as usize) ^ vs_ptr_key.rotate_left(17), blend, wmask | (dkey << 8) | (1 << 24)),
+                    key: (ps_addr ^ (ps_hash as usize) ^ vs_ptr_key.rotate_left(17), blend, wmask | (dkey << 8) | ((prim_u8 as u32) << 16) | (1 << 24)),
                     wmask,
                     spirv: tr_spv,
                     blend,
@@ -1410,6 +1481,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
                     extra_samps,
                     depth: dctl,
                     zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
+                    prim: prim_u8,
                     vs_spirv: Some(vs_spv),
                     vs_addr,
                     vs_param_off,
@@ -1705,9 +1777,14 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         let (x1, y1) = (((br & 0x7FFF) as i32).min(rt.1 as i32), (((br >> 16) & 0x7FFF) as i32).min(rt.2 as i32));
         if x1 > x0 && y1 > y0 { [x0, y0, x1 - x0, y1 - y0] } else { [0, 0, rt.1 as i32, rt.2 as i32] }
     };
-    // Primitive type: triangle list (indexed directly in gibuf!) or rect list (3 corners → 2 triangles).
+    // Primitive type: indexed draw (triangle/line/point list/strip in gibuf!) or rect list (3 corners → 2 triangles).
+    let prim_u8 = if indexed_draw { prim as u8 } else { 4u8 };
     let (vertex_count, first_index, index_count) = if indexed_draw {
-        let n_out = gpu.scratch_remap.len() / 3 * 3;
+        let n_out = match prim_u8 {
+            1 | 3 | 5 => gpu.scratch_remap.len(),
+            2 => gpu.scratch_remap.len() / 2 * 2,
+            _ => gpu.scratch_remap.len() / 3 * 3,
+        };
         let fi = gpu.frame_gidxs.len() as u32;
         gpu.frame_gidxs.reserve(n_out);
         for &r in &gpu.scratch_remap[..n_out] {
@@ -1758,7 +1835,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
     let dkey = dctl & 0x77;
     let g = gpu.frame_gens.len() as u32;
     gpu.frame_gens.push(crate::vk::GenDraw {
-        key: (ps_addr ^ hash as usize, blend, wmask | (dkey << 8)),
+        key: (ps_addr ^ hash as usize, blend, wmask | (dkey << 8) | ((prim_u8 as u32) << 16)),
         wmask,
         spirv: tr.clone(),
         blend,
@@ -1778,6 +1855,7 @@ fn try_generic_draw(gpu: &mut GpuState, idx_off: usize, idx_cnt: usize) -> bool 
         // Depth is cleared through HTILE metadata we do not see: start from the far plane of
         // the compare direction (1.0 for LESS-style tests, 0.0 for GREATER-style ones).
         zclear: if matches!((dctl >> 4) & 7, 4 | 6) { 0.0 } else { 1.0 },
+        prim: prim_u8,
         vs_spirv: None,
         vs_addr: 0,
         vs_param_off: 0,
@@ -1926,7 +2004,7 @@ fn compile_bound_graphics_pipeline(gpu: &GpuState) {
     let _ = crate::vk::with_renderer(|r| r.ensure_shader_pipeline(vs_addr, ps_addr, &vs_spv, &ps_spv, ps_dec.has_image_sample));
 }
 
-fn decode_vsharp(sh: &BTreeMap<u32, u32>, base_reg: u32) -> Option<(usize, usize)> {
+fn decode_vsharp(sh: &RegBank, base_reg: u32) -> Option<(usize, usize)> {
     let w0 = *sh.get(&base_reg)?;
     let w1 = *sh.get(&(base_reg + 1))?;
     let w2 = *sh.get(&(base_reg + 2))?;
@@ -1953,7 +2031,7 @@ pub fn stats() -> (u64, u64, u64) {
     )
 }
 
-fn apply_indirect_regs(bank: &mut BTreeMap<u32, u32>, table_addr: u64, count: u32, trace: bool, name: &str) {
+fn apply_indirect_regs(bank: &mut RegBank, table_addr: u64, count: u32, trace: bool, name: &str) {
     if table_addr == 0 || count == 0 || count > 0x3FFF {
         return;
     }
@@ -2564,7 +2642,7 @@ fn execute_stream(
                     }
                 }
                 if trace {
-                    let cs_regs: Vec<(u32, u32)> = gpu.sh.iter().filter(|(&k, _)| k >= 0x200).map(|(&k, &v)| (k, v)).collect();
+                    let cs_regs: Vec<(u32, u32)> = gpu.sh.iter().filter(|&(k, _)| k >= 0x200).collect();
                     eprintln!("[orbis] GPU:   DISPATCH ({}, {}, {}) cs={cs_addr:#x} sh200={cs_regs:x?}", w[1], w[2], w[3]);
                 }
             }

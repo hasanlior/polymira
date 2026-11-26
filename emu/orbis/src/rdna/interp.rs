@@ -273,13 +273,7 @@ impl CompiledShader {
             match inst.fmt {
                 Fmt::Sopp => !matches!(
                     inst.name,
-                    "s_branch"
-                        | "s_cbranch_scc0"
-                        | "s_cbranch_scc1"
-                        | "s_cbranch_vccz"
-                        | "s_cbranch_vccnz"
-                        | "s_cbranch_execz"
-                        | "s_cbranch_execnz"
+                    "s_cbranch_vccz" | "s_cbranch_vccnz"
                 ),
                 Fmt::Vopc | Fmt::Ds | Fmt::Mimg | Fmt::Flat | Fmt::Global | Fmt::Scratch | Fmt::Vintrp | Fmt::Vop3p => false,
                 Fmt::Vop1 | Fmt::Vop2 | Fmt::Vop3 => {
@@ -1346,18 +1340,37 @@ pub fn hoist_vs_draw(sh: &CompiledShader, vs_ud: &[u32; 24], max_ix: u32, ok: Me
         }
     };
 
-    for inst in &sh.insts {
+    let mut ip = 0usize;
+    let mut steps = 0usize;
+    let max_steps = sh.insts.len().saturating_mul(8).max(64);
+    while ip < sh.insts.len() {
+        steps += 1;
+        if steps > max_steps {
+            return None;
+        }
+        let inst = &sh.insts[ip];
+        ip += 1;
         let w0 = inst.w0();
         let w1 = inst.w1();
         let lit = inst.literal;
         match inst.fmt {
             Fmt::Sop1 | Fmt::Sop2 | Fmt::Sopc | Fmt::Sopk | Fmt::Smem => {
                 step(inst, &mut lane, ok).ok()?;
+                continue;
             }
             Fmt::Sopp => {
-                if inst.name == "s_endpgm" {
-                    break;
+                match step(inst, &mut lane, ok).ok()? {
+                    Flow::Next => {}
+                    Flow::End => break,
+                    Flow::Branch(rel) => {
+                        let next_pc = (inst.pc as i64) + 4 + (rel as i64) * 4;
+                        if next_pc < 0 {
+                            return None;
+                        }
+                        ip = sh.idx_of(next_pc as u32)?;
+                    }
                 }
+                continue;
             }
             Fmt::Exp => {
                 let target = ((w0 >> 4) & 0x3F) as u8;

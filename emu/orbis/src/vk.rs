@@ -70,6 +70,8 @@ pub struct GenDraw {
     pub depth: u32,
     /// DB_DEPTH_CLEAR: value a cleared depth buffer starts with.
     pub zclear: f32,
+    /// VGT_PRIMITIVE_TYPE (1=POINT_LIST, 2=LINE_LIST, 3=LINE_STRIP, 4=TRIANGLE_LIST, 5=TRIANGLE_STRIP).
+    pub prim: u8,
     /// Optional GPU-translated SPIR-V vertex shader (`rdna::vs::translate`).
     pub vs_spirv: Option<std::sync::Arc<Vec<u32>>>,
     /// Guest VA of the vertex shader (for runtime auto-heal quarantine if GPU-VS stalls/faults).
@@ -2274,7 +2276,7 @@ impl VkRenderer {
                 }
                 if nz_cnt > 0 {
                     let src = std::slice::from_raw_parts(src_addr as *const u8, avail);
-                    let pixels = crate::tiling::untile_32bpp(src, w, h, 27 | (56 << 8) | (0xFAC << 20));
+                    let mut pixels = crate::tiling::untile_32bpp(src, w, h, 27 | (56 << 8) | (0xFAC << 20));
                     if w == 2048 && h == 1024 {
                         if let Ok(dir) = std::env::var("ORBIS_VK_DUMP") {
                             let bytes = (w as usize) * (h as usize) * 4;
@@ -2296,6 +2298,12 @@ impl VkRenderer {
                             let _ = std::fs::create_dir_all(&dir);
                             let _ = std::fs::write(format!("{dir}/atlas_{w}x{h}.bmp"), bmp);
                         }
+                    }
+                    // Render targets in `self.targets` use `VK_FORMAT_B8G8R8A8_UNORM`, while
+                    // `untile_32bpp` returns `[R, G, B, A]` u32 pixels -> swap R <-> B before upload!
+                    for px in &mut pixels {
+                        let [r, g, b, a] = px.to_le_bytes();
+                        *px = u32::from_le_bytes([b, g, r, a]);
                     }
                     self.reupload_texture(image, w, h, &pixels);
                     self.rt_layouts.insert(addr, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
@@ -2862,7 +2870,12 @@ impl VkRenderer {
                                                 }
                                                 if tw == w && th == h {
                                                     let src = std::slice::from_raw_parts(src_a as *const u8, avail);
-                                                    let pixels = crate::tiling::untile_32bpp(src, w, h, sw);
+                                                    let mut pixels = crate::tiling::untile_32bpp(src, w, h, sw);
+                                                    // `self.targets` uses `VK_FORMAT_B8G8R8A8_UNORM` -> swap R <-> B.
+                                                    for px in &mut pixels {
+                                                        let [r, g, b, a] = px.to_le_bytes();
+                                                        *px = u32::from_le_bytes([b, g, r, a]);
+                                                    }
                                                     self.reupload_texture(img, w, h, &pixels);
                                                     self.rt_layouts.insert(a, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
                                                     self.persistent_rts.insert(a);
@@ -3026,7 +3039,24 @@ impl VkRenderer {
                 && (n % 120 == 60 || n % 120 == 61 || ((gverts.len() > 5000 || gi_max > 5000) && n % 30 == 0))
                 && self.ensure_staging((ew * eh * 4) as usize);
 
+            // Auto-bypass FrameGen on 2D UI / OreUI / Menu / Inventory screens so UI animations,
+            // Inventory slots, and Create New World tabs NEVER bounce or flicker!
+            let mut draws_3d_depth = 0usize;
+            let mut draws_ui_overlay = 0usize;
+            for gd in gens {
+                if (gd.depth & 6) == 6 && (gd.index_count >= 100 || gd.vertex_count >= 100) {
+                    draws_3d_depth += 1;
+                } else if gd.rt.0 == display.0 && (gd.depth & 2) == 0 {
+                    draws_ui_overlay += 1;
+                }
+            }
+            let is_active_3d_gameplay = draws_3d_depth >= 4 && draws_ui_overlay < 45;
+            if !is_active_3d_gameplay {
+                self.fg_has_prev = false;
+            }
+
             let use_fg = !dump
+                && is_active_3d_gameplay
                 && self.fg_mult > 1
                 && self.fg_pipe != vk::Pipeline::null()
                 && self.swap_rp != vk::RenderPass::null()
@@ -3616,7 +3646,14 @@ impl VkRenderer {
                 .vertex_binding_descriptions(&vbind)
                 .vertex_attribute_descriptions(&vattr)
         };
-        let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let topology = match gd.prim {
+            1 => vk::PrimitiveTopology::POINT_LIST,
+            2 => vk::PrimitiveTopology::LINE_LIST,
+            3 => vk::PrimitiveTopology::LINE_STRIP,
+            5 => vk::PrimitiveTopology::TRIANGLE_STRIP,
+            _ => vk::PrimitiveTopology::TRIANGLE_LIST,
+        };
+        let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(topology);
         let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
         let rs = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
