@@ -24,6 +24,31 @@ static CURRENT: AtomicU64 = AtomicU64::new(0);
 static CLEAR_RGBA: Mutex<[f32; 4]> = Mutex::new([0.12, 0.12, 0.12, 1.0]);
 static SPLASH_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SPLASH_IMG: Mutex<Option<(Vec<u32>, u32, u32)>> = Mutex::new(None);
+static SPLASH_START: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Cubic ease-out brightness factor (0.0 -> 1.0 over 450ms) for PS5-style boot splash fade-in.
+fn splash_fade_factor() -> f32 {
+    let start = SPLASH_START.lock().ok().and_then(|g| *g);
+    let Some(t0) = start else { return 1.0 };
+    let t = (t0.elapsed().as_secs_f32() / 0.45).clamp(0.0, 1.0);
+    let inv = 1.0 - t;
+    1.0 - inv * inv * inv
+}
+
+fn fade_bgra(src: &[u32], factor: f32) -> Vec<u32> {
+    if factor >= 0.999 {
+        return src.to_vec();
+    }
+    let scale = (factor.clamp(0.0, 1.0) * 256.0) as u32;
+    src.iter()
+        .map(|&px| {
+            let b = ((px & 0xFF) * scale) >> 8;
+            let g = (((px >> 8) & 0xFF) * scale) >> 8;
+            let r = (((px >> 16) & 0xFF) * scale) >> 8;
+            0xFF00_0000 | (r << 16) | (g << 8) | b
+        })
+        .collect()
+}
 
 pub fn set_clear_color(rgba: [f32; 4]) {
     if let Ok(mut c) = CLEAR_RGBA.lock() {
@@ -66,10 +91,38 @@ pub fn show_os_splash(game_dir: &str) {
         }
         if bgra.len() == (w * h) as usize {
             eprintln!("[orbis] POLYMIRA OS splash: loaded {p} ({w}x{h})");
-            *FRAME.lock().unwrap() = (bgra.clone(), w, h);
+            *FRAME.lock().unwrap() = (vec![0xFF00_0000u32; (w * h) as usize], w, h);
             *SPLASH_IMG.lock().unwrap() = Some((bgra, w, h));
+            *SPLASH_START.lock().unwrap() = Some(std::time::Instant::now());
             SPLASH_ACTIVE.store(true, Ordering::SeqCst);
             start_window();
+            #[cfg(windows)]
+            std::thread::spawn(|| {
+                for _ in 0..32 {
+                    if !SPLASH_ACTIVE.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let factor = splash_fade_factor();
+                    let faded = {
+                        let sp = SPLASH_IMG.lock().unwrap();
+                        sp.as_ref().map(|(px, sw, sh)| (fade_bgra(px, factor), *sw, *sh))
+                    };
+                    if let Some((fpx, sw, sh)) = faded {
+                        let vk_ok = crate::vk::with_renderer(|r| r.upload_and_present_rgba(&fpx, sw, sh)).unwrap_or(false);
+                        *FRAME.lock().unwrap() = (fpx, sw, sh);
+                        if !vk_ok {
+                            let hwnd = WINDOW.load(Ordering::SeqCst) as windows_sys::Win32::Foundation::HWND;
+                            if !hwnd.is_null() {
+                                unsafe { windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 0); }
+                            }
+                        }
+                    }
+                    if factor >= 0.999 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(16));
+                }
+            });
             break;
         }
     }
@@ -94,7 +147,8 @@ pub extern "sysv64" fn open(_user: i32, _bus: i32, _index: i32, _param: *const c
             let hwnd = WINDOW.load(Ordering::SeqCst) as *mut c_void;
             if !hwnd.is_null() {
                 let inst = unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null()) } as *mut c_void;
-                crate::vk::init_window(hwnd, inst, 1280, 720);
+                let (iw, ih) = (WIN_W.load(Ordering::Relaxed).max(1), WIN_H.load(Ordering::Relaxed).max(1));
+                crate::vk::init_window(hwnd, inst, iw, ih);
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -283,7 +337,13 @@ fn present(buf: &Buffer, n: u64) {
             } else if SPLASH_ACTIVE.load(Ordering::SeqCst) {
                 let sp = SPLASH_IMG.lock().unwrap();
                 if let Some((ref px, sw, sh)) = *sp {
-                    crate::vk::with_renderer(|r| r.upload_and_present_rgba(px, sw, sh)).unwrap_or(false)
+                    let factor = splash_fade_factor();
+                    if factor < 0.999 {
+                        let fpx = fade_bgra(px, factor);
+                        crate::vk::with_renderer(|r| r.upload_and_present_rgba(&fpx, sw, sh)).unwrap_or(false)
+                    } else {
+                        crate::vk::with_renderer(|r| r.upload_and_present_rgba(px, sw, sh)).unwrap_or(false)
+                    }
                 } else {
                     crate::vk::with_renderer(|r| r.present_target(buf.addr, clear)).unwrap_or(false)
                 }
@@ -461,15 +521,45 @@ fn start_window() {
             // ORBIS_OFFSCREEN=1: a real window (so Vulkan presents) placed off every monitor,
             // never activated and kept off the taskbar, for automated test runs.
             let offscreen = std::env::var_os("ORBIS_OFFSCREEN").is_some();
+            let want_fs = !offscreen
+                && std::env::var("ORBIS_FULLSCREEN")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+            let (wx, wy, ww, wh, style) = if offscreen {
+                (-30000, -30000, 1296, 759, WS_POPUP | WS_VISIBLE)
+            } else if want_fs {
+                use windows_sys::Win32::Foundation::POINT;
+                use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
+                let mon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+                let mut mi: MONITORINFO = std::mem::zeroed();
+                mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+                let (mx, my, mw, mh) = if GetMonitorInfoW(mon, &mut mi) != 0 {
+                    let r = mi.rcMonitor;
+                    (r.left, r.top, (r.right - r.left).max(640), (r.bottom - r.top).max(480))
+                } else {
+                    (0, 0, GetSystemMetrics(SM_CXSCREEN).max(1280), GetSystemMetrics(SM_CYSCREEN).max(720))
+                };
+                // Save a centered 1280x720 windowed rect so F11 / Alt+Enter cleanly restores windowed mode.
+                let cx = mx + ((mw - 1296) / 2).max(0);
+                let cy = my + ((mh - 759) / 2).max(0);
+                SAVED_STYLE.store(WS_OVERLAPPEDWINDOW | WS_VISIBLE, Ordering::Relaxed);
+                *SAVED_RECT.lock().unwrap_or_else(|e| e.into_inner()) = [cx, cy, cx + 1296, cy + 759];
+                FULLSCREEN.store(true, Ordering::Relaxed);
+                WIN_W.store(mw as u32, Ordering::Relaxed);
+                WIN_H.store(mh as u32, Ordering::Relaxed);
+                (mx, my, mw, mh, WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN)
+            } else {
+                (CW_USEDEFAULT, CW_USEDEFAULT, 1296, 759, WS_OVERLAPPEDWINDOW | WS_VISIBLE)
+            };
             let hwnd = CreateWindowExW(
                 if offscreen { WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE } else { 0 },
                 class.as_ptr(),
                 title.as_ptr(),
-                if offscreen { WS_POPUP | WS_VISIBLE } else { WS_OVERLAPPEDWINDOW | WS_VISIBLE },
-                if offscreen { -30000 } else { CW_USEDEFAULT },
-                if offscreen { -30000 } else { CW_USEDEFAULT },
-                1296,
-                759,
+                style,
+                wx,
+                wy,
+                ww,
+                wh,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 inst,
@@ -481,6 +571,10 @@ fn start_window() {
                 // calling ShowWindow twice guarantees the window becomes visible.
                 if offscreen {
                     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                } else if want_fs {
+                    SetWindowPos(hwnd, HWND_TOP, wx, wy, ww, wh, SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+                    ShowWindow(hwnd, SW_SHOW);
+                    SetForegroundWindow(hwnd);
                 } else {
                     ShowWindow(hwnd, SW_SHOW);
                     ShowWindow(hwnd, SW_SHOWNORMAL);
